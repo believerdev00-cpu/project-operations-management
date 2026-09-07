@@ -4,3 +4,6 @@ node_modules
 .DS_Store
 .env
 .env.local
+
+# Uploaded movement evidence (receipts, invoices, photographs)
+server/uploads

@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import pg from 'pg';
+import { migrateMovementModule } from './movementSchema.js';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
@@ -12,12 +13,12 @@ const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
   throw new Error('DATABASE_URL is required. Configure PostgreSQL before starting the API.');
 }
-
 export const pool = new Pool({
   connectionString,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: {
+    rejectUnauthorized: false
+  }
 });
-
 export async function initDatabase() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS sectors (
@@ -33,7 +34,7 @@ export async function initDatabase() {
       ('farming', 'Farming Activity', 'Farming'),
       ('mining', 'Mining Activity', 'Mining'),
       ('agriculture', 'Agriculture Activity', 'Agriculture'),
-      ('movement', 'Movement & Facilitation', 'Movement')
+      ('movement', 'Logistics & Facilitation', 'Logistics')
     ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, short_name = EXCLUDED.short_name;
   `);
 
@@ -140,7 +141,15 @@ export async function initDatabase() {
     await pool.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()');
     await pool.query("ALTER TABLE approvals ADD COLUMN IF NOT EXISTS sector VARCHAR(50) NOT NULL DEFAULT 'agriculture'");
     await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS project_id VARCHAR(50) REFERENCES projects(id) ON DELETE SET NULL');
+    await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS requested_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL');
       await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()');
+    // A manager raises a need ("the site needs a perimeter fence") and the
+    // Director decides it. These columns carry the case for the request and the
+    // record of who decided, so the outcome is auditable rather than a bare status.
+    await pool.query("ALTER TABLE approvals ADD COLUMN IF NOT EXISTS justification TEXT NOT NULL DEFAULT ''");
+    await pool.query("ALTER TABLE approvals ADD COLUMN IF NOT EXISTS decision_note TEXT NOT NULL DEFAULT ''");
+    await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS decided_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL');
+    await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS decided_at TIMESTAMP');
     await pool.query("ALTER TABLE movements ADD COLUMN IF NOT EXISTS sector VARCHAR(50) NOT NULL DEFAULT 'movement'");
     await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS project_id VARCHAR(50) REFERENCES projects(id) ON DELETE SET NULL');
       await pool.query('ALTER TABLE movements ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()');
@@ -149,17 +158,32 @@ export async function initDatabase() {
     await pool.query('CREATE INDEX IF NOT EXISTS activities_project_created_idx ON activities(project_id, created_at DESC)');
     await pool.query('CREATE INDEX IF NOT EXISTS projects_manager_idx ON projects(manager_id)');
 
+    await migrateMovementModule(pool);
+
   const userCheck = await pool.query('SELECT id FROM users WHERE username = $1', ['admin']);
   if (userCheck.rowCount === 0) {
+    if (!process.env.ADMIN_PASSWORD) {
+      throw new Error('ADMIN_PASSWORD is required to seed the initial admin account.');
+    }
     await pool.query(
       'INSERT INTO users (username, password_hash, name, role) VALUES ($1, $2, $3, $4)',
-      ['admin', bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'admin123', 10), 'Director Admin', 'super-admin']
+      ['admin', bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10), 'Director Admin', 'super-admin']
     );
   } else {
+    // Never re-hash the password here. Overwriting it on every boot reverted any
+    // rotation and pinned the account to whatever .env happened to hold.
+    // Set ADMIN_PASSWORD_RESET=true for a single deliberate recovery boot.
     await pool.query(
-      'UPDATE users SET password_hash = $2, name = $3, role = $4 WHERE username = $1',
-      ['admin', bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'admin123', 10), 'Director Admin', 'super-admin']
+      "UPDATE users SET name = $2, role = 'super-admin' WHERE username = $1",
+      ['admin', 'Director Admin']
     );
+    if (process.env.ADMIN_PASSWORD_RESET === 'true' && process.env.ADMIN_PASSWORD) {
+      await pool.query('UPDATE users SET password_hash = $2 WHERE username = $1', [
+        'admin',
+        bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10)
+      ]);
+      console.warn('ADMIN_PASSWORD_RESET is set: the admin password was reset. Unset it and restart.');
+    }
   }
 
 }
