@@ -8,14 +8,11 @@
 
 import express from 'express';
 import multer from 'multer';
-import fs from 'node:fs';
-import path from 'node:path';
-import crypto from 'node:crypto';
-import { fileURLToPath } from 'node:url';
 import { pool } from '../db/database.js';
 import { ACTIVITY_STATUSES, ACTIVITY_ORIGINS } from '../db/activitySchema.js';
 import { asyncRoute, isAdmin, managerScope, requiredText, validNumber, validateSector } from '../lib/http.js';
 import { round2 } from '../lib/rates.js';
+import { deleteFile, readFile, saveFile, storedFileName } from '../lib/storage.js';
 
 const router = express.Router();
 
@@ -43,8 +40,9 @@ const STATUS_FLOW = {
   'On Hold': ['Assigned', 'Accepted', 'Pending Review', 'Approved', 'Budget Adjusted', 'In Progress', 'Rejected']
 };
 
-const uploadRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads', 'activities');
-fs.mkdirSync(uploadRoot, { recursive: true });
+// Where the bytes go is the storage adapter's business: the local disk on a
+// server, Supabase Storage on a host without one.
+const EVIDENCE_FOLDER = 'activities';
 
 const ALLOWED_MIME = new Set([
   'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/heic', 'image/heif',
@@ -58,14 +56,11 @@ class ActivityError extends Error {
   }
 }
 
+// Files are held in memory and handed to the storage adapter once the request
+// has been authorised, rather than being written to disk by multer before this
+// code has decided whether the caller may upload at all.
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, done) => done(null, uploadRoot),
-    filename: (req, file, done) => {
-      const extension = path.extname(file.originalname).toLowerCase().slice(0, 10);
-      done(null, `${crypto.randomUUID()}${extension.replace(/[^a-z0-9.]/g, '')}`);
-    }
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024, files: 10 },
   fileFilter: (req, file, done) => {
     if (!ALLOWED_MIME.has(file.mimetype)) {
@@ -899,7 +894,9 @@ router.delete('/:id', asyncRoute(async (req, res) => {
   }
   const files = await pool.query('SELECT stored_name FROM activity_evidence WHERE activity_id = $1', [existing.id]);
   const result = await pool.query('DELETE FROM activities WHERE id = $1 RETURNING *', [existing.id]);
-  files.rows.forEach((row) => fs.promises.unlink(path.join(uploadRoot, path.basename(row.stored_name))).catch(() => {}));
+  // The rows are already gone by cascade; the bytes follow. A file that cannot
+  // be removed is not worth failing a completed delete over.
+  await Promise.all(files.rows.map((row) => deleteFile(EVIDENCE_FOLDER, row.stored_name)));
   res.json({ message: 'Activity deleted successfully.', deletedActivity: mapActivity(result.rows[0]) });
 }));
 
@@ -912,16 +909,10 @@ router.get('/:id/evidence', asyncRoute(async (req, res) => {
 }));
 
 router.post('/:id/evidence', upload.array('files', 10), asyncRoute(async (req, res) => {
-  const cleanup = () => (req.files || []).forEach((file) => fs.promises.unlink(file.path).catch(() => {}));
-  let existing;
-  try {
-    existing = await loadActivity(req.params.id, req.user);
-  } catch (error) {
-    cleanup();
-    throw error;
-  }
+  // Nothing has been written anywhere yet -- the files are still in memory --
+  // so a refused upload leaves no bytes behind and needs no cleanup.
+  const existing = await loadActivity(req.params.id, req.user);
   if (!canAttachEvidence(req.user, existing)) {
-    cleanup();
     return res.status(403).json({ message: 'You cannot attach evidence to this activity.' });
   }
   if (!req.files?.length) return res.status(400).json({ message: 'Select at least one receipt, invoice or photograph to upload.' });
@@ -930,16 +921,31 @@ router.post('/:id/evidence', upload.array('files', 10), asyncRoute(async (req, r
   const amount = validNumber(req.body.amount || 0) ? round2(req.body.amount || 0) : 0;
   const note = optionalText(req.body.note, 500);
 
+  // Stored first, recorded second. A file with no row is an orphan nobody sees;
+  // a row with no file is a broken link in the evidence trail, so the write
+  // that can fail goes first and its objects are removed if the rows fail.
+  const stored = [];
+  try {
+    for (const file of req.files) {
+      const storedName = storedFileName(file.originalname);
+      await saveFile(EVIDENCE_FOLDER, storedName, file.buffer, file.mimetype);
+      stored.push({ file, storedName });
+    }
+  } catch (error) {
+    await Promise.all(stored.map((item) => deleteFile(EVIDENCE_FOLDER, item.storedName)));
+    return res.status(502).json({ message: error.message });
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const saved = [];
-    for (const file of req.files) {
+    for (const { file, storedName } of stored) {
       const result = await client.query(
         `INSERT INTO activity_evidence
            (activity_id, kind, original_name, stored_name, mime_type, size_bytes, amount, note, uploaded_by, uploaded_by_name)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-        [existing.id, kind, file.originalname.slice(0, 255), file.filename, file.mimetype, file.size, amount, note, req.user.id, req.user.name]
+        [existing.id, kind, file.originalname.slice(0, 255), storedName, file.mimetype, file.size, amount, note, req.user.id, req.user.name]
       );
       saved.push(mapEvidence(result.rows[0]));
     }
@@ -955,7 +961,7 @@ router.post('/:id/evidence', upload.array('files', 10), asyncRoute(async (req, r
     res.status(201).json(saved);
   } catch (error) {
     await client.query('ROLLBACK');
-    cleanup();
+    await Promise.all(stored.map((item) => deleteFile(EVIDENCE_FOLDER, item.storedName)));
     throw error;
   } finally {
     client.release();
@@ -971,12 +977,14 @@ router.get('/:id/evidence/:evidenceId/file', asyncRoute(async (req, res) => {
   if (!result.rowCount) return res.status(404).json({ message: 'Evidence not found.' });
 
   const record = result.rows[0];
-  const absolute = path.join(uploadRoot, path.basename(record.stored_name));
-  if (!fs.existsSync(absolute)) return res.status(404).json({ message: 'The stored file is missing from the server.' });
+  const file = await readFile(EVIDENCE_FOLDER, record.stored_name);
+  if (!file) return res.status(404).json({ message: 'The stored file is missing from the server.' });
 
   res.type(record.mime_type);
   res.setHeader('Content-Disposition', `inline; filename="${record.original_name.replace(/"/g, '')}"`);
-  fs.createReadStream(absolute).pipe(res);
+  // The disk gives back a stream, remote storage a buffer already in hand.
+  if (Buffer.isBuffer(file)) return res.send(file);
+  return file.pipe(res);
 }));
 
 router.delete('/:id/evidence/:evidenceId', asyncRoute(async (req, res) => {
@@ -989,7 +997,7 @@ router.delete('/:id/evidence/:evidenceId', asyncRoute(async (req, res) => {
   );
   if (!result.rowCount) return res.status(404).json({ message: 'Evidence not found.' });
 
-  fs.promises.unlink(path.join(uploadRoot, path.basename(result.rows[0].stored_name))).catch(() => {});
+  await deleteFile(EVIDENCE_FOLDER, result.rows[0].stored_name);
   await logHistory(pool, existing.id, req.user, [
     { action: 'Evidence removed', field: 'evidence', oldValue: result.rows[0].original_name, newValue: null }
   ]);

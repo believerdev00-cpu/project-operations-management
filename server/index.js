@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import { pathToFileURL } from 'node:url';
 import { initDatabase, pool } from './db/database.js';
 import { sectors } from './data/seedData.js';
 import { authMiddleware, jwtSecret } from './lib/auth.js';
@@ -521,7 +522,27 @@ app.use((error, req, res, next) => {
   res.status(500).json({ message: 'Server or database error.' });
 });
 
-await initDatabase();
-app.listen(port, () => {
-  console.log(`Server running on http://localhost:${port}`);
-});
+// Listen only when this file is the process entry point -- `node server/index.js`,
+// which is what local development and any ordinary host do. Imported instead,
+// which is how a serverless function reaches it, this module just hands the app
+// back: no socket is opened, and no DDL runs.
+//
+// That second part matters. A serverless module is evaluated again on every cold
+// start, so migrating here would race several instances through ALTER TABLE at
+// once. There the schema is brought up to date by `npm run migrate` as a
+// deployment step instead.
+//
+// The test is "am I the entry point", not "am I on Vercel", so this holds on any
+// host rather than depending on one provider's environment variable.
+const runDirectly = Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (runDirectly) {
+  await initDatabase();
+  app.listen(port, () => {
+    console.log(`Server running on http://localhost:${port}`);
+  });
+}
+
+// An Express app is itself a (req, res) handler, which is all a Vercel function
+// has to export.
+export default app;

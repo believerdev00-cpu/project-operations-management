@@ -7,3 +7,6 @@ node_modules
 
 # Uploaded movement evidence (receipts, invoices, photographs)
 server/uploads
+
+# Vercel CLI
+.vercel
