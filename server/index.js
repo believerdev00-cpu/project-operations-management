@@ -10,6 +10,9 @@ import { authMiddleware, jwtSecret } from './lib/auth.js';
 import { asyncRoute, isAdmin, managerScope, requiredText, sectorIds, validNumber, validateSector } from './lib/http.js';
 import movementRouter from './routes/movements.js';
 import rateRouter from './routes/rates.js';
+import userRouter from './routes/users.js';
+import activityRouter from './routes/activities.js';
+import reportRouter from './routes/reports.js';
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -57,26 +60,6 @@ function mapApproval(row) {
   };
 }
 
-function mapActivity(row) {
-  return {
-    id: row.id,
-    projectId: row.project_id,
-    sector: row.sector,
-    category: row.category,
-    activity: row.activity,
-    description: row.description,
-    quantity: Number(row.quantity),
-    costUsd: Number(row.cost_usd),
-    costRwf: Number(row.cost_rwf),
-    costCdf: Number(row.cost_cdf),
-    signed: row.signed,
-    approved: row.approved,
-    status: row.status,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at
-  };
-}
-
 app.use(helmet());
 app.use(cors({ origin: allowedOrigins, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
@@ -116,6 +99,11 @@ app.get('/api/managers', authMiddleware, asyncRoute(async (req, res) => {
   const result = await pool.query(`SELECT id, username, name, role, sector FROM users WHERE role = 'manager'${scope} ORDER BY name`, values);
   res.json(result.rows);
 }));
+
+// The account register, the Director's user-management surface: the roster, the
+// roles, who reports to whom, and the working areas. Password hashes never
+// leave the database, so a password is reset, never read back.
+app.use('/api/users', authMiddleware, userRouter);
 
 app.post('/api/managers', authMiddleware, asyncRoute(async (req, res) => {
   if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the administrator can add managers.' });
@@ -176,6 +164,30 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
     pool.query(`SELECT COUNT(*)::int AS active_operations FROM activities WHERE status = 'In Progress'${andSector}`, scopeValues)
   ]);
 
+  // The headcount is the Director's figure: a sector manager sees the records of
+  // their own area, not the size of the organisation.
+  const registeredUsers = isAdmin(req.user)
+    ? (await pool.query('SELECT COUNT(*)::int AS total FROM users')).rows[0].total
+    : null;
+
+  // What is waiting on a decision. A manager sees the same two counts for their
+  // own area, so they can tell what is still with the Director.
+  const reviewQueue = await pool.query(
+    `SELECT COUNT(*) FILTER (WHERE status = 'Pending Review')::int AS activity_reviews_pending,
+            COUNT(*) FILTER (WHERE completion_submitted_at IS NOT NULL AND status <> 'Completed')::int AS completions_awaiting_review,
+            COUNT(*) FILTER (WHERE assigned_to = $${scopeValues.length + 1} AND status IN ('Assigned', 'Needs Correction'))::int AS assigned_to_me
+     FROM activities${whereSector}`,
+    [...scopeValues, req.user.id]
+  );
+
+  // Budget changes a manager has asked for and nobody has answered yet.
+  const budgetQueue = await pool.query(
+    `SELECT COUNT(*)::int AS budget_changes_pending
+     FROM activity_budget_requests b JOIN activities a ON a.id = b.activity_id
+     WHERE b.status = 'Pending'${scoped ? ' AND a.sector = $1' : ''}`,
+    scopeValues
+  );
+
   // Same figures again, split per sector, so the director can compare farming,
   // mining, agriculture and logistics side by side. A sector manager is scoped
   // as everywhere else and simply gets a single row back.
@@ -233,6 +245,11 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
     status: 'online',
     org: 'Rwanda Operations Group',
     summary: {
+      registeredUsers,
+      activityReviewsPending: reviewQueue.rows[0].activity_reviews_pending,
+      completionsAwaitingReview: reviewQueue.rows[0].completions_awaiting_review,
+      budgetChangesPending: budgetQueue.rows[0].budget_changes_pending,
+      activitiesAssignedToMe: reviewQueue.rows[0].assigned_to_me,
       totalProjects: project.total_projects,
       activeOperations: operationsStats.rows[0].active_operations,
       approvalsPending: approval.pending_approvals,
@@ -487,160 +504,17 @@ app.delete('/api/approvals/:id', authMiddleware, asyncRoute(async (req, res) => 
 app.use('/api/movements', movementRouter);
 app.use('/api/rates', rateRouter);
 
-app.get('/api/activities', authMiddleware, asyncRoute(async (req, res) => {
-  const { projectId, sector, status, search, limit } = req.query;
-  const values = [];
-  const filters = [];
+// The activity register and its review workflow: requests, the Director's
+// decision, evidence and the audit trail.
+app.use('/api/activities', authMiddleware, activityRouter);
 
-  if (projectId && projectId !== 'All') {
-    values.push(projectId);
-    filters.push(`project_id = $${values.length}`);
-  }
-  if (sector && sector !== 'All') {
-    values.push(sector);
-    filters.push(`sector = $${values.length}`);
-  }
-  if (status && status !== 'All') {
-    values.push(status);
-    filters.push(`status = $${values.length}`);
-  }
-  if (search) {
-    values.push(`%${search}%`);
-    filters.push(`(activity ILIKE $${values.length} OR description ILIKE $${values.length} OR category ILIKE $${values.length})`);
-  }
-  managerScope(req.user, 'sector', values, filters);
+// Period reporting -- weekly, monthly, or an exact custom range -- over the
+// activity register, with the spreadsheet and PDF exports of the same figures.
+// A manager may now ask for a report and is scoped to their own working area
+// rather than refused outright; the Director sees every area. Screen and export
+// share one query, so an export can never show more than the screen does.
+app.use('/api/reports', authMiddleware, reportRouter);
 
-  const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
-  const requestedLimit = Number(limit || 5);
-  const safeLimit = Number.isInteger(requestedLimit) && requestedLimit > 0 && requestedLimit <= 100 ? requestedLimit : 5;
-  values.push(safeLimit);
-  const result = await pool.query(`SELECT * FROM activities ${where} ORDER BY created_at DESC LIMIT $${values.length}`, values);
-  res.json(result.rows.map(mapActivity));
-}));
-
-app.get('/api/reports/activities', authMiddleware, asyncRoute(async (req, res) => {
-  if (req.user.role !== 'super-admin') return res.status(403).json({ message: 'Only the administrator can request reports.' });
-
-  const period = req.query.period === 'monthly' ? 'monthly' : 'weekly';
-  const interval = period === 'monthly' ? '1 month' : '7 days';
-  const result = await pool.query(
-    `SELECT a.*, p.name AS project_name
-     FROM activities a
-     JOIN projects p ON p.id = a.project_id
-    WHERE a.created_at >= NOW() - $1::interval${isAdmin(req.user) ? '' : ' AND a.sector = $2'}
-     ORDER BY a.created_at DESC`,
-    isAdmin(req.user) ? [interval] : [interval, req.user.sector]
-  );
-  const activities = result.rows.map((row) => ({ ...mapActivity(row), projectName: row.project_name }));
-
-  res.json({
-    period,
-    generatedAt: new Date().toISOString(),
-    totalActivities: activities.length,
-    completedActivities: activities.filter((activity) => activity.status === 'Completed').length,
-    approvedActivities: activities.filter((activity) => activity.approved).length,
-    signedActivities: activities.filter((activity) => activity.signed).length,
-    totalUsd: activities.reduce((total, activity) => total + activity.costUsd, 0),
-    totalRwf: activities.reduce((total, activity) => total + activity.costRwf, 0),
-    totalCdf: activities.reduce((total, activity) => total + activity.costCdf, 0),
-    activities
-  });
-}));
-
-app.post('/api/activities', authMiddleware, asyncRoute(async (req, res) => {
-  const payload = req.body || {};
-  if (!payload.projectId || !payload.category || !payload.activity) {
-    return res.status(400).json({ message: 'Project, category, and activity are required.' });
-  }
-  if (!requiredText(payload.category) || !requiredText(payload.activity) || !validNumber(payload.quantity, { minimum: 0.01 }) || !validNumber(payload.costUsd) || !validNumber(payload.costRwf) || !validNumber(payload.costCdf ?? payload.costFco)) {
-    return res.status(400).json({ message: 'Category, activity, quantity, USD, RWF, and CDF values must be valid. Quantity must be greater than zero.' });
-  }
-  if (!['Pending', 'In Progress', 'Completed', 'Cancelled'].includes(payload.status || 'Pending')) {
-    return res.status(400).json({ message: 'Activity status is invalid.' });
-  }
-
-  const projectResult = await pool.query(`SELECT id, sector FROM projects WHERE id = $1${isAdmin(req.user) ? '' : ' AND sector = $2'}`, isAdmin(req.user) ? [payload.projectId] : [payload.projectId, req.user.sector]);
-  if (!projectResult.rowCount) return res.status(404).json({ message: 'Select an existing project before assigning an activity.' });
-
-  // The activity carries its own sector, defaulting to the project's. A sector
-  // manager stays confined to their own sector, otherwise they would file
-  // records that their own sector-scoped queries can never read back.
-  const sector = validateSector(payload.sector, projectResult.rows[0].sector);
-  if (!sector) return res.status(400).json({ message: 'Activity sector is invalid.' });
-  if (!isAdmin(req.user) && sector !== req.user.sector) {
-    return res.status(403).json({ message: 'You can only record activities in your own sector.' });
-  }
-
-  const id = payload.id || `ACT-${Date.now()}`;
-  const result = await pool.query(
-    `INSERT INTO activities
-      (id, project_id, sector, category, activity, description, quantity, cost_usd, cost_rwf, cost_cdf, signed, approved, status)
-         SELECT $1, p.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
-     FROM projects p WHERE p.id = $13
-     RETURNING *`,
-    [id, sector, payload.category, payload.activity, payload.description || '', Number(payload.quantity || 0), Number(payload.costUsd || 0), Number(payload.costRwf || 0), Number(payload.costCdf ?? payload.costFco ?? 0), Boolean(payload.signed), Boolean(payload.approved), payload.status || 'Pending', payload.projectId]
-  );
-
-  if (!result.rowCount) return res.status(404).json({ message: 'Project not found.' });
-  res.status(201).json(mapActivity(result.rows[0]));
-}));
-
-app.put('/api/activities/:id', authMiddleware, asyncRoute(async (req, res) => {
-  const payload = req.body || {};
-  if (!payload.projectId || !payload.category || !payload.activity) {
-    return res.status(400).json({ message: 'Project, category, and activity are required.' });
-  }
-  if (!requiredText(payload.category) || !requiredText(payload.activity) || !validNumber(payload.quantity, { minimum: 0.01 }) || !validNumber(payload.costUsd) || !validNumber(payload.costRwf) || !validNumber(payload.costCdf ?? payload.costFco)) {
-    return res.status(400).json({ message: 'Category, activity, quantity, USD, RWF, and CDF values must be valid. Quantity must be greater than zero.' });
-  }
-  if (!['Pending', 'In Progress', 'Completed', 'Cancelled'].includes(payload.status || 'Pending')) {
-    return res.status(400).json({ message: 'Activity status is invalid.' });
-  }
-
-  const projectResult = await pool.query(`SELECT id, sector FROM projects WHERE id = $1${isAdmin(req.user) ? '' : ' AND sector = $2'}`, isAdmin(req.user) ? [payload.projectId] : [payload.projectId, req.user.sector]);
-  if (!projectResult.rowCount) return res.status(404).json({ message: 'Select an existing project before assigning an activity.' });
-
-  const sector = validateSector(payload.sector, projectResult.rows[0].sector);
-  if (!sector) return res.status(400).json({ message: 'Activity sector is invalid.' });
-  if (!isAdmin(req.user) && sector !== req.user.sector) {
-    return res.status(403).json({ message: 'You can only record activities in your own sector.' });
-  }
-
-  const result = await pool.query(
-    `UPDATE activities
-     SET project_id = $2, sector = $3, category = $4, activity = $5, description = $6,
-         quantity = $7, cost_usd = $8, cost_rwf = $9, cost_cdf = $10,
-         signed = $11, approved = $12, status = $13, updated_at = NOW()
-     WHERE id = $1 RETURNING *`,
-    [req.params.id, payload.projectId, sector, payload.category, payload.activity, payload.description || '', Number(payload.quantity || 0), Number(payload.costUsd || 0), Number(payload.costRwf || 0), Number(payload.costCdf ?? payload.costFco ?? 0), Boolean(payload.signed), Boolean(payload.approved), payload.status || 'Pending']
-  );
-
-  if (!result.rowCount) return res.status(404).json({ message: 'Activity not found.' });
-  res.json(mapActivity(result.rows[0]));
-}));
-
-app.patch('/api/activities/:id/status', authMiddleware, asyncRoute(async (req, res) => {
-  const allowedStatuses = ['Pending', 'In Progress', 'Completed', 'Cancelled'];
-  const { status } = req.body || {};
-  if (!allowedStatuses.includes(status)) {
-    return res.status(400).json({ message: 'Activity status is invalid.' });
-  }
-
-  const result = await pool.query(
-    `UPDATE activities SET status = $2, approved = CASE WHEN $2 = 'Completed' THEN TRUE ELSE approved END, updated_at = NOW()
-     WHERE id = $1${isAdmin(req.user) ? '' : ' AND sector = $3'} RETURNING *`,
-    isAdmin(req.user) ? [req.params.id, status] : [req.params.id, status, req.user.sector]
-  );
-
-  if (!result.rowCount) return res.status(404).json({ message: 'Activity not found.' });
-  res.json(mapActivity(result.rows[0]));
-}));
-
-app.delete('/api/activities/:id', authMiddleware, asyncRoute(async (req, res) => {
-  const result = await pool.query(`DELETE FROM activities WHERE id = $1${isAdmin(req.user) ? '' : ' AND sector = $2'} RETURNING *`, isAdmin(req.user) ? [req.params.id] : [req.params.id, req.user.sector]);
-  if (!result.rowCount) return res.status(404).json({ message: 'Activity not found.' });
-  res.json({ message: 'Activity deleted successfully.', deletedActivity: mapActivity(result.rows[0]) });
-}));
 
 app.use((error, req, res, next) => {
   console.error(error);

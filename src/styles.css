@@ -222,3 +222,88 @@ table select { min-width: 130px; min-height: 34px; padding: 5px 7px; font-size: 
   .totals-strip .total-block:last-child { border-bottom: 0; padding-bottom: 0; }
   .form-field-wide { grid-column: auto; }
 }
+
+.role-badge { display: inline-flex; white-space: nowrap; padding: 5px 8px; border-radius: 999px; color: var(--navy); background: var(--blue-soft); font-size: .68rem; font-weight: 800; }
+.role-badge.role-admin { color: white; background: var(--navy); }
+
+/* Activity review: the request as submitted, the decision taken on it, and the
+   requested-versus-approved comparison the Director works from. */
+.activity-review .panel-header h2 { margin-top: 4px; }
+.material-list { margin: 6px 0 0; padding-left: 20px; color: var(--ink); font-size: .82rem; line-height: 1.7; }
+.material-list li { margin-bottom: 2px; }
+
+.budget-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 16px 0 4px; }
+.budget-block { padding: 12px 14px; border: 1px solid var(--line); border-radius: 7px; background: #fbfcfd; }
+.budget-block span { display: block; color: var(--muted); font-size: .68rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.budget-block strong { display: block; margin-top: 5px; font-size: 1.15rem; }
+.budget-block small { display: block; margin-top: 4px; color: var(--muted); font-size: .7rem; }
+.budget-block.budget-adjusted { border-color: #f0c98a; background: #fff9ef; }
+.budget-block.budget-adjusted strong { color: #94671c; }
+
+.decision-form { margin-top: 18px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfd; }
+.decision-form .form-section-title { margin-top: 0; }
+.decision-hint { margin: 10px 0 0; color: #94671c; font-size: .78rem; font-weight: 650; }
+.decision-readout { margin-top: 18px; }
+.admin-note { padding: 10px 12px; border-left: 3px solid var(--blue); background: var(--blue-soft); font-style: italic; }
+.completion-note { max-width: 320px; }
+.awaiting-flag { display: block; margin-top: 4px; color: #94671c; font-size: .66rem; font-weight: 800; }
+.review-row { cursor: pointer; }
+.review-row:hover { background: var(--blue-soft); }
+
+@media (max-width: 800px) { .budget-strip { grid-template-columns: 1fr; } }
+
+/* Assignment: who carries the work out, by when, and how that deadline stands.
+   A date on its own says nothing until it is measured against today. */
+.assignment-form { margin-top: 14px; }
+.deadline-flag { display: block; margin-top: 3px; font-size: .66rem; font-weight: 800; }
+.deadline-overdue { color: var(--red); }
+.deadline-due-soon { color: #94671c; }
+.detail-facts .deadline-flag { font-weight: 700; }
+
+/* Reports: the period pickers, the two summary blocks and the details table.
+   All of it reuses the panel, metric and table styles the rest of the app
+   already uses -- only the grid widths and the notes column are new. */
+.metric-grid-6 { grid-template-columns: repeat(6, 1fr); }
+.budget-strip-4 { grid-template-columns: repeat(4, 1fr); }
+
+.report-picker { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 14px; margin-top: 16px; padding: 16px; background: white; border: 1px solid var(--line); border-radius: 5px; }
+.report-picker .form-field { min-width: 190px; }
+.report-picker button { min-height: 42px; }
+.report-hint { color: #94671c; font-size: .78rem; font-weight: 650; }
+
+.report-result-body { margin-top: 18px; }
+.report-meta { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 14px; padding: 14px; background: white; border: 1px solid var(--line); border-radius: 5px; }
+.report-meta strong { display: block; font-size: .95rem; }
+.report-meta span { display: block; margin-top: 4px; color: var(--muted); font-size: .78rem; }
+.report-result-body .metric-grid { margin-top: 0; }
+
+/* The notes column carries the budget history, so it is the one cell allowed
+   to wrap and grow rather than being clipped to a single line. */
+.report-detail-table { min-width: 1180px; }
+.report-note-cell { min-width: 240px; max-width: 340px; white-space: normal; }
+.report-notes { display: grid; gap: 5px; }
+.report-notes .admin-note { display: block; padding: 6px 9px; font-size: .74rem; font-style: italic; }
+.report-notes small { display: block; color: var(--muted); font-size: .7rem; line-height: 1.45; }
+
+@media (max-width: 1100px) {
+  .metric-grid-6 { grid-template-columns: repeat(3, 1fr); }
+  .budget-strip-4 { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 560px) {
+  .metric-grid-6, .budget-strip-4 { grid-template-columns: 1fr; }
+  .report-picker { align-items: stretch; flex-direction: column; }
+}
+
+/* Print puts the report on paper on its own: the sidebar, banners, register and
+   every control disappear, and the table is allowed its full width. The same
+   sheet is what the browser's "Save as PDF" produces. */
+@media print {
+  body * { visibility: hidden; }
+  .report-print-area, .report-print-area * { visibility: visible; }
+  .report-print-area { position: absolute; left: 0; top: 0; width: 100%; margin: 0; padding: 0; background: white; border: 0; box-shadow: none; }
+  .report-controls, .report-controls * { display: none !important; }
+  .report-detail-table { min-width: 0; }
+  .table-wrap { overflow: visible; }
+  table { font-size: .68rem; }
+  @page { size: landscape; margin: 12mm; }
+}
