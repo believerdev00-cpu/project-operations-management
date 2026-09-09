@@ -101,7 +101,9 @@ create table if not exists public.movements (
   sector varchar(50) not null references public.sectors(id),
   purpose varchar(200) not null,
   destination varchar(200) not null,
-  status varchar(50) not null default 'Pending' check (status in ('Pending', 'Approved', 'Ongoing', 'Completed', 'Cancelled')),
+  -- Widened below to the full workflow vocabulary once the approval columns
+  -- exist; this is only the shape a brand-new database starts from.
+  status varchar(50) not null default 'Pending Approval' check (status in ('Pending Approval', 'Approved', 'In Progress', 'Completed', 'Cancelled')),
   cost numeric(18,2) not null default 0 check (cost >= 0),
   category varchar(100) not null,
   created_at timestamptz not null default now(),
@@ -178,10 +180,47 @@ alter table public.movements add column if not exists approved_by integer refere
 alter table public.movements add column if not exists approved_at timestamptz;
 alter table public.movements add column if not exists completed_at timestamptz;
 
+-- Who carries the movement out, and who must approve it. A movement never sits
+-- generically "Pending": approval_required_from names the account it is waiting
+-- on, and approval_status carries the decision separately from the workflow
+-- status. Mirrors server/db/movementSchema.js.
+alter table public.movements add column if not exists assigned_to integer references public.users(id) on delete set null;
+alter table public.movements add column if not exists assigned_at timestamptz;
+alter table public.movements add column if not exists admin_note text not null default '';
+alter table public.movements add column if not exists approval_required boolean not null default true;
+alter table public.movements add column if not exists approval_required_from integer references public.users(id) on delete set null;
+alter table public.movements add column if not exists approval_required_role varchar(20);
+alter table public.movements add column if not exists approval_status varchar(20) not null default 'pending';
+alter table public.movements add column if not exists rejection_reason text not null default '';
+alter table public.movements drop constraint if exists movements_approval_status_check;
+alter table public.movements add constraint movements_approval_status_check
+  check (approval_status in ('pending', 'approved', 'rejected'));
+alter table public.movements drop constraint if exists movements_approval_role_check;
+alter table public.movements add constraint movements_approval_role_check
+  check (approval_required_role is null or approval_required_role in ('manager', 'director'));
+
+update public.movements
+   set approval_required_role = 'manager', approval_required_from = assigned_to
+ where approval_required_role is null and assigned_to is not null;
+update public.movements
+   set approval_required_role = 'director',
+       approval_required_from = (select id from public.users where role = 'super-admin' order by id limit 1)
+ where approval_required_role is null;
+update public.movements
+   set approval_status = 'approved',
+       approved_by = coalesce(approved_by, approval_required_from),
+       approved_at = coalesce(approved_at, updated_at)
+ where approval_status = 'pending'
+   and status in ('Approved', 'Funds Released', 'Ongoing', 'In Progress', 'Completed');
+update public.movements set approval_status = 'rejected'
+ where approval_status = 'pending' and status in ('Rejected', 'Cancelled');
+
 -- movements.cost holds the estimated facilitation total (sum of the breakdown).
 alter table public.movements drop constraint if exists movements_status_check;
+update public.movements set status = 'Pending Approval' where status = 'Pending';
+update public.movements set status = 'In Progress' where status = 'Ongoing';
 alter table public.movements add constraint movements_status_check
-  check (status in ('Draft', 'Pending', 'Approved', 'Funds Released', 'Ongoing', 'Completed', 'Rejected', 'Cancelled'));
+  check (status in ('Draft', 'Pending Approval', 'Approved', 'Funds Released', 'In Progress', 'Completed', 'Rejected', 'Cancelled'));
 alter table public.movements drop constraint if exists movements_currency_check;
 alter table public.movements add constraint movements_currency_check
   check (currency in ('RWF', 'USD', 'CDF'));

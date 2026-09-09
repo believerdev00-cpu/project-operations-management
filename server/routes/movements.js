@@ -5,27 +5,32 @@ import { pool } from '../db/database.js';
 import { deleteFile, readFile, saveFile, storedFileName } from '../lib/storage.js';
 import { authMiddleware } from '../lib/auth.js';
 import { asyncRoute, isAdmin, requiredText, validNumber, sectorIds } from '../lib/http.js';
+import { MOVEMENT_STATUSES } from '../db/movementSchema.js';
+import { canApprove, pendingForMeSql, resolveDirector, APPROVER_ROLE_LABELS } from '../lib/approvals.js';
 import { CURRENCIES, convertAmount, getCurrentRate, round2 } from '../lib/rates.js';
 
 const router = express.Router();
 
 export const MOVEMENT_TYPES = ['Staff', 'Equipment', 'Materials', 'Field Operation', 'Other'];
-export const MOVEMENT_STATUSES = ['Draft', 'Pending', 'Approved', 'Funds Released', 'Ongoing', 'Completed', 'Rejected', 'Cancelled'];
+export { MOVEMENT_STATUSES };
 export const EVIDENCE_KINDS = ['Receipt', 'Invoice', 'Fuel Slip', 'Hotel Receipt', 'Transport Ticket', 'Payment Proof', 'Photograph', 'Other'];
 export const EVIDENCE_STATUSES = ['Pending', 'Partial', 'Complete'];
 const COST_FIELDS = ['transport', 'fuel', 'accommodation', 'meals', 'handling', 'other'];
 
+// Statuses that mean the movement is cleared to happen.
+const APPROVED_STATUSES = ['Approved', 'Funds Released', 'In Progress', 'Completed'];
+
 // Which status can follow which. The Director can reinstate a rejected or
 // cancelled request, and can reopen a completed one to correct the final figures.
 const STATUS_FLOW = {
-  Draft: ['Pending', 'Cancelled'],
-  Pending: ['Approved', 'Rejected', 'Cancelled', 'Draft'],
-  Approved: ['Funds Released', 'Ongoing', 'Rejected', 'Cancelled'],
-  'Funds Released': ['Ongoing', 'Completed', 'Cancelled'],
-  Ongoing: ['Completed', 'Cancelled'],
-  Completed: ['Ongoing'],
-  Rejected: ['Pending'],
-  Cancelled: ['Pending']
+  Draft: ['Pending Approval', 'Cancelled'],
+  'Pending Approval': ['Approved', 'Rejected', 'Cancelled', 'Draft'],
+  Approved: ['Funds Released', 'In Progress', 'Rejected', 'Cancelled'],
+  'Funds Released': ['In Progress', 'Completed', 'Cancelled'],
+  'In Progress': ['Completed', 'Cancelled'],
+  Completed: ['In Progress'],
+  Rejected: ['Pending Approval'],
+  Cancelled: ['Pending Approval']
 };
 
 // Where the bytes go is the storage adapter's business: the local disk on a
@@ -121,6 +126,9 @@ export function mapMovement(row) {
     ref: row.ref,
     sector: row.sector,
     relatedArea: row.related_area || null,
+    // The area the movement supports is its department -- Farming, Mining,
+    // Agriculture -- and a standalone movement belongs to Logistics itself.
+    department: row.related_area || row.sector,
     projectId: row.project_id || null,
     movementType: row.movement_type,
     purpose: row.purpose,
@@ -165,6 +173,27 @@ export function mapMovement(row) {
           balanceReturn: convertAmount(round2(fundsReleased - actualExpense), currency, rwfPerUsd, cdfPerUsd)
         }
       : null,
+    adminNote: row.admin_note || '',
+    rejectionReason: row.rejection_reason || '',
+    // Whether an external partner in this operation may see it -- one of the
+    // three conditions, alongside being approved and in their operation.
+    externallyVisible: row.externally_visible !== false,
+    assignedTo: row.assigned_to ?? null,
+    assignedToName: row.assigned_to_name ?? null,
+    assignedAt: row.assigned_at ?? null,
+
+    // ---- who must approve this, and what they decided ----------------------
+    approvalRequired: row.approval_required !== false,
+    approvalRequiredFrom: row.approval_required_from ?? null,
+    approvalRequiredFromName: row.approval_required_from_name ?? null,
+    // The approver's own role and area, so the screen can name them the way a
+    // reader recognises them rather than as a bare id.
+    approvalRequiredFromRole: row.approval_required_from_role ?? null,
+    approvalRequiredFromSector: row.approval_required_from_sector ?? null,
+    approvalRequiredRole: row.approval_required_role ?? null,
+    approvalRequiredLabel: APPROVER_ROLE_LABELS[row.approval_required_role] || null,
+    approvalStatus: row.approval_status || 'pending',
+
     createdBy: row.created_by,
     createdByName: row.created_by_name || null,
     approvedBy: row.approved_by,
@@ -180,10 +209,15 @@ const SELECT_MOVEMENT = `
   SELECT m.*,
          creator.name AS created_by_name,
          approver.name AS approved_by_name,
+         req.name AS approval_required_from_name, req.role AS approval_required_from_role,
+         req.sector AS approval_required_from_sector,
+         holder.name AS assigned_to_name,
          (SELECT COUNT(*) FROM movement_evidence e WHERE e.movement_id = m.id) AS evidence_count
   FROM movements m
   LEFT JOIN users creator ON creator.id = m.created_by
-  LEFT JOIN users approver ON approver.id = m.approved_by`;
+  LEFT JOIN users approver ON approver.id = m.approved_by
+  LEFT JOIN users req ON req.id = m.approval_required_from
+  LEFT JOIN users holder ON holder.id = m.assigned_to`;
 
 // Admin sees everything. A manager assigned to the Movement area sees the whole
 // module; a manager of another area sees the movements that supported it
@@ -307,11 +341,15 @@ function stringify(value) {
   return String(value);
 }
 
+// The usual scope, widened by anything waiting on this user's own approval:
+// an approver named on a record must be able to open the record they are being
+// asked to decide, even when it sits outside the area they normally read.
 async function loadMovement(id, user) {
   const values = [id];
   const scope = visibilityScope(user, values);
+  const reachable = scope ? `(${scope} OR ${pendingForMeSql(user, values, 'm')})` : '';
   const result = await pool.query(
-    `${SELECT_MOVEMENT} WHERE m.id = $1${scope ? ` AND ${scope}` : ''}`,
+    `${SELECT_MOVEMENT} WHERE m.id = $1${reachable ? ` AND ${reachable}` : ''}`,
     values
   );
   if (!result.rowCount) throw new MovementError(404, 'Movement not found.');
@@ -321,21 +359,29 @@ async function loadMovement(id, user) {
 function canEdit(user, row) {
   if (isAdmin(user)) return true;
   // A movement officer may correct their own request only while it is still
-  // theirs to change; once it is with the Director it is read-only to them.
+  // theirs to change; once it is with its approver it is read-only to them.
   return user.sector === 'movement'
     && row.created_by === user.id
-    && ['Draft', 'Pending'].includes(row.status);
+    && ['Draft', 'Pending Approval'].includes(row.status);
 }
 
 router.use(authMiddleware);
 
 router.get('/', asyncRoute(async (req, res) => {
-  const { status, relatedArea, currency, destination, personTeam, movementType, search, dateFrom, dateTo, limit } = req.query;
+  const { status, relatedArea, currency, destination, personTeam, movementType, search, dateFrom, dateTo, limit, awaiting } = req.query;
   const values = [];
   const filters = [];
 
-  const scope = visibilityScope(req.user, values);
-  if (scope) filters.push(scope);
+  // "What I Need to Approve", built from the signed-in user rather than a role:
+  // approval_required_from = me AND approval_status = pending. The usual area
+  // scope is not applied on top of it -- a named approver can always see what
+  // they are being asked to decide.
+  if (awaiting === 'approval') {
+    filters.push(pendingForMeSql(req.user, values, 'm'));
+  } else {
+    const scope = visibilityScope(req.user, values);
+    if (scope) filters.push(scope);
+  }
 
   if (status && status !== 'All') {
     if (!MOVEMENT_STATUSES.includes(status)) return res.status(400).json({ message: 'Status filter is invalid.' });
@@ -403,10 +449,10 @@ router.get('/summary', asyncRoute(async (req, res) => {
     pool.query(
       `SELECT COUNT(*)::int AS total,
               COUNT(*) FILTER (WHERE m.status = 'Draft')::int AS draft,
-              COUNT(*) FILTER (WHERE m.status = 'Pending')::int AS pending,
+              COUNT(*) FILTER (WHERE m.status = 'Pending Approval')::int AS pending,
               COUNT(*) FILTER (WHERE m.status = 'Approved')::int AS approved,
               COUNT(*) FILTER (WHERE m.status = 'Funds Released')::int AS funds_released,
-              COUNT(*) FILTER (WHERE m.status = 'Ongoing')::int AS ongoing,
+              COUNT(*) FILTER (WHERE m.status = 'In Progress')::int AS ongoing,
               COUNT(*) FILTER (WHERE m.status = 'Completed')::int AS completed,
               COUNT(*) FILTER (WHERE m.status = 'Rejected')::int AS rejected,
               COUNT(*) FILTER (WHERE m.status = 'Cancelled')::int AS cancelled
@@ -520,15 +566,43 @@ router.post('/', asyncRoute(async (req, res) => {
   }
   const payload = readMovementPayload(req.body || {});
 
-  const status = req.body?.status === 'Draft' ? 'Draft' : 'Pending';
+  const isDraft = req.body?.status === 'Draft';
   const rate = await getCurrentRate(pool);
   const overrideRate = readRateOverride(req.body, req.user);
+
+  // Who carries the movement out. When the Director names an account, that
+  // account is the one who must approve it; otherwise the Director does.
+  let assignedTo = req.body?.assignedTo ? Number(req.body.assignedTo) : null;
+  if (assignedTo) {
+    if (!isAdmin(req.user)) throw new MovementError(403, 'Only the Director can assign a movement to somebody.');
+    const holder = await pool.query('SELECT id FROM users WHERE id = $1', [assignedTo]);
+    if (!holder.rowCount) throw new MovementError(400, 'The person this movement is assigned to does not exist.');
+  }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const ref = await nextReference(client);
     const id = `MOV-${Date.now()}-${crypto.randomInt(1000, 9999)}`;
+
+    // Every movement names its approver at the moment it is created, so it is
+    // never merely "Pending" with nobody attached.
+    const approvalRequired = isAdmin(req.user) ? req.body?.approvalRequired !== false : true;
+    let approvalRole = null;
+    let approvalFrom = null;
+    if (approvalRequired) {
+      if (assignedTo) {
+        approvalRole = 'manager';
+        approvalFrom = assignedTo;
+      } else {
+        const director = await resolveDirector(client);
+        if (!director) throw new MovementError(500, 'No Director account exists to approve this movement.');
+        approvalRole = 'director';
+        approvalFrom = director.id;
+      }
+    }
+    const status = isDraft ? 'Draft' : (approvalRequired ? 'Pending Approval' : 'Approved');
+    const approvalStatus = approvalRequired ? 'pending' : 'approved';
 
     const result = await client.query(
       `INSERT INTO movements (
@@ -537,14 +611,21 @@ router.post('/', asyncRoute(async (req, res) => {
          currency, status, category, notes,
          cost_transport, cost_fuel, cost_accommodation, cost_meals, cost_handling, cost_other,
          cost, funds_released, actual_expense, evidence_status,
-         fx_rwf_per_usd, fx_cdf_per_usd, fx_source, fx_recorded_at, created_by
+         fx_rwf_per_usd, fx_cdf_per_usd, fx_source, fx_recorded_at, created_by,
+         assigned_to, assigned_at,
+         approval_required, approval_required_from, approval_required_role, approval_status,
+         approved_by, approved_at
        ) VALUES (
          $1, $2, 'movement', $3, $4, $5, $6, $7,
          $8, $9, $10, $11, $12,
          $13, $14, $15, $16,
          $17, $18, $19, $20, $21, $22,
          $23, 0, 0, 'Pending',
-         $24, $25, $26, NOW(), $27
+         $24, $25, $26, NOW(), $27,
+         $28, CASE WHEN $28::int IS NULL THEN NULL ELSE NOW() END,
+         $29, $30, $31, $32::text,
+         CASE WHEN $32::text = 'approved' THEN $27::int ELSE NULL END,
+         CASE WHEN $32::text = 'approved' THEN NOW() ELSE NULL END
        ) RETURNING *`,
       [
         id, ref, payload.relatedArea, payload.movementType, payload.purpose, payload.origin, payload.destination,
@@ -556,16 +637,22 @@ router.post('/', asyncRoute(async (req, res) => {
         overrideRate?.rwfPerUsd ?? rate.rwfPerUsd,
         overrideRate?.cdfPerUsd ?? rate.cdfPerUsd,
         overrideRate ? 'actual' : 'reference',
-        req.user.id
+        req.user.id,
+        assignedTo,
+        approvalRequired, approvalFrom, approvalRole, approvalStatus
       ]
     );
 
-    await logHistory(client, id, req.user, [
+    const entries = [
       { action: 'Created', field: 'status', oldValue: null, newValue: status },
       { action: 'Estimated facilitation', field: 'estimatedTotal', oldValue: null, newValue: `${payload.currency} ${payload.estimatedTotal}` }
-    ]);
+    ];
+    if (approvalRequired) {
+      entries.push({ action: 'Approval requested', field: 'approvalRequiredFrom', oldValue: null, newValue: String(approvalFrom) });
+    }
+    await logHistory(client, id, req.user, entries);
     await client.query('COMMIT');
-    res.status(201).json(mapMovement(result.rows[0]));
+    res.status(201).json(mapMovement((await pool.query(`${SELECT_MOVEMENT} WHERE m.id = $1`, [result.rows[0].id])).rows[0]));
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -670,7 +757,106 @@ function normaliseValue(value) {
   return String(value);
 }
 
-// Section 6: approve, reject, release funds, run and complete.
+// Approve or reject, taken by the person the record names as its approver.
+//
+// The authorisation is the point: the caller must be approval_required_from (or
+// hold the Director's office when the record names that office). A browser
+// drawing an Approve button on somebody else's record gets a 403 here.
+router.patch('/:id/approval', asyncRoute(async (req, res) => {
+  const existing = await loadMovement(req.params.id, req.user);
+  const payload = req.body || {};
+
+  const action = String(payload.action || '').toLowerCase();
+  if (!['approve', 'reject'].includes(action)) {
+    return res.status(400).json({ message: 'The decision must be approve or reject.' });
+  }
+  if (!existing.approval_required) {
+    return res.status(400).json({ message: 'This movement does not require approval.' });
+  }
+  if (existing.approval_status !== 'pending') {
+    return res.status(409).json({ message: `This movement has already been ${existing.approval_status}.` });
+  }
+  if (existing.status === 'Draft') {
+    return res.status(400).json({ message: 'This movement is still a draft and has not been submitted for approval.' });
+  }
+  if (!canApprove(req.user, existing)) {
+    return res.status(403).json({ message: 'Only the person this movement is waiting on can approve or reject it.' });
+  }
+
+  const rejectionReason = optionalText(payload.rejectionReason ?? payload.reason, 2000);
+  if (action === 'reject' && !rejectionReason) {
+    return res.status(400).json({ message: 'Say why this movement is being rejected.' });
+  }
+
+  // The approver may revise the facilitation estimate as part of the decision;
+  // moving money is the Director's alone, exactly as on the finance route.
+  const budgetGiven = Object.prototype.hasOwnProperty.call(payload, 'approvedBudget')
+    && payload.approvedBudget !== null && payload.approvedBudget !== '';
+  let estimatedTotal = round2(existing.cost);
+  if (budgetGiven) {
+    if (!isAdmin(req.user)) {
+      return res.status(403).json({ message: 'Only the Director can change the budget on a movement.' });
+    }
+    if (!validNumber(payload.approvedBudget)) {
+      return res.status(400).json({ message: 'The approved budget must be a valid non-negative number.' });
+    }
+    estimatedTotal = round2(payload.approvedBudget);
+  }
+
+  const noteGiven = Object.prototype.hasOwnProperty.call(payload, 'adminNote');
+  const adminNote = noteGiven ? optionalText(payload.adminNote, 2000) : (existing.admin_note || '');
+  if (action === 'approve' && budgetGiven && estimatedTotal !== round2(existing.cost) && !adminNote) {
+    return res.status(400).json({ message: 'A note is required when the approved budget differs from the requested budget.' });
+  }
+
+  const approved = action === 'approve';
+  const status = approved ? 'Approved' : 'Rejected';
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `UPDATE movements
+       SET approval_status = $2::text, approved_by = $3, approved_at = NOW(),
+           status = $4::text, cost = $5, admin_note = $6, rejection_reason = $7,
+           updated_at = NOW()
+       WHERE id = $1 AND approval_status = 'pending'
+       RETURNING *`,
+      [
+        existing.id, approved ? 'approved' : 'rejected', req.user.id, status,
+        estimatedTotal, adminNote, approved ? '' : rejectionReason
+      ]
+    );
+    if (!result.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'This movement was decided by somebody else a moment ago.' });
+    }
+    const entries = [];
+    if (budgetGiven && estimatedTotal !== round2(existing.cost)) {
+      entries.push({ action: 'Budget decided', field: 'estimatedTotal', oldValue: existing.cost, newValue: estimatedTotal });
+    }
+    entries.push({
+      action: approved ? 'Approved' : 'Rejected',
+      field: 'approvalStatus', oldValue: 'pending', newValue: approved ? 'approved' : 'rejected'
+    });
+    entries.push({ action: 'Status changed', field: 'status', oldValue: existing.status, newValue: status });
+    if (approved ? adminNote : rejectionReason) {
+      entries.push({ action: 'Note', field: 'reason', oldValue: null, newValue: approved ? adminNote : rejectionReason });
+    }
+    await logHistory(client, existing.id, req.user, entries);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  res.json(mapMovement(await loadMovement(existing.id, req.user)));
+}));
+
+// Section 6: release funds, run and complete. Approving and rejecting go
+// through /approval above, which checks that the caller is the named approver.
 router.patch('/:id/status', asyncRoute(async (req, res) => {
   const existing = await loadMovement(req.params.id, req.user);
   const { status } = req.body || {};
@@ -684,25 +870,45 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
     return res.status(400).json({ message: `A ${existing.status} movement cannot move straight to ${status}.` });
   }
 
-  // A movement officer may only submit their own draft for review.
+  // A movement officer may only submit their own draft for approval.
   const selfSubmit = !isAdmin(req.user)
     && existing.created_by === req.user.id
     && existing.status === 'Draft'
-    && status === 'Pending';
+    && status === 'Pending Approval';
   if (!selfSubmit) requireAdmin(req.user, 'change the status of a movement');
+  // Approving is a decision, not a status edit: it has to name its approver and
+  // be authorised against them, which is what /approval does.
+  if (status === 'Approved' && existing.approval_required && existing.approval_status === 'pending'
+    && !canApprove(req.user, existing)) {
+    return res.status(403).json({ message: 'Only the person this movement is waiting on can approve it.' });
+  }
 
   const fields = ['status = $2', 'updated_at = NOW()'];
   const values = [existing.id, status];
 
-  if (status === 'Approved') {
+  // A status move that clears, refuses or reopens a record carries the approval
+  // trail with it, so the approver's queue and the register never disagree.
+  if (APPROVED_STATUSES.includes(status)) {
     values.push(req.user.id);
-    fields.push(`approved_by = $${values.length}`, 'approved_at = NOW()');
+    fields.push(
+      "approval_status = 'approved'",
+      `approved_by = COALESCE(approved_by, $${values.length})`,
+      'approved_at = COALESCE(approved_at, NOW())',
+      "rejection_reason = ''"
+    );
   }
   if (status === 'Completed') {
     fields.push('completed_at = NOW()');
   }
   if (status === 'Rejected' || status === 'Cancelled') {
-    fields.push('approved_by = NULL', 'approved_at = NULL');
+    fields.push('approved_by = NULL', 'approved_at = NULL', "approval_status = 'rejected'");
+    if (requiredText(req.body.reason)) {
+      values.push(req.body.reason.trim().slice(0, 2000));
+      fields.push(`rejection_reason = $${values.length}`);
+    }
+  }
+  if (status === 'Pending Approval' || status === 'Draft') {
+    fields.push("approval_status = 'pending'", 'approved_by = NULL', 'approved_at = NULL');
   }
 
   // Funds released and the final actual expense are recorded on the transition
@@ -745,13 +951,49 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
     }
     await logHistory(client, existing.id, req.user, entries);
     await client.query('COMMIT');
-    res.json(mapMovement(after));
+    // Reloaded through the joined view: RETURNING * carries no approver or
+    // assignee names, and the client renders those on the detail screen.
+    res.json(mapMovement(await loadMovement(existing.id, req.user)));
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
   } finally {
     client.release();
   }
+}));
+
+// Whether an external business partner in this operation may see this movement.
+// One of three conditions: it must also be approved and belong to their
+// operation, so turning this on publishes nothing that is not approved.
+router.patch('/:id/visibility', asyncRoute(async (req, res) => {
+  const existing = await loadMovement(req.params.id, req.user);
+  requireAdmin(req.user, 'change what external partners can see');
+  const { externallyVisible } = req.body || {};
+  if (typeof externallyVisible !== 'boolean') {
+    return res.status(400).json({ message: 'Say whether this movement should be visible to external partners.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('UPDATE movements SET externally_visible = $2, updated_at = NOW() WHERE id = $1', [existing.id, externallyVisible]);
+    await logHistory(client, existing.id, req.user, [
+      {
+        action: externallyVisible ? 'Made visible to external partners' : 'Hidden from external partners',
+        field: 'externallyVisible',
+        oldValue: existing.externally_visible !== false,
+        newValue: externallyVisible
+      }
+    ]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  res.json(mapMovement(await loadMovement(existing.id, req.user)));
 }));
 
 // Funds and final expenditure can also be corrected without a status change.
@@ -795,7 +1037,9 @@ router.patch('/:id/finance', asyncRoute(async (req, res) => {
     }
     await logHistory(client, existing.id, req.user, entries);
     await client.query('COMMIT');
-    res.json(mapMovement(after));
+    // Reloaded through the joined view: RETURNING * carries no approver or
+    // assignee names, and the client renders those on the detail screen.
+    res.json(mapMovement(await loadMovement(existing.id, req.user)));
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;

@@ -2,6 +2,20 @@
 // Mirrors the trailing section of supabase/schema.sql so a plain PostgreSQL
 // target reaches the same shape without anyone running the Supabase editor.
 
+// The same workflow vocabulary the activity register uses, plus the one state
+// this module needs on its own: money handed over before the trip. There is no
+// bare "Pending" -- a movement waiting on a decision is 'Pending Approval', and
+// the row names the person it is waiting on.
+export const MOVEMENT_STATUSES = [
+  'Draft', 'Pending Approval', 'Approved', 'Funds Released',
+  'In Progress', 'Completed', 'Rejected', 'Cancelled'
+];
+
+const LEGACY_STATUS_MAP = {
+  Pending: 'Pending Approval',
+  Ongoing: 'In Progress'
+};
+
 const statements = [
   `ALTER TABLE movements ADD COLUMN IF NOT EXISTS movement_type VARCHAR(50) NOT NULL DEFAULT 'Other'`,
   `ALTER TABLE movements ADD COLUMN IF NOT EXISTS related_area VARCHAR(50) REFERENCES sectors(id) ON DELETE SET NULL`,
@@ -31,9 +45,56 @@ const statements = [
   `ALTER TABLE movements ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ`,
   `ALTER TABLE movements ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ`,
 
+  // ---- who carries it out, and who must approve it -------------------------
+  //
+  // person_team stays as it was: the free-text name of whoever travels. This is
+  // the account answerable for the movement, which is what the approval routing
+  // and the queue are built from.
+  `ALTER TABLE movements ADD COLUMN IF NOT EXISTS assigned_to INTEGER REFERENCES users(id) ON DELETE SET NULL`,
+  `ALTER TABLE movements ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ`,
+  `ALTER TABLE movements ADD COLUMN IF NOT EXISTS admin_note TEXT NOT NULL DEFAULT ''`,
+  `ALTER TABLE movements ADD COLUMN IF NOT EXISTS approval_required BOOLEAN NOT NULL DEFAULT TRUE`,
+  `ALTER TABLE movements ADD COLUMN IF NOT EXISTS approval_required_from INTEGER REFERENCES users(id) ON DELETE SET NULL`,
+  `ALTER TABLE movements ADD COLUMN IF NOT EXISTS approval_required_role VARCHAR(20)`,
+  `ALTER TABLE movements ADD COLUMN IF NOT EXISTS approval_status VARCHAR(20) NOT NULL DEFAULT 'pending'`,
+  `ALTER TABLE movements ADD COLUMN IF NOT EXISTS rejection_reason TEXT NOT NULL DEFAULT ''`,
+  // What an external business partner may see, on the same terms as the
+  // activity register: their operation, actually approved, and this flag on.
+  `ALTER TABLE movements ADD COLUMN IF NOT EXISTS externally_visible BOOLEAN NOT NULL DEFAULT TRUE`,
+  `ALTER TABLE movements DROP CONSTRAINT IF EXISTS movements_approval_status_check`,
+  `ALTER TABLE movements ADD CONSTRAINT movements_approval_status_check
+     CHECK (approval_status IN ('pending', 'approved', 'rejected'))`,
+  `ALTER TABLE movements DROP CONSTRAINT IF EXISTS movements_approval_role_check`,
+  `ALTER TABLE movements ADD CONSTRAINT movements_approval_role_check
+     CHECK (approval_required_role IS NULL OR approval_required_role IN ('manager', 'director'))`,
+
+  // Back-fill from what the rows already say. A movement handed to a named
+  // account waits on that account; everything else waits on the Director.
+  // Only rows without an approver are touched, so this is safe to run again.
+  `UPDATE movements
+     SET approval_required_role = 'manager', approval_required_from = assigned_to
+   WHERE approval_required_role IS NULL AND assigned_to IS NOT NULL`,
+  `UPDATE movements
+     SET approval_required_role = 'director',
+         approval_required_from = (SELECT id FROM users WHERE role = 'super-admin' ORDER BY id LIMIT 1)
+   WHERE approval_required_role IS NULL`,
+  `UPDATE movements
+     SET approval_status = 'approved',
+         approved_by = COALESCE(approved_by, approval_required_from),
+         approved_at = COALESCE(approved_at, updated_at)
+   WHERE approval_status = 'pending'
+     AND status IN ('Approved', 'Funds Released', 'Ongoing', 'In Progress', 'Completed')`,
+  `UPDATE movements SET approval_status = 'rejected'
+   WHERE approval_status = 'pending' AND status IN ('Rejected', 'Cancelled')`,
+
   `ALTER TABLE movements DROP CONSTRAINT IF EXISTS movements_status_check`,
+  ...Object.entries(LEGACY_STATUS_MAP).map(
+    ([from, to]) => `UPDATE movements SET status = '${to}' WHERE status = '${from}'`
+  ),
+  `UPDATE movements SET status = 'Pending Approval'
+     WHERE status NOT IN (${MOVEMENT_STATUSES.map((status) => `'${status}'`).join(', ')})`,
   `ALTER TABLE movements ADD CONSTRAINT movements_status_check
-     CHECK (status IN ('Draft', 'Pending', 'Approved', 'Funds Released', 'Ongoing', 'Completed', 'Rejected', 'Cancelled'))`,
+     CHECK (status IN (${MOVEMENT_STATUSES.map((status) => `'${status}'`).join(', ')}))`,
   `ALTER TABLE movements DROP CONSTRAINT IF EXISTS movements_currency_check`,
   `ALTER TABLE movements ADD CONSTRAINT movements_currency_check CHECK (currency IN ('RWF', 'USD', 'CDF'))`,
   `ALTER TABLE movements DROP CONSTRAINT IF EXISTS movements_type_check`,
@@ -94,6 +155,12 @@ const statements = [
 
   `CREATE INDEX IF NOT EXISTS movements_related_area_idx ON movements(related_area)`,
   `CREATE INDEX IF NOT EXISTS movements_status_idx ON movements(status)`,
+  `CREATE INDEX IF NOT EXISTS movements_assigned_to_idx ON movements(assigned_to)`,
+  // "What I Need to Approve" reads exactly these two columns together.
+  `CREATE INDEX IF NOT EXISTS movements_approval_queue_idx
+     ON movements(approval_required_from, approval_status)`,
+  `CREATE INDEX IF NOT EXISTS movements_approval_role_idx
+     ON movements(approval_required_role, approval_status)`,
   `CREATE INDEX IF NOT EXISTS movements_departure_idx ON movements(departure_date DESC)`,
   `CREATE INDEX IF NOT EXISTS movement_evidence_movement_idx ON movement_evidence(movement_id, created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS movement_history_movement_idx ON movement_history(movement_id, created_at DESC)`

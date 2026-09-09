@@ -34,10 +34,10 @@ export function sectorName(id) {
 // activity is counted both in its own bucket and as overdue.
 const COMPLETED_STATUSES = ['Completed'];
 const IN_PROGRESS_STATUSES = ['In Progress'];
-const CANCELLED_STATUSES = ['Rejected'];
+const CANCELLED_STATUSES = ['Rejected', 'Cancelled'];
 // Everything still waiting on somebody: not finished, not running, not refused.
 const PENDING_STATUSES = [
-  'Assigned', 'Accepted', 'Pending Review', 'Approved', 'Budget Adjusted', 'Needs Correction', 'On Hold'
+  'Draft', 'Pending Approval', 'Approved', 'Budget Adjusted', 'Needs Correction', 'On Hold'
 ];
 // A deadline only matters while the work can still be done.
 const CLOSED_STATUSES = [...COMPLETED_STATUSES, ...CANCELLED_STATUSES];
