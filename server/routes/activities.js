@@ -1,16 +1,33 @@
-// Activity register and review workflow.
+// Activity register and approval workflow.
 //
-// A manager raises an activity with the budget they need; the Director reviews
-// it, may approve a smaller figure, leaves a note, and sets the status. The
-// requested figure is never overwritten. The manager then does the work,
-// attaches evidence, and hands it back; the Director reviews the evidence and
-// closes the record. Every material change is appended to activity_history.
+// Every activity names the person who must approve it, in
+// approval_required_from, and carries its own approval_status alongside the
+// workflow status. Two routings exist, and they are the same mechanism read
+// from either end:
+//
+//   Director assigns work to a manager -> the manager is approval_required_from
+//     -> it appears in that manager's "What I Need to Approve" -> approve/reject.
+//   Manager raises work needing the Director -> the Director is
+//     approval_required_from -> it appears in the Director's queue, where the
+//     budget can be changed and a note left before approving or rejecting.
+//
+// The requested figure is never overwritten: a changed budget lands in
+// approved_budget so both survive side by side. After approval the manager does
+// the work, attaches evidence, and hands it back; the Director reviews the
+// evidence and closes the record. Every material change is appended to
+// activity_history.
 
 import express from 'express';
 import multer from 'multer';
-import { pool } from '../db/database.js';
+import { pool, safeRollback } from '../db/database.js';
 import { ACTIVITY_STATUSES, ACTIVITY_ORIGINS } from '../db/activitySchema.js';
 import { asyncRoute, isAdmin, managerScope, requiredText, validNumber, validateSector } from '../lib/http.js';
+import { canApprove, pendingForMeSql, resolveDirector, APPROVER_ROLE_LABELS } from '../lib/approvals.js';
+import { PAYMENT_METHODS } from '../db/monthlySchema.js';
+import {
+  DEAD_STATUSES, OVER_BUDGET_MESSAGE, canDeleteExpense, canRecordExpense, cents,
+  fitsRemaining, fromCents
+} from '../lib/monthly.js';
 import { round2 } from '../lib/rates.js';
 import { deleteFile, readFile, saveFile, storedFileName } from '../lib/storage.js';
 
@@ -22,22 +39,22 @@ export const EVIDENCE_STATUSES = ['Pending', 'Partial', 'Complete'];
 
 // Statuses that mean the work is cleared to happen, so the activity counts as
 // approved, and statuses from which finished work may be handed back.
-const APPROVED_STATUSES = ['Assigned', 'Accepted', 'Approved', 'Budget Adjusted', 'In Progress', 'Needs Correction', 'Completed'];
-const WORKABLE_STATUSES = ['Accepted', 'Approved', 'Budget Adjusted', 'In Progress', 'Needs Correction'];
+const APPROVED_STATUSES = ['Approved', 'Budget Adjusted', 'In Progress', 'Needs Correction', 'Completed'];
+const WORKABLE_STATUSES = ['Approved', 'Budget Adjusted', 'In Progress', 'Needs Correction'];
 
 // Which status may follow which. Reopening is deliberate: completed work can go
 // back to the manager if the evidence turns out to be short.
 const STATUS_FLOW = {
-  Assigned: ['Accepted', 'In Progress', 'Budget Adjusted', 'On Hold', 'Rejected'],
-  Accepted: ['In Progress', 'Budget Adjusted', 'On Hold', 'Rejected'],
-  'Pending Review': ['Approved', 'Budget Adjusted', 'Rejected', 'On Hold'],
-  Approved: ['In Progress', 'Completed', 'Needs Correction', 'Budget Adjusted', 'On Hold', 'Rejected'],
-  'Budget Adjusted': ['In Progress', 'Completed', 'Needs Correction', 'Approved', 'On Hold', 'Rejected'],
-  'In Progress': ['Completed', 'Needs Correction', 'Budget Adjusted', 'On Hold', 'Rejected'],
-  'Needs Correction': ['In Progress', 'Completed', 'Budget Adjusted', 'On Hold', 'Rejected'],
+  Draft: ['Pending Approval', 'Cancelled'],
+  'Pending Approval': ['Approved', 'Budget Adjusted', 'Rejected', 'On Hold', 'Cancelled'],
+  Approved: ['In Progress', 'Completed', 'Needs Correction', 'Budget Adjusted', 'On Hold', 'Rejected', 'Cancelled'],
+  'Budget Adjusted': ['In Progress', 'Completed', 'Needs Correction', 'Approved', 'On Hold', 'Rejected', 'Cancelled'],
+  'In Progress': ['Completed', 'Needs Correction', 'Budget Adjusted', 'On Hold', 'Rejected', 'Cancelled'],
+  'Needs Correction': ['In Progress', 'Completed', 'Budget Adjusted', 'On Hold', 'Rejected', 'Cancelled'],
   Completed: ['In Progress', 'Needs Correction'],
-  Rejected: ['Pending Review', 'Assigned'],
-  'On Hold': ['Assigned', 'Accepted', 'Pending Review', 'Approved', 'Budget Adjusted', 'In Progress', 'Rejected']
+  Rejected: ['Pending Approval', 'Draft'],
+  Cancelled: ['Pending Approval', 'Draft'],
+  'On Hold': ['Pending Approval', 'Approved', 'Budget Adjusted', 'In Progress', 'Rejected', 'Cancelled']
 };
 
 // Where the bytes go is the storage adapter's business: the local disk on a
@@ -126,12 +143,51 @@ export function mapActivity(row) {
     requestedEquivalent: equivalents(row, requestedBudget),
     approvedEquivalent: approvedBudget === null ? null : equivalents(row, approvedBudget),
     adminNote: row.admin_note || '',
+    rejectionReason: row.rejection_reason || '',
+
+    // ---- monthly plan -------------------------------------------------------
+    // A planned activity belongs to a month's approved budget; one without a
+    // plan is off-plan work that spends nothing from it.
+    monthlyPlanId: row.monthly_plan_id ?? null,
+    planMonth: row.plan_month ? String(row.plan_month).slice(0, 7) : null,
+    planStatus: row.plan_status ?? null,
+    priority: row.priority || 'Medium',
+    // Section 5: remaining = approved - actual, derived from the expense rows.
+    actualSpent: row.actual_spent === undefined ? undefined : round2(row.actual_spent),
+    remainingBudget: row.actual_spent === undefined
+      ? undefined
+      : round2((approvedBudget === null ? requestedBudget : approvedBudget) - Number(row.actual_spent)),
+    expenseCount: row.expense_count === undefined ? undefined : Number(row.expense_count),
+    paymentEvidenceCount: row.payment_evidence_count === undefined ? undefined : Number(row.payment_evidence_count),
+    activityEvidenceCount: row.activity_evidence_count === undefined ? undefined : Number(row.activity_evidence_count),
+    // Whether an external partner in this operation may see it -- one of the
+    // three conditions, alongside being approved and in their operation.
+    externallyVisible: row.externally_visible !== false,
     instructions: row.instructions || '',
     origin: row.origin || 'requested',
+    // The sector *is* the department -- Farming, Mining, Agriculture,
+    // Logistics. It is surfaced under both names so the approval screens can
+    // say "Department" without a second column that could drift out of step.
+    department: row.sector,
     assignedTo: row.assigned_to ?? null,
     assignedToName: row.assigned_to_name ?? null,
     assignedAt: row.assigned_at ?? null,
     acceptedAt: row.accepted_at ?? null,
+
+    // ---- who must approve this, and what they decided ----------------------
+    approvalRequired: row.approval_required !== false,
+    approvalRequiredFrom: row.approval_required_from ?? null,
+    approvalRequiredFromName: row.approval_required_from_name ?? null,
+    // The approver's own role and area, so the detail screen can name them the
+    // way a reader recognises them: "John — Farming Manager".
+    approvalRequiredFromRole: row.approval_required_from_role ?? null,
+    approvalRequiredFromSector: row.approval_required_from_sector ?? null,
+    approvalRequiredRole: row.approval_required_role ?? null,
+    approvalRequiredLabel: APPROVER_ROLE_LABELS[row.approval_required_role] || null,
+    approvalStatus: row.approval_status || 'pending',
+    approvedBy: row.approved_by ?? null,
+    approvedByName: row.approved_by_name ?? null,
+    approvedAt: row.approved_at ?? null,
     // A DATE column arrives as a Date at local midnight; sending it on as a
     // timestamp shifts the calendar day for a reader in another zone.
     deadline: toDateOnly(row.deadline),
@@ -186,6 +242,9 @@ function mapEvidence(row) {
   return {
     id: row.id,
     activityId: row.activity_id,
+    // 'payment' proves money was spent; 'activity' proves the work was done.
+    evidenceType: row.evidence_type || 'payment',
+    expenseId: row.expense_id ?? null,
     kind: row.kind,
     originalName: row.original_name,
     mimeType: row.mime_type,
@@ -215,22 +274,38 @@ function mapHistory(row) {
 
 const SELECT_ACTIVITY = `
   SELECT a.*, p.name AS project_name, r.name AS reviewed_by_name, m.name AS assigned_to_name,
+         COALESCE((SELECT SUM(e.amount) FROM activity_expenses e WHERE e.activity_id = a.id), 0) AS actual_spent,
+         (SELECT COUNT(*) FROM activity_expenses e WHERE e.activity_id = a.id)::int AS expense_count,
+         (SELECT COUNT(*) FROM activity_evidence ev WHERE ev.activity_id = a.id AND ev.evidence_type = 'payment')::int AS payment_evidence_count,
+         (SELECT COUNT(*) FROM activity_evidence ev WHERE ev.activity_id = a.id AND ev.evidence_type = 'activity')::int AS activity_evidence_count,
+         pl.month AS plan_month, pl.status AS plan_status,
+         req.name AS approval_required_from_name, req.role AS approval_required_from_role,
+         req.sector AS approval_required_from_sector,
+         app.name AS approved_by_name,
          (SELECT COUNT(*) FROM activity_evidence e WHERE e.activity_id = a.id)::int AS evidence_count,
          (SELECT COUNT(*) FROM activity_budget_requests b WHERE b.activity_id = a.id AND b.status = 'Pending')::int AS pending_budget_requests
   FROM activities a
   LEFT JOIN projects p ON p.id = a.project_id
   LEFT JOIN users r ON r.id = a.reviewed_by
   LEFT JOIN users m ON m.id = a.assigned_to
+  LEFT JOIN users req ON req.id = a.approval_required_from
+  LEFT JOIN users app ON app.id = a.approved_by
+  LEFT JOIN monthly_plans pl ON pl.id = a.monthly_plan_id
 `;
 
 // Sector scoping, exactly as everywhere else in this API: the Director sees
-// every record, anyone else sees their own working area.
+// every record, anyone else sees their own working area -- plus anything that
+// is waiting on their own approval. Without that second clause an approver
+// could see a row in their queue and then be refused when they opened it.
 async function loadActivity(id, user) {
   const values = [id];
-  const filters = [];
-  managerScope(user, 'a.sector', values, filters);
+  const scopeFilters = [];
+  managerScope(user, 'a.sector', values, scopeFilters);
+  const scope = scopeFilters.length
+    ? `(${scopeFilters.join(' AND ')} OR ${pendingForMeSql(user, values, 'a')})`
+    : '';
   const result = await pool.query(
-    `${SELECT_ACTIVITY} WHERE a.id = $1${filters.length ? ` AND ${filters.join(' AND ')}` : ''}`,
+    `${SELECT_ACTIVITY} WHERE a.id = $1${scope ? ` AND ${scope}` : ''}`,
     values
   );
   if (!result.rowCount) throw new ActivityError(404, 'Activity not found.');
@@ -245,7 +320,7 @@ function requireAdmin(user, action) {
 // the Director has decided it, the record is read-only to them.
 function canEditRequest(user, row) {
   if (isAdmin(user)) return true;
-  return row.created_by === user.id && ['Pending Review', 'Rejected'].includes(row.status);
+  return row.created_by === user.id && ['Draft', 'Pending Approval', 'Rejected'].includes(row.status);
 }
 
 function canAttachEvidence(user, row) {
@@ -280,24 +355,33 @@ router.get('/', asyncRoute(async (req, res) => {
     values.push(`%${search}%`);
     filters.push(`(a.activity ILIKE $${values.length} OR a.description ILIKE $${values.length} OR a.category ILIKE $${values.length} OR a.materials ILIKE $${values.length})`);
   }
+  // "What I Need to Approve", built from the signed-in user rather than from a
+  // hard-coded role: approval_required_from = me AND approval_status = pending.
+  // The sector scope below is deliberately not applied on top of this -- an
+  // approver named on a record can always see that record.
+  const approvalQueue = awaiting === 'approval';
+  if (approvalQueue) {
+    filters.push(pendingForMeSql(req.user, values, 'a'));
+  }
   // Everything sitting on the Director's desk: undecided requests, finished
   // work handed back, and budget changes waiting for an answer.
   if (awaiting === 'review') {
-    filters.push(`(a.status = 'Pending Review'
+    filters.push(`(a.status = 'Pending Approval'
       OR (a.completion_submitted_at IS NOT NULL AND a.status <> 'Completed')
       OR EXISTS (SELECT 1 FROM activity_budget_requests b WHERE b.activity_id = a.id AND b.status = 'Pending'))`);
   }
-  // Everything sitting on this manager's desk: work handed to them that they
-  // have not accepted yet, and work sent back for correction.
+  // Everything sitting on this manager's desk: work waiting on their approval,
+  // and work sent back for correction.
   if (awaiting === 'mine') {
     values.push(req.user.id);
-    filters.push(`(a.assigned_to = $${values.length} AND a.status IN ('Assigned', 'Needs Correction'))`);
+    filters.push(`(a.assigned_to = $${values.length}
+      AND (a.status = 'Needs Correction' OR (a.approval_status = 'pending' AND a.status = 'Pending Approval')))`);
   }
   if (assignedTo === 'me') {
     values.push(req.user.id);
     filters.push(`a.assigned_to = $${values.length}`);
   }
-  managerScope(req.user, 'a.sector', values, filters);
+  if (!approvalQueue) managerScope(req.user, 'a.sector', values, filters);
 
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
   const requestedLimit = Number(limit || 5);
@@ -352,8 +436,10 @@ router.post('/', asyncRoute(async (req, res) => {
     return res.status(403).json({ message: 'You can only record activities in your own sector.' });
   }
 
-  // Two ways in, one table. The Director assigns work that is already funded and
-  // already approved; a manager raises a need that still has to be decided.
+  // Two ways in, one table. The Director assigns work to a manager, and that
+  // manager is the one who must approve it. A manager raises a need, and the
+  // Director is the one who must approve it. Either way the record names its
+  // approver at the moment it is created; neither is left generically pending.
   const assigning = isAdmin(req.user);
   const budget = round2(payload.costUsd || 0);
   const id = payload.id || `ACT-${Date.now()}`;
@@ -378,7 +464,12 @@ router.post('/', asyncRoute(async (req, res) => {
     }
   }
 
-  const status = assigning ? 'Assigned' : 'Pending Review';
+  // The Director may hand over routine work that needs nobody's sign-off; a
+  // manager's request always needs one. Saving a draft parks the record with
+  // its author without putting it in anybody's queue.
+  const approvalRequired = assigning ? payload.approvalRequired !== false : true;
+  const isDraft = payload.status === 'Draft';
+
   // An assigned activity carries the Director's own figure, so it is both the
   // original budget and the approved one. A raised request has no approved
   // budget until the Director decides it.
@@ -387,12 +478,38 @@ router.post('/', asyncRoute(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // Who must approve, resolved to an account id rather than left as a role.
+    // Assigned work waits on the manager it was handed to; a raised request
+    // waits on the Director.
+    let approvalRole = null;
+    let approvalFrom = null;
+    if (approvalRequired) {
+      if (assigning) {
+        approvalRole = 'manager';
+        approvalFrom = assignedTo;
+      } else {
+        const director = await resolveDirector(client);
+        if (!director) {
+          await safeRollback(client);
+          return res.status(500).json({ message: 'No Director account exists to approve this request.' });
+        }
+        approvalRole = 'director';
+        approvalFrom = director.id;
+      }
+    }
+
+    const status = isDraft ? 'Draft' : (approvalRequired ? 'Pending Approval' : 'Approved');
+    const approvalStatus = approvalRequired ? 'pending' : 'approved';
+
     const result = await client.query(
       `INSERT INTO activities
          (id, project_id, sector, category, activity, description, materials, quantity,
           cost_usd, cost_rwf, cost_cdf, requested_budget, approved_budget, signed, approved, status,
           created_by, created_by_name, origin, assigned_to, assigned_at, deadline, instructions,
-          reviewed_by, reviewed_at)
+          reviewed_by, reviewed_at,
+          approval_required, approval_required_from, approval_required_role, approval_status,
+          approved_by, approved_at)
        -- $18 is cast here as well as in the CASE arms below. Feeding it once as
        -- the bare origin column (varchar) and once as $18::text leaves Postgres
        -- unable to settle on a type for the parameter, and the whole insert is
@@ -400,37 +517,53 @@ router.post('/', asyncRoute(async (req, res) => {
        SELECT $1, p.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::text, $19,
               CASE WHEN $19::int IS NULL THEN NULL ELSE NOW() END, $20::date, $21,
               CASE WHEN $18::text = 'assigned' THEN $16::int ELSE NULL END,
-              CASE WHEN $18::text = 'assigned' THEN NOW() ELSE NULL END
+              CASE WHEN $18::text = 'assigned' THEN NOW() ELSE NULL END,
+              $23, $24, $25, $26::text,
+              -- Nobody's sign-off needed means the creator is the approver of
+              -- record, so the trail still names a person and a moment.
+              CASE WHEN $26::text = 'approved' THEN $16::int ELSE NULL END,
+              CASE WHEN $26::text = 'approved' THEN NOW() ELSE NULL END
        FROM projects p WHERE p.id = $22
        RETURNING id`,
       [
         id, sector, payload.category, payload.activity, payload.description || '',
         optionalText(payload.materials, 2000), Number(payload.quantity || 0),
         budget, Number(payload.costRwf || 0), Number(payload.costCdf ?? payload.costFco ?? 0),
-        budget, approvedBudget, Boolean(payload.signed), assigning, status,
+        budget, approvedBudget, Boolean(payload.signed), !approvalRequired, status,
         req.user.id, req.user.name, assigning ? 'assigned' : 'requested', assignedTo,
-        deadline, optionalText(payload.instructions, 4000), payload.projectId
+        deadline, optionalText(payload.instructions, 4000), payload.projectId,
+        approvalRequired, approvalFrom, approvalRole, approvalStatus
       ]
     );
     if (!result.rowCount) {
-      await client.query('ROLLBACK');
+      await safeRollback(client);
       return res.status(404).json({ message: 'Project not found.' });
     }
-    await logHistory(client, id, req.user, assigning
+    const entries = assigning
       ? [
-        { action: 'Activity assigned', field: 'status', oldValue: null, newValue: 'Assigned', note: optionalText(payload.instructions, 4000) },
+        { action: 'Activity assigned', field: 'status', oldValue: null, newValue: status, note: optionalText(payload.instructions, 4000) },
         { action: 'Budget set', field: 'approvedBudget', oldValue: null, newValue: budget },
         { action: 'Manager assigned', field: 'assignedTo', oldValue: null, newValue: String(assignedTo) }
       ]
       : [
-        { action: 'Activity submitted', field: 'status', oldValue: null, newValue: 'Pending Review' },
+        { action: 'Activity submitted', field: 'status', oldValue: null, newValue: status },
         { action: 'Budget requested', field: 'requestedBudget', oldValue: null, newValue: budget }
-      ]);
+      ];
+    if (approvalRequired) {
+      entries.push({
+        action: 'Approval requested',
+        field: 'approvalRequiredFrom',
+        oldValue: null,
+        newValue: String(approvalFrom),
+        note: approvalRole === 'manager' ? 'Manager Approval' : 'Director Approval'
+      });
+    }
+    await logHistory(client, id, req.user, entries);
     await client.query('COMMIT');
     const saved = await loadActivity(id, req.user);
     res.status(201).json(mapActivity(saved));
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();
@@ -485,7 +618,7 @@ router.put('/:id', asyncRoute(async (req, res) => {
     await logHistory(client, existing.id, req.user, entries);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();
@@ -494,10 +627,229 @@ router.put('/:id', asyncRoute(async (req, res) => {
   res.json(mapActivity(await loadActivity(existing.id, req.user)));
 }));
 
-// ---- the Director's decision ---------------------------------------------
+// ---- the approval decision ------------------------------------------------
+
+// Approve or reject, taken by the person the record names as its approver.
+//
+// Authorisation is the whole point of this route: the caller must be
+// approval_required_from (or hold the Director's office when the record names
+// that office). Nothing in the request body can widen that -- a browser drawing
+// an Approve button on a record that is not the caller's gets a 403 here.
+//
+// The approver may also change the budget and leave a note in the same call, so
+// "cut this to $50, note why, approve" is one decision in the trail rather than
+// three unrelated edits.
+router.patch('/:id/approval', asyncRoute(async (req, res) => {
+  const existing = await loadActivity(req.params.id, req.user);
+  const payload = req.body || {};
+
+  const action = String(payload.action || '').toLowerCase();
+  if (!['approve', 'reject'].includes(action)) {
+    return res.status(400).json({ message: 'The decision must be approve or reject.' });
+  }
+
+  if (!existing.approval_required) {
+    return res.status(400).json({ message: 'This activity does not require approval.' });
+  }
+  if (existing.approval_status !== 'pending') {
+    return res.status(409).json({
+      message: `This activity has already been ${existing.approval_status}.`
+    });
+  }
+  if (existing.status === 'Draft') {
+    return res.status(400).json({ message: 'This activity is still a draft and has not been submitted for approval.' });
+  }
+  // The check the whole workflow rests on: current_user.id must be the account
+  // the record is waiting on.
+  if (!canApprove(req.user, existing)) {
+    return res.status(403).json({
+      message: 'Only the person this activity is waiting on can approve or reject it.'
+    });
+  }
+
+  const rejectionReason = optionalText(payload.rejectionReason ?? payload.reason, 2000);
+  if (action === 'reject' && !rejectionReason) {
+    return res.status(400).json({ message: 'Say why this activity is being rejected.' });
+  }
+
+  // A budget change and an admin note are the Director's tools when answering a
+  // manager's request; a manager approving work handed to them may leave a note
+  // but may not move the figure the Director set.
+  const budgetGiven = Object.prototype.hasOwnProperty.call(payload, 'approvedBudget')
+    && payload.approvedBudget !== null && payload.approvedBudget !== '';
+  const requestedBudget = round2(existing.requested_budget);
+  const previousApproved = existing.approved_budget === null ? null : round2(existing.approved_budget);
+  let approvedBudget = previousApproved;
+  if (budgetGiven) {
+    if (!isAdmin(req.user)) {
+      return res.status(403).json({ message: 'Only the Director can change the budget on an activity.' });
+    }
+    if (!validNumber(payload.approvedBudget)) {
+      return res.status(400).json({ message: 'The approved budget must be a valid non-negative number.' });
+    }
+    approvedBudget = round2(payload.approvedBudget);
+  }
+
+  const noteGiven = Object.prototype.hasOwnProperty.call(payload, 'adminNote');
+  const adminNote = noteGiven ? optionalText(payload.adminNote, 2000) : (existing.admin_note || '');
+  if (noteGiven && !isAdmin(req.user) && !canApprove(req.user, existing)) {
+    return res.status(403).json({ message: 'Only the approver can leave a note on this activity.' });
+  }
+  // Approving a figure the requester did not ask for has to say why, or they
+  // are left with less money and no explanation.
+  if (action === 'approve' && approvedBudget !== null && approvedBudget !== requestedBudget && !adminNote) {
+    return res.status(400).json({ message: 'A note is required when the approved budget differs from the requested budget.' });
+  }
+
+  // An approval settles the record at Approved whether or not the figure moved.
+  // A trimmed budget is not a different outcome -- it is an approval with a
+  // smaller number, and the number, the note and the trail already carry that.
+  const approved = action === 'approve';
+  const status = approved ? 'Approved' : 'Rejected';
+  // On approval the figure that was cleared is recorded, so a record approved
+  // without an explicit budget still carries one.
+  const settledBudget = approved && approvedBudget === null ? requestedBudget : approvedBudget;
+
+  const entries = [];
+  if (budgetGiven && previousApproved !== approvedBudget) {
+    entries.push({
+      action: 'Budget decided',
+      field: 'approvedBudget',
+      oldValue: previousApproved === null ? requestedBudget : previousApproved,
+      newValue: approvedBudget,
+      note: adminNote
+    });
+  }
+  if (noteGiven && adminNote !== (existing.admin_note || '')) {
+    entries.push({ action: 'Note recorded', field: 'adminNote', oldValue: existing.admin_note || null, newValue: adminNote });
+  }
+  entries.push({
+    action: approved ? 'Approved' : 'Rejected',
+    field: 'approvalStatus',
+    oldValue: 'pending',
+    newValue: approved ? 'approved' : 'rejected',
+    note: approved ? adminNote : rejectionReason
+  });
+  if (status !== existing.status) {
+    entries.push({ action: 'Status changed', field: 'status', oldValue: existing.status, newValue: status, note: approved ? adminNote : rejectionReason });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE activities
+       SET approval_status = $2::text,
+           approved_by = $3,
+           approved_at = NOW(),
+           status = $4::text,
+           approved = $5,
+           approved_budget = $6,
+           admin_note = $7,
+           rejection_reason = $8,
+           -- The approver has now reviewed it, whichever way they decided.
+           reviewed_by = $3, reviewed_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1
+         -- Belt and braces against two approvers racing: the row must still be
+         -- pending at the moment of the write, not merely when it was read.
+         AND approval_status = 'pending'`,
+      [
+        existing.id, approved ? 'approved' : 'rejected', req.user.id, status, approved,
+        settledBudget, adminNote, approved ? '' : rejectionReason
+      ]
+    );
+    await logHistory(client, existing.id, req.user, entries);
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  res.json(mapActivity(await loadActivity(existing.id, req.user)));
+}));
+
+// Whether an external business partner assigned to this operation may see this
+// record. The Director's control over what leaves the organisation.
+//
+// This is only one of the three conditions: the record must also be approved
+// and belong to the partner's operation. Turning the flag on therefore does not
+// publish anything that has not been approved.
+router.patch('/:id/visibility', asyncRoute(async (req, res) => {
+  requireAdmin(req.user, 'change what external partners can see');
+  const existing = await loadActivity(req.params.id, req.user);
+  const { externallyVisible } = req.body || {};
+  if (typeof externallyVisible !== 'boolean') {
+    return res.status(400).json({ message: 'Say whether this activity should be visible to external partners.' });
+  }
+  if (externallyVisible === (existing.externally_visible !== false)) {
+    return res.status(400).json({ message: 'External visibility is already set that way.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('UPDATE activities SET externally_visible = $2, updated_at = NOW() WHERE id = $1', [existing.id, externallyVisible]);
+    await logHistory(client, existing.id, req.user, [
+      {
+        action: externallyVisible ? 'Made visible to external partners' : 'Hidden from external partners',
+        field: 'externallyVisible',
+        oldValue: existing.externally_visible !== false,
+        newValue: externallyVisible,
+        note: optionalText(req.body?.note, 500)
+      }
+    ]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  res.json(mapActivity(await loadActivity(existing.id, req.user)));
+}));
+
+// Submitting a draft into the approval queue. Only its author, or the Director.
+router.patch('/:id/submit', asyncRoute(async (req, res) => {
+  const existing = await loadActivity(req.params.id, req.user);
+  if (existing.status !== 'Draft') {
+    return res.status(400).json({ message: 'Only a draft can be submitted for approval.' });
+  }
+  if (!isAdmin(req.user) && existing.created_by !== req.user.id) {
+    return res.status(403).json({ message: 'Only the person who drafted this activity can submit it.' });
+  }
+  if (!existing.approval_required_from) {
+    return res.status(400).json({ message: 'This activity has nobody to approve it. Set an approver first.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE activities SET status = 'Pending Approval', approval_status = 'pending', updated_at = NOW() WHERE id = $1`,
+      [existing.id]
+    );
+    await logHistory(client, existing.id, req.user, [
+      { action: 'Submitted for approval', field: 'status', oldValue: 'Draft', newValue: 'Pending Approval' }
+    ]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  res.json(mapActivity(await loadActivity(existing.id, req.user)));
+}));
 
 // Approved budget, status and note in one save, so the trail records one
-// coherent decision rather than three unrelated edits.
+// coherent decision rather than three unrelated edits. This is the Director's
+// wider editing surface -- reopening, parking, sending work back -- and sits
+// alongside the approve/reject route above rather than replacing it.
 router.patch('/:id/decision', asyncRoute(async (req, res) => {
   requireAdmin(req.user, 'review an activity');
   const existing = await loadActivity(req.params.id, req.user);
@@ -526,7 +878,14 @@ router.patch('/:id/decision', asyncRoute(async (req, res) => {
   }
 
   const noteGiven = Object.prototype.hasOwnProperty.call(payload, 'adminNote');
-  const adminNote = noteGiven ? optionalText(payload.adminNote, 2000) : existing.admin_note;
+  // The note supplied by THIS request, as distinct from whatever note the
+  // record already carries. The two are different things and conflating them
+  // was a real hole: a planned activity created with "From the planning
+  // meeting" already had a note, so a later budget change inherited it, passed
+  // the "a reason is required" check below, and wrote that stale sentence into
+  // the trail as though it were the reason for the change.
+  const freshNote = noteGiven ? optionalText(payload.adminNote, 2000) : '';
+  const adminNote = noteGiven ? freshNote : existing.admin_note;
   // A refusal has to say why: the manager is left with nothing to act on
   // otherwise. Trimming a budget likewise needs a reason on the record.
   const requestedBudget = round2(existing.requested_budget);
@@ -538,7 +897,14 @@ router.patch('/:id/decision', asyncRoute(async (req, res) => {
   if (status === 'Needs Correction' && !adminNote) {
     return res.status(400).json({ message: 'Say what needs correcting when you send an activity back.' });
   }
-  if (approvedBudget !== null && approvedBudget !== requestedBudget && !adminNote) {
+  // Section 10: moving an approved budget is a financial change, so it needs a
+  // reason given for the change itself -- not one inherited from the record.
+  const previousApprovedFigure = existing.approved_budget === null ? null : round2(existing.approved_budget);
+  const budgetIsMoving = budgetGiven && previousApprovedFigure !== approvedBudget;
+  if (budgetIsMoving && !freshNote) {
+    return res.status(400).json({ message: 'Say why the approved budget is changing.' });
+  }
+  if (!budgetIsMoving && approvedBudget !== null && approvedBudget !== requestedBudget && !adminNote) {
     return res.status(400).json({ message: 'A note is required when the approved budget differs from the original budget.' });
   }
 
@@ -556,7 +922,9 @@ router.patch('/:id/decision', asyncRoute(async (req, res) => {
       // comparison the note in the trail should read as.
       oldValue: previousApproved === null ? requestedBudget : previousApproved,
       newValue: approvedBudget,
-      note: adminNote
+      // The reason for THIS change. Falling back to the record's standing note
+      // would file an unrelated sentence as the justification for moving money.
+      note: freshNote || adminNote
     });
   }
   if (status !== existing.status) {
@@ -578,14 +946,35 @@ router.patch('/:id/decision', asyncRoute(async (req, res) => {
            reviewed_by = $6, reviewed_at = NOW(),
            completed_at = CASE WHEN $3::text = 'Completed' THEN NOW() ELSE NULL END,
            completion_submitted_at = CASE WHEN $7 THEN NULL ELSE completion_submitted_at END,
+           -- The Director's wider decision surface reaches the same statuses the
+           -- approve/reject route does, so the approval trail has to follow it.
+           -- Otherwise a record cleared here would sit in its approver's queue
+           -- for ever, and one reopened here would never come back.
+           approval_status = CASE
+             WHEN $3::text = ANY($8::text[]) THEN 'approved'
+             WHEN $3::text IN ('Rejected', 'Cancelled') THEN 'rejected'
+             WHEN $3::text IN ('Pending Approval', 'Draft', 'On Hold') THEN 'pending'
+             ELSE approval_status END,
+           approved_by = CASE
+             WHEN $3::text = ANY($8::text[]) THEN COALESCE(approved_by, $6)
+             WHEN $3::text IN ('Pending Approval', 'Draft', 'On Hold') THEN NULL
+             ELSE approved_by END,
+           approved_at = CASE
+             WHEN $3::text = ANY($8::text[]) THEN COALESCE(approved_at, NOW())
+             WHEN $3::text IN ('Pending Approval', 'Draft', 'On Hold') THEN NULL
+             ELSE approved_at END,
+           rejection_reason = CASE
+             WHEN $3::text = 'Rejected' THEN $4
+             WHEN $3::text = ANY($8::text[]) THEN ''
+             ELSE rejection_reason END,
            updated_at = NOW()
        WHERE id = $1`,
-      [existing.id, approvedBudget, status, adminNote, settled, req.user.id, returned]
+      [existing.id, approvedBudget, status, adminNote, settled, req.user.id, returned, APPROVED_STATUSES]
     );
     await logHistory(client, existing.id, req.user, entries);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();
@@ -609,16 +998,20 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
     return res.status(400).json({ message: `A ${existing.status} activity cannot move straight to ${status}.` });
   }
 
-  // The moves a manager owns on their own work: accepting what they were given,
-  // and starting it. Everything else is the Director's.
+  // The one move a manager owns on their own work: starting what has been
+  // approved. Approving and rejecting go through /approval, which checks that
+  // the caller is the named approver; everything else is the Director's.
   const ownsIt = !isAdmin(req.user)
     && req.user.sector === existing.sector
     && (existing.assigned_to === null || existing.assigned_to === req.user.id);
-  const managerAccept = ownsIt && status === 'Accepted' && existing.status === 'Assigned';
   const managerStart = ownsIt
     && status === 'In Progress'
-    && ['Assigned', 'Accepted', 'Approved', 'Budget Adjusted', 'Needs Correction'].includes(existing.status);
-  if (!managerAccept && !managerStart) requireAdmin(req.user, 'change the status of an activity');
+    && ['Approved', 'Budget Adjusted', 'Needs Correction'].includes(existing.status);
+  // A record still waiting on somebody cannot be started around them.
+  if (managerStart && existing.approval_required && existing.approval_status !== 'approved') {
+    return res.status(403).json({ message: 'This activity has not been approved yet.' });
+  }
+  if (!managerStart) requireAdmin(req.user, 'change the status of an activity');
 
   const note = optionalText(req.body?.note, 2000);
   const client = await pool.connect();
@@ -629,20 +1022,36 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
        SET status = $2::text,
            approved = CASE WHEN $2::text = ANY($3::text[]) THEN TRUE ELSE approved END,
            completed_at = CASE WHEN $2::text = 'Completed' THEN NOW() ELSE NULL END,
-           accepted_at = CASE WHEN $2::text = 'Accepted' AND accepted_at IS NULL THEN NOW() ELSE accepted_at END,
+           -- Same reason as the decision route: a status move that clears,
+           -- refuses or reopens a record has to carry the approval trail with
+           -- it, or the approver's queue and the register disagree.
+           approval_status = CASE
+             WHEN $2::text = ANY($3::text[]) THEN 'approved'
+             WHEN $2::text IN ('Rejected', 'Cancelled') THEN 'rejected'
+             WHEN $2::text IN ('Pending Approval', 'Draft', 'On Hold') THEN 'pending'
+             ELSE approval_status END,
+           approved_by = CASE
+             WHEN $2::text = ANY($3::text[]) THEN COALESCE(approved_by, $4)
+             WHEN $2::text IN ('Pending Approval', 'Draft', 'On Hold') THEN NULL
+             ELSE approved_by END,
+           approved_at = CASE
+             WHEN $2::text = ANY($3::text[]) THEN COALESCE(approved_at, NOW())
+             WHEN $2::text IN ('Pending Approval', 'Draft', 'On Hold') THEN NULL
+             ELSE approved_at END,
+           rejection_reason = CASE
+             WHEN $2::text = 'Rejected' THEN $5
+             WHEN $2::text = ANY($3::text[]) THEN ''
+             ELSE rejection_reason END,
            updated_at = NOW()
        WHERE id = $1`,
-      [existing.id, status, APPROVED_STATUSES]
+      [existing.id, status, APPROVED_STATUSES, req.user.id, note]
     );
     await logHistory(client, existing.id, req.user, [
-      {
-        action: managerAccept ? 'Activity accepted' : 'Status changed',
-        field: 'status', oldValue: existing.status, newValue: status, note
-      }
+      { action: 'Status changed', field: 'status', oldValue: existing.status, newValue: status, note }
     ]);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();
@@ -679,7 +1088,7 @@ router.post('/:id/completion', asyncRoute(async (req, res) => {
     ]);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();
@@ -745,6 +1154,12 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
        SET assigned_to = $2, deadline = $3::date, instructions = $4,
            assigned_at = CASE WHEN $2::int IS DISTINCT FROM assigned_to THEN NOW() ELSE assigned_at END,
            accepted_at = CASE WHEN $2::int IS DISTINCT FROM assigned_to THEN NULL ELSE accepted_at END,
+           -- Handing the work to someone else hands the decision over with it,
+           -- but only while it is still undecided: a record already approved
+           -- keeps the name of whoever approved it.
+           approval_required_from = CASE
+             WHEN approval_required_role = 'manager' AND approval_status = 'pending' THEN $2::int
+             ELSE approval_required_from END,
            updated_at = NOW()
        WHERE id = $1`,
       [existing.id, assignedTo, deadline, instructions]
@@ -752,7 +1167,7 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
     await logHistory(client, existing.id, req.user, entries);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();
@@ -805,7 +1220,7 @@ router.post('/:id/budget-requests', asyncRoute(async (req, res) => {
     }]);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();
@@ -868,7 +1283,7 @@ router.patch('/:id/budget-requests/:requestId', asyncRoute(async (req, res) => {
     await logHistory(client, existing.id, req.user, entries);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();
@@ -921,6 +1336,22 @@ router.post('/:id/evidence', upload.array('files', 10), asyncRoute(async (req, r
   const amount = validNumber(req.body.amount || 0) ? round2(req.body.amount || 0) : 0;
   const note = optionalText(req.body.note, 500);
 
+  // Section 7: proof money was spent and proof the work was done are different
+  // things, counted and reported separately.
+  const evidenceType = req.body.evidenceType === 'activity' ? 'activity' : 'payment';
+
+  // Payment evidence may name the expense it belongs to, which is what lets the
+  // review say "3 of 3 expenses documented" rather than merely counting files.
+  let expenseId = null;
+  if (req.body.expenseId) {
+    if (evidenceType !== 'payment') {
+      return res.status(400).json({ message: 'Only payment evidence can be attached to an expense.' });
+    }
+    expenseId = Number(req.body.expenseId);
+    const expense = await pool.query('SELECT id FROM activity_expenses WHERE id = $1 AND activity_id = $2', [expenseId, existing.id]);
+    if (!expense.rowCount) return res.status(404).json({ message: 'That expense does not belong to this activity.' });
+  }
+
   // Stored first, recorded second. A file with no row is an orphan nobody sees;
   // a row with no file is a broken link in the evidence trail, so the write
   // that can fail goes first and its objects are removed if the rows fail.
@@ -943,9 +1374,13 @@ router.post('/:id/evidence', upload.array('files', 10), asyncRoute(async (req, r
     for (const { file, storedName } of stored) {
       const result = await client.query(
         `INSERT INTO activity_evidence
-           (activity_id, kind, original_name, stored_name, mime_type, size_bytes, amount, note, uploaded_by, uploaded_by_name)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-        [existing.id, kind, file.originalname.slice(0, 255), storedName, file.mimetype, file.size, amount, note, req.user.id, req.user.name]
+           (activity_id, kind, original_name, stored_name, mime_type, size_bytes, amount, note,
+            uploaded_by, uploaded_by_name, evidence_type, expense_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+        [
+          existing.id, kind, file.originalname.slice(0, 255), storedName, file.mimetype, file.size,
+          amount, note, req.user.id, req.user.name, evidenceType, expenseId
+        ]
       );
       saved.push(mapEvidence(result.rows[0]));
     }
@@ -960,7 +1395,7 @@ router.post('/:id/evidence', upload.array('files', 10), asyncRoute(async (req, r
     await client.query('COMMIT');
     res.status(201).json(saved);
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     await Promise.all(stored.map((item) => deleteFile(EVIDENCE_FOLDER, item.storedName)));
     throw error;
   } finally {
@@ -1006,6 +1441,193 @@ router.delete('/:id/evidence/:evidenceId', asyncRoute(async (req, res) => {
   ]);
   res.json({ message: 'Evidence removed.', deletedEvidence: mapEvidence(result.rows[0]) });
 }));
+
+// ---- what was actually spent ----------------------------------------------
+//
+// Sections 5, 6 and 8. The manager records a spend against work the Director
+// assigned them; the platform checks it against what is left, stores it with
+// its payment evidence, and derives the remaining balance from the rows.
+//
+// No money moves. This records a spend that happened outside the platform.
+
+// The approved budget and what has been spent so far, read together so the
+// remaining balance cannot be computed from two different moments.
+async function budgetPosition(client, activityId) {
+  const result = await client.query(
+    `SELECT a.approved_budget, a.requested_budget, a.monthly_plan_id,
+            COALESCE((SELECT SUM(e.amount) FROM activity_expenses e WHERE e.activity_id = a.id), 0) AS spent
+     FROM activities a WHERE a.id = $1
+     -- Locked for the transaction, so two spends submitted at the same instant
+     -- cannot each read the same remaining balance and both fit inside it.
+     FOR UPDATE OF a`,
+    [activityId]
+  );
+  const row = result.rows[0];
+  const approved = row.approved_budget === null ? round2(row.requested_budget) : round2(row.approved_budget);
+  return { approved, spent: round2(row.spent), planId: row.monthly_plan_id };
+}
+
+router.get('/:id/expenses', asyncRoute(async (req, res) => {
+  const existing = await loadActivity(req.params.id, req.user);
+  const result = await pool.query(
+    `SELECT e.*,
+            (SELECT COUNT(*) FROM activity_evidence ev
+              WHERE ev.expense_id = e.id AND ev.evidence_type = 'payment')::int AS evidence_count
+     FROM activity_expenses e WHERE e.activity_id = $1 ORDER BY e.spent_on DESC, e.id DESC`,
+    [existing.id]
+  );
+  const approved = existing.approved_budget === null ? round2(existing.requested_budget) : round2(existing.approved_budget);
+  const spent = result.rows.reduce((total, row) => total + cents(row.amount), 0);
+  res.json({
+    expenses: result.rows.map(mapExpense),
+    approvedBudget: approved,
+    totalSpent: fromCents(spent),
+    remaining: fromCents(cents(approved) - spent)
+  });
+}));
+
+router.post('/:id/expenses', asyncRoute(async (req, res) => {
+  const existing = await loadActivity(req.params.id, req.user);
+  // Section 13: the manager the work is assigned to, or the Director. Not
+  // another manager, and not on the strength of a button being on screen.
+  if (!canRecordExpense(req.user, existing)) {
+    return res.status(403).json({ message: 'You can only record expenses against activities assigned to you.' });
+  }
+  if (existing.approval_required && existing.approval_status !== 'approved') {
+    return res.status(400).json({ message: 'This activity has not been approved yet.' });
+  }
+  if (DEAD_STATUSES.includes(existing.status)) {
+    return res.status(400).json({ message: `A ${existing.status} activity cannot carry expenses.` });
+  }
+
+  const payload = req.body || {};
+  if (!validNumber(payload.amount, { minimum: 0.01 })) {
+    return res.status(400).json({ message: 'The amount spent must be greater than zero.' });
+  }
+  const spentOn = payload.spentOn ? String(payload.spentOn).slice(0, 10) : null;
+  if (!spentOn || !/^\d{4}-\d{2}-\d{2}$/.test(spentOn)) {
+    return res.status(400).json({ message: 'The date spent is required.' });
+  }
+  if (!PAYMENT_METHODS.includes(payload.paymentMethod)) {
+    return res.status(400).json({ message: `The payment method must be one of: ${PAYMENT_METHODS.join(', ')}.` });
+  }
+  if (!requiredText(payload.description)) {
+    return res.status(400).json({ message: 'Describe what the money was spent on.' });
+  }
+
+  const amount = round2(payload.amount);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // A closed month is a signed-off account; nothing more is recorded against it.
+    if (existing.monthly_plan_id) {
+      const plan = await client.query('SELECT status FROM monthly_plans WHERE id = $1', [existing.monthly_plan_id]);
+      if (plan.rowCount && plan.rows[0].status === 'Closed') {
+        await safeRollback(client);
+        return res.status(400).json({ message: 'This month has been closed. Ask the Director to reopen it.' });
+      }
+    }
+
+    const position = await budgetPosition(client, existing.id);
+    // Section 8, the rule that makes the budget mean something: a spend past
+    // what is left is refused, and the manager is told what to do instead.
+    if (!fitsRemaining(amount, position.approved, position.spent)) {
+      await safeRollback(client);
+      return res.status(400).json({
+        message: OVER_BUDGET_MESSAGE,
+        approvedBudget: position.approved,
+        alreadySpent: position.spent,
+        remaining: fromCents(cents(position.approved) - cents(position.spent)),
+        attempted: amount
+      });
+    }
+
+    const inserted = await client.query(
+      `INSERT INTO activity_expenses
+         (activity_id, amount, spent_on, payment_method, description, recorded_by, recorded_by_name)
+       VALUES ($1, $2, $3::date, $4, $5, $6, $7) RETURNING *`,
+      [
+        existing.id, amount, spentOn, payload.paymentMethod,
+        optionalText(payload.description, 2000), req.user.id, req.user.name
+      ]
+    );
+    await logHistory(client, existing.id, req.user, [
+      {
+        action: 'Expense recorded', field: 'actualExpense',
+        oldValue: position.spent, newValue: fromCents(cents(position.spent) + cents(amount)),
+        note: optionalText(payload.description, 500)
+      }
+    ]);
+    await client.query('COMMIT');
+
+    const remaining = fromCents(cents(position.approved) - cents(position.spent) - cents(amount));
+    res.status(201).json({
+      expense: mapExpense({ ...inserted.rows[0], evidence_count: 0 }),
+      approvedBudget: position.approved,
+      totalSpent: fromCents(cents(position.spent) + cents(amount)),
+      remaining
+    });
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+}));
+
+// Section 13: a manager may not delete financial records. Only the Director,
+// and the removal is written to the trail with the figure it took out.
+router.delete('/:id/expenses/:expenseId', asyncRoute(async (req, res) => {
+  const existing = await loadActivity(req.params.id, req.user);
+  if (!canDeleteExpense(req.user)) {
+    return res.status(403).json({ message: 'Only the Director can remove a recorded expense.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const removed = await client.query(
+      'DELETE FROM activity_expenses WHERE id = $1 AND activity_id = $2 RETURNING amount, description',
+      [req.params.expenseId, existing.id]
+    );
+    if (!removed.rowCount) {
+      await safeRollback(client);
+      return res.status(404).json({ message: 'Expense not found.' });
+    }
+    await logHistory(client, existing.id, req.user, [
+      {
+        action: 'Expense removed', field: 'actualExpense',
+        oldValue: round2(removed.rows[0].amount), newValue: null,
+        note: optionalText(req.body?.reason, 500) || removed.rows[0].description
+      }
+    ]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  res.json({ message: 'Expense removed. The activity budget has been restored by that amount.' });
+}));
+
+function mapExpense(row) {
+  return {
+    id: row.id,
+    activityId: row.activity_id,
+    amount: round2(row.amount),
+    spentOn: toDateOnly(row.spent_on),
+    paymentMethod: row.payment_method,
+    description: row.description,
+    recordedBy: row.recorded_by ?? null,
+    recordedByName: row.recorded_by_name || '',
+    // Section 9: an expense with no receipt is what the Director is looking for.
+    evidenceCount: row.evidence_count ?? 0,
+    createdAt: row.created_at
+  };
+}
 
 router.get('/:id/history', asyncRoute(async (req, res) => {
   const existing = await loadActivity(req.params.id, req.user);

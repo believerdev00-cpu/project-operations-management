@@ -9,11 +9,15 @@ import { initDatabase, pool } from './db/database.js';
 import { sectors } from './data/seedData.js';
 import { authMiddleware, jwtSecret } from './lib/auth.js';
 import { asyncRoute, isAdmin, managerScope, requiredText, sectorIds, validNumber, validateSector } from './lib/http.js';
-import movementRouter from './routes/movements.js';
+import { pendingForMeSql } from './lib/approvals.js';
+import movementRouter, { mapMovement } from './routes/movements.js';
 import rateRouter from './routes/rates.js';
 import userRouter from './routes/users.js';
-import activityRouter from './routes/activities.js';
+import activityRouter, { mapActivity } from './routes/activities.js';
 import reportRouter from './routes/reports.js';
+import partnerRouter from './routes/partner.js';
+import partnersRouter from './routes/partners.js';
+import monthlyPlanRouter from './routes/monthlyPlans.js';
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -123,7 +127,7 @@ app.post('/api/managers', authMiddleware, asyncRoute(async (req, res) => {
 app.post('/api/auth/login', loginLimiter, asyncRoute(async (req, res) => {
   const { username, password } = req.body || {};
   const result = await pool.query(
-    'SELECT id, username, password_hash, name, role, sector FROM users WHERE username = $1',
+    'SELECT id, username, password_hash, name, role, sector, status, access_level FROM users WHERE username = $1',
     [username]
   );
   const user = result.rows[0];
@@ -131,18 +135,40 @@ app.post('/api/auth/login', loginLimiter, asyncRoute(async (req, res) => {
   if (!user || !bcrypt.compareSync(password || '', user.password_hash)) {
     return res.status(401).json({ message: 'Invalid username or password.' });
   }
+  // A suspended or revoked account is refused at the door, so no token is ever
+  // minted for one. authMiddleware checks the same thing again on every
+  // request, which is what makes a suspension bite on an already-issued token.
+  if ((user.status || 'active') !== 'active') {
+    return res.status(403).json({
+      message: user.status === 'suspended'
+        ? 'This account is suspended. Contact the administrator.'
+        : 'Access to this account has been revoked.'
+    });
+  }
 
-  const publicUser = { id: user.id, username: user.username, name: user.name, role: user.role, sector: user.sector };
+  const publicUser = {
+    id: user.id, username: user.username, name: user.name, role: user.role, sector: user.sector,
+    accessLevel: user.access_level || 'internal'
+  };
   const token = jwt.sign(publicUser, jwtSecret, { expiresIn: '12h' });
   res.json({ token, user: publicUser });
 }));
 
 app.get('/api/auth/session', authMiddleware, asyncRoute(async (req, res) => {
   const result = await pool.query(
-    'SELECT id, username, name, role, sector FROM users WHERE id = $1',
+    'SELECT id, username, name, role, sector, email, status, access_level FROM users WHERE id = $1',
     [req.user.id]
   );
-  res.json({ user: result.rows[0] || null });
+  const row = result.rows[0];
+  res.json({
+    user: row
+      ? {
+          id: row.id, username: row.username, name: row.name, role: row.role,
+          sector: row.sector, email: row.email || null,
+          status: row.status || 'active', accessLevel: row.access_level || 'internal'
+        }
+      : null
+  });
 }));
 
 app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
@@ -174,11 +200,25 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
   // What is waiting on a decision. A manager sees the same two counts for their
   // own area, so they can tell what is still with the Director.
   const reviewQueue = await pool.query(
-    `SELECT COUNT(*) FILTER (WHERE status = 'Pending Review')::int AS activity_reviews_pending,
+    `SELECT COUNT(*) FILTER (WHERE status = 'Pending Approval')::int AS activity_reviews_pending,
             COUNT(*) FILTER (WHERE completion_submitted_at IS NOT NULL AND status <> 'Completed')::int AS completions_awaiting_review,
-            COUNT(*) FILTER (WHERE assigned_to = $${scopeValues.length + 1} AND status IN ('Assigned', 'Needs Correction'))::int AS assigned_to_me
+            COUNT(*) FILTER (WHERE assigned_to = $${scopeValues.length + 1} AND status IN ('Pending Approval', 'Needs Correction'))::int AS assigned_to_me
      FROM activities${whereSector}`,
     [...scopeValues, req.user.id]
+  );
+
+  // "What I Need to Approve" as a single number for the sidebar badge. Built
+  // from the signed-in user's id, not from their role, so it is exactly the
+  // work this account is personally holding up -- and it is the same predicate
+  // the queue itself runs, so the badge and the list can never disagree.
+  const approvalValues = [];
+  const activityPending = pendingForMeSql(req.user, approvalValues, 'a');
+  const movementPending = pendingForMeSql(req.user, approvalValues, 'm');
+  const approvalQueue = await pool.query(
+    `SELECT
+       (SELECT COUNT(*) FROM activities a WHERE ${activityPending})::int AS activities,
+       (SELECT COUNT(*) FROM movements m WHERE ${movementPending})::int AS movements`,
+    approvalValues
   );
 
   // Budget changes a manager has asked for and nobody has answered yet.
@@ -247,6 +287,10 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
     org: 'Rwanda Operations Group',
     summary: {
       registeredUsers,
+      // The badge on "What I Need to Approve".
+      approvalsAwaitingMe: approvalQueue.rows[0].activities + approvalQueue.rows[0].movements,
+      approvalsAwaitingMeActivities: approvalQueue.rows[0].activities,
+      approvalsAwaitingMeMovements: approvalQueue.rows[0].movements,
       activityReviewsPending: reviewQueue.rows[0].activity_reviews_pending,
       completionsAwaitingReview: reviewQueue.rows[0].completions_awaiting_review,
       budgetChangesPending: budgetQueue.rows[0].budget_changes_pending,
@@ -271,6 +315,54 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
     sectorBreakdown,
     sectors,
     panels: ['Dashboard', 'Projects', 'Activities', 'Finance', 'Logistics & Facilitation']
+  });
+}));
+
+// "What I Need to Approve": every activity and movement waiting on THIS user,
+// in one request so the screen and the sidebar badge come from one source.
+//
+// The list is derived from the signed-in account, never from a hard-coded role:
+// a manager sees only what names them, the Director sees only what names the
+// Director's office, and anybody who approves nothing gets an empty queue.
+app.get('/api/approval-queue', authMiddleware, asyncRoute(async (req, res) => {
+  const activityValues = [];
+  const activityWhere = pendingForMeSql(req.user, activityValues, 'a');
+  const movementValues = [];
+  const movementWhere = pendingForMeSql(req.user, movementValues, 'm');
+
+  const [activities, movements] = await Promise.all([
+    pool.query(
+      `SELECT a.*, p.name AS project_name, m.name AS assigned_to_name,
+              req.name AS approval_required_from_name, req.role AS approval_required_from_role,
+              req.sector AS approval_required_from_sector, app.name AS approved_by_name
+       FROM activities a
+       LEFT JOIN projects p ON p.id = a.project_id
+       LEFT JOIN users m ON m.id = a.assigned_to
+       LEFT JOIN users req ON req.id = a.approval_required_from
+       LEFT JOIN users app ON app.id = a.approved_by
+       WHERE ${activityWhere}
+       ORDER BY a.created_at DESC LIMIT 200`,
+      activityValues
+    ),
+    pool.query(
+      `SELECT m.*, creator.name AS created_by_name, approver.name AS approved_by_name,
+              req.name AS approval_required_from_name, req.role AS approval_required_from_role,
+              req.sector AS approval_required_from_sector, holder.name AS assigned_to_name
+       FROM movements m
+       LEFT JOIN users creator ON creator.id = m.created_by
+       LEFT JOIN users approver ON approver.id = m.approved_by
+       LEFT JOIN users req ON req.id = m.approval_required_from
+       LEFT JOIN users holder ON holder.id = m.assigned_to
+       WHERE ${movementWhere}
+       ORDER BY m.created_at DESC LIMIT 200`,
+      movementValues
+    )
+  ]);
+
+  res.json({
+    activities: activities.rows.map(mapActivity),
+    movements: movements.rows.map(mapMovement),
+    total: activities.rowCount + movements.rowCount
   });
 }));
 
@@ -515,6 +607,26 @@ app.use('/api/activities', authMiddleware, activityRouter);
 // rather than refused outright; the Director sees every area. Screen and export
 // share one query, so an export can never show more than the screen does.
 app.use('/api/reports', authMiddleware, reportRouter);
+
+// External Business Partner / Business Operation Access: a read-only window
+// onto ONE business operation, for someone outside the organisation. The
+// operation is taken from the account, never from the request, and only
+// approved records the Director has left visible are returned.
+//
+// authMiddleware refuses a partner account everything outside this prefix, so
+// the restriction does not depend on any handler below remembering to check.
+app.use('/api/partner', authMiddleware, partnerRouter);
+
+// The Director's side of the same thing: invite a partner, assign or change
+// their business operation, suspend or revoke their access.
+app.use('/api/partners', authMiddleware, partnersRouter);
+
+// Monthly planning: the Director plans and confirms a month per business
+// operation, the manager works it and records what was spent, and the month is
+// reported and closed. No money moves through the platform at any point -- the
+// confirmed allocation is handed over outside it, and these records exist for
+// accountability.
+app.use('/api/monthly-plans', authMiddleware, monthlyPlanRouter);
 
 
 app.use((error, req, res, next) => {
