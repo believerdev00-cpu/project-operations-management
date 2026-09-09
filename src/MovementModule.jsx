@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { ApprovalPanel, approverName, canApproveRecord } from './ActivityReview.jsx';
+import { displayLanguage, translate, useT } from './i18n.js';
+import { operationName } from '../shared/businessOperations.js';
 
 // Logistics & Facilitation module.
 // Implements the "Movement_and_Facilitation_Side_Mockup" document: the
@@ -11,7 +14,7 @@ export const MOVEMENT_TYPES = ['Staff', 'Equipment', 'Materials', 'Field Operati
 export const CURRENCIES = ['RWF', 'USD', 'CDF'];
 export const EVIDENCE_KINDS = ['Receipt', 'Invoice', 'Fuel Slip', 'Hotel Receipt', 'Transport Ticket', 'Payment Proof', 'Photograph', 'Other'];
 export const EVIDENCE_STATUSES = ['Pending', 'Partial', 'Complete'];
-export const MOVEMENT_STATUSES = ['Draft', 'Pending', 'Approved', 'Funds Released', 'Ongoing', 'Completed', 'Rejected', 'Cancelled'];
+export const MOVEMENT_STATUSES = ['Draft', 'Pending Approval', 'Approved', 'Funds Released', 'In Progress', 'Completed', 'Rejected', 'Cancelled'];
 
 // Areas a movement can be linked to. Logistics & Facilitation is its own area,
 // so it never appears here (section 5).
@@ -22,23 +25,25 @@ const LINKABLE_AREAS = [
 ];
 
 const STATUS_FLOW = {
-  Draft: ['Pending', 'Cancelled'],
-  Pending: ['Approved', 'Rejected', 'Cancelled', 'Draft'],
-  Approved: ['Funds Released', 'Ongoing', 'Rejected', 'Cancelled'],
-  'Funds Released': ['Ongoing', 'Completed', 'Cancelled'],
-  Ongoing: ['Completed', 'Cancelled'],
-  Completed: ['Ongoing'],
-  Rejected: ['Pending'],
-  Cancelled: ['Pending']
+  Draft: ['Pending Approval', 'Cancelled'],
+  'Pending Approval': ['Approved', 'Rejected', 'Cancelled', 'Draft'],
+  Approved: ['Funds Released', 'In Progress', 'Rejected', 'Cancelled'],
+  'Funds Released': ['In Progress', 'Completed', 'Cancelled'],
+  'In Progress': ['Completed', 'Cancelled'],
+  Completed: ['In Progress'],
+  Rejected: ['Pending Approval'],
+  Cancelled: ['Pending Approval']
 };
 
+// The key names the column; the second entry is the translation key for its
+// label, so a cost line reads in the viewer's language.
 const COST_LINES = [
-  ['transport', 'Transport'],
-  ['fuel', 'Fuel'],
-  ['accommodation', 'Accommodation'],
-  ['meals', 'Meals / Allowance'],
-  ['handling', 'Loading / Handling'],
-  ['other', 'Other Expenses']
+  ['transport', 'cost.transport'],
+  ['fuel', 'cost.fuel'],
+  ['accommodation', 'cost.accommodation'],
+  ['meals', 'cost.meals'],
+  ['handling', 'cost.handling'],
+  ['other', 'cost.other']
 ];
 
 const TRANSPORT_SUGGESTIONS = ['Company Vehicle', 'Hired Vehicle', 'Motorcycle', 'Public Transport', 'Air', 'Boat', 'On Foot'];
@@ -99,14 +104,18 @@ function toDateInput(value) {
   return /^\d{4}-\d{2}-\d{2}/.test(String(value)) ? String(value).slice(0, 10) : '';
 }
 
+// Named from the shared definition so a movement's operation reads the same
+// here as it does everywhere else, in the viewer's language. A standalone
+// movement belongs to Movements & Facilitation itself, which is not a linkable
+// area but is very much an operation for the purpose of reading a record.
 function areaLabel(area) {
-  if (!area) return 'Not linked';
-  return LINKABLE_AREAS.find((item) => item.id === area)?.name || area;
+  if (!area) return translate(displayLanguage(), 'filter.notLinked');
+  return operationName(area, displayLanguage());
 }
 
 function statusTone(status) {
   if (['Completed'].includes(status)) return 'tone-done';
-  if (['Approved', 'Funds Released', 'Ongoing'].includes(status)) return 'tone-active';
+  if (['Approved', 'Funds Released', 'In Progress'].includes(status)) return 'tone-active';
   if (['Rejected', 'Cancelled'].includes(status)) return 'tone-stopped';
   return 'tone-waiting';
 }
@@ -135,6 +144,7 @@ function movementToForm(movement) {
 }
 
 export default function MovementModule({ user, token, fetchJson, onMessage, onError }) {
+  const t = useT();
   const isDirector = user.role === 'super-admin';
   const canCreate = isDirector || user.sector === 'movement';
 
@@ -206,7 +216,7 @@ export default function MovementModule({ user, token, fetchJson, onMessage, onEr
       } else {
         const created = await fetchJson('/api/movements', {
           method: 'POST',
-          body: JSON.stringify({ ...body, status: submitForReview ? 'Pending' : 'Draft' })
+          body: JSON.stringify({ ...body, status: submitForReview ? 'Pending Approval' : 'Draft' })
         });
         onMessage(`Movement ${created.ref} created.`);
         setFormState(null);
@@ -224,6 +234,18 @@ export default function MovementModule({ user, token, fetchJson, onMessage, onEr
       await refreshDetail(movement.id);
     } catch (statusError) {
       onError(statusError.message);
+    }
+  };
+
+  // The decision the record is waiting on. Separate from the status buttons: it
+  // goes to the route that checks the caller is the named approver.
+  const decideApproval = async (movement, body) => {
+    try {
+      await fetchJson(`/api/movements/${movement.id}/approval`, { method: 'PATCH', body: JSON.stringify(body) });
+      onMessage(body.action === 'approve' ? `${movement.ref} approved.` : `${movement.ref} rejected.`);
+      await refreshDetail(movement.id);
+    } catch (approvalError) {
+      onError(approvalError.message);
     }
   };
 
@@ -304,34 +326,34 @@ export default function MovementModule({ user, token, fetchJson, onMessage, onEr
   return <div className="movement-module">
     <section className="context-strip">
       <div>
-        <span className="eyebrow">MOVEMENT &amp; FACILITATION</span>
-        <h2>{isDirector ? 'Director / Super Admin' : user.sector === 'movement' ? 'Movement Officer' : `${areaLabel(user.sector)} — linked movements`}</h2>
-        <p>Movements of personnel, equipment and materials, the funds facilitating them, and the evidence returned.</p>
+        <span className="eyebrow">{t('movement.eyebrow')}</span>
+        <h2>{isDirector ? t('role.super-admin') : user.sector === 'movement' ? t('movement.movementOfficer') : `${areaLabel(user.sector)} — ${t('movement.linkedMovements')}`}</h2>
+        <p>{t('movement.blurb')}</p>
       </div>
       {canCreate && <button className="primary-btn" type="button" onClick={() => setFormState({ mode: 'create', values: emptyForm })}>
-        + Create movement / facilitation
+        {t('action.createMovement')}
       </button>}
     </section>
 
     <div className="metric-grid metric-grid-5">
-      <Metric label="Total requests" value={counts.total ?? 0} />
-      <Metric label="Pending" value={counts.pending ?? 0} />
-      <Metric label="Approved" value={counts.approved ?? 0} />
-      <Metric label="Ongoing" value={counts.ongoing ?? 0} />
-      <Metric label="Completed" value={counts.completed ?? 0} />
+      <Metric label={t('movement.totalRequests')} value={counts.total ?? 0} />
+      <Metric label={t('movement.pendingApproval')} value={counts.pending ?? 0} />
+      <Metric label={t('approval.approved')} value={counts.approved ?? 0} />
+      <Metric label={t('portal.inProgress')} value={counts.ongoing ?? 0} />
+      <Metric label={t('portal.completed')} value={counts.completed ?? 0} />
     </div>
 
     {summary && <section className="totals-strip">
-      <TotalBlock label="Estimated facilitation" totals={summary.totals.estimated} />
-      <TotalBlock label="Funds released" totals={summary.totals.released} />
-      <TotalBlock label="Actual expense" totals={summary.totals.actual} />
-      <TotalBlock label="Balance / return" totals={summary.totals.balance} />
+      <TotalBlock label={t('movement.estimatedFacilitation')} totals={summary.totals.estimated} />
+      <TotalBlock label={t('movement.fundsReleased')} totals={summary.totals.released} />
+      <TotalBlock label={t('movement.actualExpense')} totals={summary.totals.actual} />
+      <TotalBlock label={t('movement.balanceReturn')} totals={summary.totals.balance} />
       <div className="total-block total-block-note">
-        <span>Reference rate</span>
+        <span>{t('movement.referenceRate')}</span>
         <strong>1 USD = {Number(summary.rate.rwfPerUsd).toLocaleString()} RWF</strong>
         <small>1 USD = {Number(summary.rate.cdfPerUsd).toLocaleString()} CDF · {formatDateTime(summary.rate.updatedAt)}</small>
         {isDirector && <button className="text-btn" type="button" onClick={() => setShowRates((current) => !current)}>
-          {showRates ? 'Hide rate settings' : 'Update rate'}
+          {showRates ? t('action.hideRate') : t('action.updateRate')}
         </button>}
       </div>
     </section>}
@@ -360,13 +382,13 @@ export default function MovementModule({ user, token, fetchJson, onMessage, onEr
     <section className="panel">
       <div className="panel-header">
         <div>
-          <h2>Movement register</h2>
-          <span>{movements.length} record{movements.length === 1 ? '' : 's'}{filtersActive ? ' matching the current filters' : ''}</span>
+          <h2>{t('panel.movementRegister')}</h2>
+          <span>{movements.length}</span>
         </div>
-        <button className="text-btn" type="button" onClick={load}>Refresh</button>
+        <button className="text-btn" type="button" onClick={load}>{t('action.refresh')}</button>
       </div>
       {loading
-        ? <div className="loading-state"><span className="spinner" />Loading movement records...</div>
+        ? <div className="loading-state"><span className="spinner" />{t('app.loading')}</div>
         : <MovementTable movements={movements} selectedId={detail?.movement.id} onSelect={openDetail} />}
     </section>
 
@@ -379,6 +401,7 @@ export default function MovementModule({ user, token, fetchJson, onMessage, onEr
       onClose={() => setDetail(null)}
       onEdit={(movement) => setFormState({ mode: 'edit', movement, values: movementToForm(movement) })}
       onStatus={changeStatus}
+      onApprove={decideApproval}
       onFinance={updateFinance}
       onUpload={uploadEvidence}
       onRemoveEvidence={removeEvidence}
@@ -402,38 +425,40 @@ function TotalBlock({ label, totals }) {
 }
 
 function MovementFilters({ filters, setFilters, onApply, onClear, active }) {
+  const t = useT();
   const set = (patch) => setFilters({ ...filters, ...patch });
   return <form className="filter-panel" onSubmit={(event) => { event.preventDefault(); onApply(); }}>
     <div className="panel-header">
-      <div><h2>Filter movements</h2><span>By date, status, destination, person or team, currency, type or related operation.</span></div>
+      <div><h2>{t('panel.filterMovements')}</h2><span>{t('filter.blurb')}</span></div>
     </div>
     <div className="filter-grid">
-      <label className="form-field"><span>Search</span><input placeholder="Reference, purpose, route, person" value={filters.search} onChange={(event) => set({ search: event.target.value })} /></label>
-      <label className="form-field"><span>Status</span><select value={filters.status} onChange={(event) => set({ status: event.target.value })}><option value="All">All statuses</option>{MOVEMENT_STATUSES.map((status) => <option key={status}>{status}</option>)}</select></label>
-      <label className="form-field"><span>Related operation</span><select value={filters.relatedArea} onChange={(event) => set({ relatedArea: event.target.value })}><option value="All">All operations</option><option value="None">Not linked</option>{LINKABLE_AREAS.map((area) => <option key={area.id} value={area.id}>{area.name}</option>)}</select></label>
-      <label className="form-field"><span>Movement type</span><select value={filters.movementType} onChange={(event) => set({ movementType: event.target.value })}><option value="All">All types</option>{MOVEMENT_TYPES.map((type) => <option key={type}>{type}</option>)}</select></label>
-      <label className="form-field"><span>Currency</span><select value={filters.currency} onChange={(event) => set({ currency: event.target.value })}><option value="All">All currencies</option>{CURRENCIES.map((currency) => <option key={currency}>{currency}</option>)}</select></label>
-      <label className="form-field"><span>Destination</span><input value={filters.destination} onChange={(event) => set({ destination: event.target.value })} /></label>
-      <label className="form-field"><span>Person / team</span><input value={filters.personTeam} onChange={(event) => set({ personTeam: event.target.value })} /></label>
-      <label className="form-field"><span>Departure from</span><input type="date" value={filters.dateFrom} onChange={(event) => set({ dateFrom: event.target.value })} /></label>
-      <label className="form-field"><span>Departure to</span><input type="date" value={filters.dateTo} onChange={(event) => set({ dateTo: event.target.value })} /></label>
+      <label className="form-field"><span>{t('field.search')}</span><input placeholder={t('movement.searchPlaceholder')} value={filters.search} onChange={(event) => set({ search: event.target.value })} /></label>
+      <label className="form-field"><span>{t('table.status')}</span><select value={filters.status} onChange={(event) => set({ status: event.target.value })}><option value="All">{t('form.allStatuses')}</option>{MOVEMENT_STATUSES.map((status) => <option key={status} value={status}>{t(`status.${status}`)}</option>)}</select></label>
+      <label className="form-field"><span>{t('movement.relatedArea')}</span><select value={filters.relatedArea} onChange={(event) => set({ relatedArea: event.target.value })}><option value="All">{t('app.allOperations')}</option><option value="None">{t('filter.notLinked')}</option>{LINKABLE_AREAS.map((area) => <option key={area.id} value={area.id}>{areaLabel(area.id)}</option>)}</select></label>
+      <label className="form-field"><span>{t('movement.movementType')}</span><select value={filters.movementType} onChange={(event) => set({ movementType: event.target.value })}><option value="All">{t('filter.allTypes')}</option>{MOVEMENT_TYPES.map((type) => <option key={type} value={type}>{t(`mtype.${type}`)}</option>)}</select></label>
+      <label className="form-field"><span>{t('field.currency')}</span><select value={filters.currency} onChange={(event) => set({ currency: event.target.value })}><option value="All">{t('filter.allCurrencies')}</option>{CURRENCIES.map((currency) => <option key={currency}>{currency}</option>)}</select></label>
+      <label className="form-field"><span>{t('table.destination')}</span><input value={filters.destination} onChange={(event) => set({ destination: event.target.value })} /></label>
+      <label className="form-field"><span>{t('movement.personTeam')}</span><input value={filters.personTeam} onChange={(event) => set({ personTeam: event.target.value })} /></label>
+      <label className="form-field"><span>{t('movement.departureFrom')}</span><input type="date" value={filters.dateFrom} onChange={(event) => set({ dateFrom: event.target.value })} /></label>
+      <label className="form-field"><span>{t('movement.departureTo')}</span><input type="date" value={filters.dateTo} onChange={(event) => set({ dateTo: event.target.value })} /></label>
     </div>
     <div className="button-row">
-      <button className="primary-btn" type="submit">Apply filters</button>
-      {active && <button className="secondary-btn" type="button" onClick={onClear}>Clear</button>}
+      <button className="primary-btn" type="submit">{t('action.applyFilters')}</button>
+      {active && <button className="secondary-btn" type="button" onClick={onClear}>{t('action.clear')}</button>}
     </div>
   </form>;
 }
 
 function MovementTable({ movements, selectedId, onSelect }) {
+  const t = useT();
   if (!movements.length) {
-    return <div className="empty-state"><strong>No movement records match.</strong><span>Create a movement or relax the filters.</span></div>;
+    return <div className="empty-state"><strong>{t('empty.noMovements')}</strong><span>{t('empty.noMovementsHint')}</span></div>;
   }
   return <div className="table-wrap"><table>
     <thead><tr>
-      <th>Reference</th><th>Type</th><th>Purpose</th><th>Related area</th><th>Route</th>
-      <th>Departure</th><th>Person / team</th><th>Status</th>
-      <th>Estimated</th><th>Released</th><th>Actual</th><th>Balance</th><th>Evidence</th>
+      <th>{t('movement.reference')}</th><th>{t('field.type')}</th><th>{t('table.purpose')}</th><th>{t('movement.relatedArea')}</th><th>{t('movement.route')}</th>
+      <th>{t('movement.departure')}</th><th>{t('movement.personTeam')}</th><th>{t('table.status')}</th>
+      <th>{t('movement.estimated')}</th><th>{t('movement.released')}</th><th>{t('movement.actual')}</th><th>{t('movement.balance')}</th><th>{t('field.evidence')}</th>
     </tr></thead>
     <tbody>{movements.map((movement) => <tr
       key={movement.id}
@@ -459,6 +484,7 @@ function MovementTable({ movements, selectedId, onSelect }) {
 
 // Section 3 (request details) and section 4 (facilitation cost breakdown).
 function MovementForm({ mode, movement, initialValues, rate, isDirector, onCancel, onSave }) {
+  const t = useT();
   const [values, setValues] = useState(initialValues);
   const [useActualRate, setUseActualRate] = useState(false);
   const [actualRate, setActualRate] = useState({
@@ -494,109 +520,110 @@ function MovementForm({ mode, movement, initialValues, rate, isDirector, onCance
   return <form className="form-panel movement-form" onSubmit={(event) => submit(event, true)}>
     <div className="panel-header">
       <div>
-        <h2>{mode === 'edit' ? `Edit ${movement.ref}` : 'Create movement / facilitation'}</h2>
-        <span>Record why the movement happened, where it went, who travelled and what it cost.</span>
+        <h2>{mode === 'edit' ? `${t('movement.editMovementTitle')} ${movement.ref}` : t('movement.newMovement')}</h2>
+        <span>{t('movement.formBlurb')}</span>
       </div>
-      <button className="text-btn" type="button" onClick={onCancel}>Cancel</button>
+      <button className="text-btn" type="button" onClick={onCancel}>{t('action.cancel')}</button>
     </div>
 
-    <h3 className="form-section-title">Request details</h3>
+    <h3 className="form-section-title">{t('review.requestDetails')}</h3>
     <div className="form-grid movement-grid">
-      <label className="form-field"><span>Reference no.</span>
+      <label className="form-field"><span>{t('movement.referenceNo')}</span>
         {mode === 'edit'
           ? <span className="read-only-value">{movement.ref}</span>
-          : <span className="read-only-value">Generated on save (MF-{new Date().getFullYear()}-0000)</span>}
+          : <span className="read-only-value">{t('movement.generatedOnSave')} (MF-{new Date().getFullYear()}-0000)</span>}
       </label>
-      <label className="form-field"><span>Movement type</span>
+      <label className="form-field"><span>{t('movement.movementType')}</span>
         <select value={values.movementType} onChange={(event) => set({ movementType: event.target.value })}>
-          {MOVEMENT_TYPES.map((type) => <option key={type}>{type}</option>)}
+          {MOVEMENT_TYPES.map((type) => <option key={type} value={type}>{t(`mtype.${type}`)}</option>)}
         </select>
       </label>
-      <label className="form-field"><span>Related area</span>
+      <label className="form-field"><span>{t('movement.relatedArea')}</span>
         <select value={values.relatedArea} onChange={(event) => set({ relatedArea: event.target.value })}>
-          <option value="">Not linked — Logistics &amp; Facilitation only</option>
-          {LINKABLE_AREAS.map((area) => <option key={area.id} value={area.id}>{area.name}</option>)}
+          <option value="">{t('movement.notLinkedOption')}</option>
+          {LINKABLE_AREAS.map((area) => <option key={area.id} value={area.id}>{areaLabel(area.id)}</option>)}
         </select>
       </label>
-      <label className="form-field form-field-wide"><span>Purpose</span>
-        <input required placeholder="Mining site inspection" value={values.purpose} onChange={(event) => set({ purpose: event.target.value })} />
+      <label className="form-field form-field-wide"><span>{t('table.purpose')}</span>
+        <input required value={values.purpose} onChange={(event) => set({ purpose: event.target.value })} />
       </label>
-      <label className="form-field"><span>Origin</span>
-        <input required placeholder="Kigali" value={values.origin} onChange={(event) => set({ origin: event.target.value })} />
+      <label className="form-field"><span>{t('movement.origin')}</span>
+        <input required value={values.origin} onChange={(event) => set({ origin: event.target.value })} />
       </label>
-      <label className="form-field"><span>Destination</span>
-        <input required placeholder="Rubaya" value={values.destination} onChange={(event) => set({ destination: event.target.value })} />
+      <label className="form-field"><span>{t('table.destination')}</span>
+        <input required value={values.destination} onChange={(event) => set({ destination: event.target.value })} />
       </label>
-      <label className="form-field"><span>Departure date</span>
+      <label className="form-field"><span>{t('movement.departureDate')}</span>
         <input type="date" value={values.departureDate} onChange={(event) => set({ departureDate: event.target.value })} />
       </label>
-      <label className="form-field"><span>Return date</span>
+      <label className="form-field"><span>{t('movement.returnDate')}</span>
         <input type="date" min={values.departureDate || undefined} value={values.returnDate} onChange={(event) => set({ returnDate: event.target.value })} />
       </label>
-      <label className="form-field"><span>Person / team</span>
-        <input placeholder="Site Inspection Team" value={values.personTeam} onChange={(event) => set({ personTeam: event.target.value })} />
+      <label className="form-field"><span>{t('movement.personTeam')}</span>
+        <input value={values.personTeam} onChange={(event) => set({ personTeam: event.target.value })} />
       </label>
-      <label className="form-field"><span>Transport type</span>
-        <input list="transport-suggestions" placeholder="Company Vehicle" value={values.transportType} onChange={(event) => set({ transportType: event.target.value })} />
+      <label className="form-field"><span>{t('movement.transportType')}</span>
+        <input list="transport-suggestions" value={values.transportType} onChange={(event) => set({ transportType: event.target.value })} />
         <datalist id="transport-suggestions">{TRANSPORT_SUGGESTIONS.map((option) => <option key={option} value={option} />)}</datalist>
       </label>
-      <label className="form-field"><span>Vehicle / driver (optional)</span>
+      <label className="form-field"><span>{t('movement.vehicleDriver')}</span>
         <input value={values.vehicleDriver} onChange={(event) => set({ vehicleDriver: event.target.value })} />
       </label>
-      <label className="form-field"><span>Currency</span>
+      <label className="form-field"><span>{t('field.currency')}</span>
         <select value={values.currency} onChange={(event) => set({ currency: event.target.value })}>
           {CURRENCIES.map((currency) => <option key={currency}>{currency}</option>)}
         </select>
       </label>
-      <label className="form-field form-field-wide"><span>Notes</span>
-        <input placeholder="Anything the Director should know about this movement" value={values.notes} onChange={(event) => set({ notes: event.target.value })} />
+      <label className="form-field form-field-wide"><span>{t('field.notes')}</span>
+        <input placeholder={t('movement.notesPlaceholder')} value={values.notes} onChange={(event) => set({ notes: event.target.value })} />
       </label>
     </div>
 
-    <h3 className="form-section-title">Facilitation cost breakdown</h3>
+    <h3 className="form-section-title">{t('movement.costBreakdown')}</h3>
     <div className="cost-grid">
-      {COST_LINES.map(([key, label]) => <label className="form-field" key={key}>
-        <span>{label}</span>
+      {COST_LINES.map(([key, labelKey]) => <label className="form-field" key={key}>
+        <span>{t(labelKey)}</span>
         <input type="number" min="0" step="0.01" placeholder="0" value={values.costs[key]} onChange={(event) => setCost(key, event.target.value)} />
       </label>)}
       <div className="cost-total">
-        <span>Total</span>
+        <span>{t('field.total')}</span>
         <strong>{formatMoney(total, values.currency)}</strong>
       </div>
     </div>
 
     {converted && <div className="conversion-strip">
-      <div><span>Equivalent</span><strong>{formatMoney(converted.rwf, 'RWF')} · {formatMoney(converted.usd, 'USD')} · {formatMoney(converted.cdf, 'CDF')}</strong></div>
+      <div><span>{t('field.equivalent')}</span><strong>{formatMoney(converted.rwf, 'RWF')} · {formatMoney(converted.usd, 'USD')} · {formatMoney(converted.cdf, 'CDF')}</strong></div>
       <small>
-        Rate stored with this record: 1 USD = {Number(effectiveRate.rwfPerUsd).toLocaleString()} RWF / {Number(effectiveRate.cdfPerUsd).toLocaleString()} CDF
-        {useActualRate ? ' (actual transaction rate)' : ' (reference rate)'}
+        {t('movement.rateStored')}: 1 USD = {Number(effectiveRate.rwfPerUsd).toLocaleString()} RWF / {Number(effectiveRate.cdfPerUsd).toLocaleString()} CDF
+        {' '}({useActualRate ? t('movement.actualRate') : t('movement.refRate')})
       </small>
     </div>}
 
     {isDirector && <div className="rate-override">
       <label className="check-field">
         <input type="checkbox" checked={useActualRate} onChange={(event) => setUseActualRate(event.target.checked)} />
-        Use the actual transaction rate instead of the reference rate
+        {t('movement.useActualRate')}
       </label>
       {useActualRate && <div className="form-grid">
-        <label className="form-field"><span>RWF per USD</span>
+        <label className="form-field"><span>{t('movement.rwfPerUsdShort')}</span>
           <input type="number" min="0.000001" step="0.01" value={actualRate.rwfPerUsd} onChange={(event) => setActualRate({ ...actualRate, rwfPerUsd: event.target.value })} />
         </label>
-        <label className="form-field"><span>CDF per USD</span>
+        <label className="form-field"><span>{t('movement.cdfPerUsdShort')}</span>
           <input type="number" min="0.000001" step="0.01" value={actualRate.cdfPerUsd} onChange={(event) => setActualRate({ ...actualRate, cdfPerUsd: event.target.value })} />
         </label>
       </div>}
     </div>}
 
     <div className="button-row">
-      <button className="primary-btn" type="submit">{mode === 'edit' ? 'Save changes' : 'Create and submit for review'}</button>
-      {mode === 'create' && <button className="secondary-btn" type="button" onClick={(event) => submit(event, false)}>Save as draft</button>}
+      <button className="primary-btn" type="submit">{mode === 'edit' ? t('movement.saveChanges') : t('movement.createAndSubmit')}</button>
+      {mode === 'create' && <button className="secondary-btn" type="button" onClick={(event) => submit(event, false)}>{t('action.saveDraft')}</button>}
     </div>
   </form>;
 }
 
 // Sections 6, 7 and 8: workflow actions, accountability figures, evidence, history.
-function MovementDetail({ detail, user, token, isDirector, onClose, onEdit, onStatus, onFinance, onUpload, onRemoveEvidence, onDelete }) {
+function MovementDetail({ detail, user, token, isDirector, onClose, onEdit, onStatus, onApprove, onFinance, onUpload, onRemoveEvidence, onDelete }) {
+  const t = useT();
   const { movement, evidence, history } = detail;
   const [finance, setFinance] = useState({
     fundsReleased: String(movement.fundsReleased),
@@ -604,12 +631,25 @@ function MovementDetail({ detail, user, token, isDirector, onClose, onEdit, onSt
     evidenceStatus: movement.evidenceStatus
   });
   const [reason, setReason] = useState('');
+  const [approval, setApproval] = useState({
+    approvedBudget: String(movement.estimatedTotal),
+    adminNote: '',
+    rejectionReason: ''
+  });
 
-  const canEdit = isDirector || (user.sector === 'movement' && movement.createdBy === user.id && ['Draft', 'Pending'].includes(movement.status));
+  const canEdit = isDirector || (user.sector === 'movement' && movement.createdBy === user.id && ['Draft', 'Pending Approval'].includes(movement.status));
   const canAttach = isDirector || (user.sector === 'movement' && movement.createdBy === user.id);
+  // Whether this user is the person the record is waiting on. The API checks
+  // the same thing again before it writes anything.
+  const iAmApprover = canApproveRecord(user, movement);
+  const canChangeBudget = iAmApprover && isDirector;
+  const typedBudget = Number(approval.approvedBudget || 0);
+  const budgetChanged = canChangeBudget && typedBudget !== Number(movement.estimatedTotal);
   const nextStatuses = (STATUS_FLOW[movement.status] || []).filter((status) => {
+    // Approving is a decision with a named approver, not a status button.
+    if (status === 'Approved' && movement.approvalRequired && movement.approvalStatus === 'pending') return false;
     if (isDirector) return true;
-    return movement.status === 'Draft' && status === 'Pending' && movement.createdBy === user.id;
+    return movement.status === 'Draft' && status === 'Pending Approval' && movement.createdBy === user.id;
   });
 
   return <section className="panel detail-panel">
@@ -621,42 +661,89 @@ function MovementDetail({ detail, user, token, isDirector, onClose, onEdit, onSt
           {' '}created by {movement.createdByName || 'Unknown'} on {formatDateTime(movement.createdAt)}
         </span>
       </div>
-      <button className="text-btn" type="button" onClick={onClose}>Close</button>
+      <button className="text-btn" type="button" onClick={onClose}>{t('action.close')}</button>
     </div>
+
+    <ApprovalPanel record={movement} sectorLabel={areaLabel} />
 
     <div className="detail-facts">
-      <Fact label="Status" value={<span className={`status-badge ${statusTone(movement.status)}`}>{movement.status}</span>} />
-      <Fact label="Departure" value={formatDate(movement.departureDate)} />
-      <Fact label="Return" value={formatDate(movement.returnDate)} />
-      <Fact label="Person / team" value={movement.personTeam || '—'} />
-      <Fact label="Transport" value={movement.transportType || '—'} />
-      <Fact label="Vehicle / driver" value={movement.vehicleDriver || '—'} />
-      <Fact label="Currency" value={movement.currency} />
-      <Fact label="Approved by" value={movement.approvedByName ? `${movement.approvedByName} · ${formatDateTime(movement.approvedAt)}` : 'Not yet approved'} />
+      <Fact label={t('table.status')} value={<span className={`status-badge ${statusTone(movement.status)}`}>{t(`status.${movement.status}`)}</span>} />
+      <Fact label={t('table.department')} value={areaLabel(movement.department)} />
+      <Fact label={t('movement.departure')} value={formatDate(movement.departureDate)} />
+      <Fact label={t('movement.return')} value={formatDate(movement.returnDate)} />
+      <Fact label={t('movement.personTeam')} value={movement.personTeam || '—'} />
+      <Fact label={t('table.assignedTo')} value={movement.assignedToName || <span className="muted-cell">{t('review.notAssigned')}</span>} />
+      <Fact label={t('movement.transport')} value={movement.transportType || '—'} />
+      <Fact label={t('movement.vehicleDriverShort')} value={movement.vehicleDriver || '—'} />
+      <Fact label={t('field.currency')} value={movement.currency} />
+      <Fact label={t('approval.approvedBy')} value={movement.approvedByName ? `${movement.approvedByName} · ${formatDateTime(movement.approvedAt)}` : t('review.notReviewed')} />
     </div>
     {movement.notes && <p className="detail-notes">{movement.notes}</p>}
+    {movement.adminNote && <p className="detail-notes admin-note">&ldquo;{movement.adminNote}&rdquo;</p>}
 
-    <h3 className="form-section-title">Facilitation cost breakdown</h3>
+    {/* The decision this record is waiting on, drawn only for the person it
+        names. The API refuses anybody else regardless of what is on screen. */}
+    {iAmApprover && <form className="decision-form approval-form" onSubmit={(event) => {
+      event.preventDefault();
+      onApprove(movement, {
+        action: 'approve',
+        ...(canChangeBudget ? { approvedBudget: typedBudget } : {}),
+        adminNote: approval.adminNote.trim()
+      });
+    }}>
+      <h3 className="form-section-title">{t('approval.yourDecision')}</h3>
+      <div className="form-grid">
+        {canChangeBudget && <label className="form-field"><span>{t('review.approvedBudget')} ({movement.currency})</span>
+          <input type="number" min="0" step="0.01" value={approval.approvedBudget}
+            onChange={(event) => setApproval({ ...approval, approvedBudget: event.target.value })} />
+        </label>}
+        <label className="form-field form-field-wide">
+          <span>{t('review.directorNote')} ({budgetChanged ? t('field.required') : t('field.optional')})</span>
+          <textarea rows="2"
+            value={approval.adminNote} onChange={(event) => setApproval({ ...approval, adminNote: event.target.value })} />
+        </label>
+        <label className="form-field form-field-wide"><span>{t('review.reasonIfReject')}</span>
+          <input
+            value={approval.rejectionReason} onChange={(event) => setApproval({ ...approval, rejectionReason: event.target.value })} />
+        </label>
+      </div>
+      {budgetChanged && <p className="decision-hint">
+        {formatMoney(movement.estimatedTotal, movement.currency)} &rarr; {formatMoney(typedBudget, movement.currency)}
+      </p>}
+      <div className="button-row">
+        <button className="primary-btn" type="submit">{t('approval.approve')}</button>
+        <button className="danger-btn outlined" type="button"
+          disabled={!approval.rejectionReason.trim()}
+          onClick={() => onApprove(movement, { action: 'reject', rejectionReason: approval.rejectionReason.trim() })}>
+          {t('approval.reject')}
+        </button>
+      </div>
+    </form>}
+    {!iAmApprover && movement.approvalRequired && movement.approvalStatus === 'pending' && movement.status !== 'Draft' && <p className="decision-hint">
+      {t('approval.waitingFor')} {approverName(movement, areaLabel, t)} {t('review.waitingOnOther')}
+    </p>}
+
+    <h3 className="form-section-title">{t('movement.costBreakdown')}</h3>
     <div className="table-wrap"><table className="cost-table">
-      <thead><tr><th>Cost item</th><th>Amount</th></tr></thead>
+      <thead><tr><th>{t('movement.costItem')}</th><th>{t('field.amount')}</th></tr></thead>
       <tbody>
-        {COST_LINES.map(([key, label]) => <tr key={key}><td>{label}</td><td>{formatMoney(movement.costs[key], movement.currency)}</td></tr>)}
-        <tr className="total-row"><td><strong>Total</strong></td><td><strong>{formatMoney(movement.estimatedTotal, movement.currency)}</strong></td></tr>
+        {COST_LINES.map(([key, labelKey]) => <tr key={key}><td>{t(labelKey)}</td><td>{formatMoney(movement.costs[key], movement.currency)}</td></tr>)}
+        <tr className="total-row"><td><strong>{t('field.total')}</strong></td><td><strong>{formatMoney(movement.estimatedTotal, movement.currency)}</strong></td></tr>
       </tbody>
     </table></div>
     {movement.converted && <p className="detail-notes">
-      Equivalent at the rate stored with this record ({Number(movement.rate.rwfPerUsd).toLocaleString()} RWF / {Number(movement.rate.cdfPerUsd).toLocaleString()} CDF per USD,
-      {' '}{movement.rate.source === 'actual' ? 'actual transaction rate' : 'reference rate'} of {formatDateTime(movement.rate.recordedAt)}):
+      {t('movement.equivalentAt')} ({Number(movement.rate.rwfPerUsd).toLocaleString()} RWF / {Number(movement.rate.cdfPerUsd).toLocaleString()} CDF / USD,
+      {' '}{movement.rate.source === 'actual' ? t('movement.actualRate') : t('movement.refRate')}, {formatDateTime(movement.rate.recordedAt)}):
       {' '}{formatMoney(movement.converted.estimatedTotal.rwf, 'RWF')} · {formatMoney(movement.converted.estimatedTotal.usd, 'USD')} · {formatMoney(movement.converted.estimatedTotal.cdf, 'CDF')}
     </p>}
 
-    <h3 className="form-section-title">Evidence &amp; accountability</h3>
+    <h3 className="form-section-title">{t('movement.evidenceAccountability')}</h3>
     <div className="accountability-grid">
-      <Fact label="Estimated facilitation" value={formatMoney(movement.estimatedTotal, movement.currency)} />
-      <Fact label="Funds released" value={formatMoney(movement.fundsReleased, movement.currency)} />
-      <Fact label="Actual expense" value={formatMoney(movement.actualExpense, movement.currency)} />
-      <Fact label="Balance / return" value={formatMoney(movement.balanceReturn, movement.currency)} />
-      <Fact label="Evidence status" value={<span className={`status-badge ${movement.evidenceStatus === 'Complete' ? 'tone-done' : 'tone-waiting'}`}>{movement.evidenceStatus}</span>} />
+      <Fact label={t('movement.estimatedFacilitation')} value={formatMoney(movement.estimatedTotal, movement.currency)} />
+      <Fact label={t('movement.fundsReleased')} value={formatMoney(movement.fundsReleased, movement.currency)} />
+      <Fact label={t('movement.actualExpense')} value={formatMoney(movement.actualExpense, movement.currency)} />
+      <Fact label={t('movement.balanceReturn')} value={formatMoney(movement.balanceReturn, movement.currency)} />
+      <Fact label={t('movement.evidenceStatus')} value={<span className={`status-badge ${movement.evidenceStatus === 'Complete' ? 'tone-done' : 'tone-waiting'}`}>{movement.evidenceStatus}</span>} />
     </div>
 
     {isDirector && <form className="inline-form" onSubmit={(event) => {
@@ -667,18 +754,18 @@ function MovementDetail({ detail, user, token, isDirector, onClose, onEdit, onSt
         evidenceStatus: finance.evidenceStatus
       });
     }}>
-      <label className="form-field"><span>Funds released ({movement.currency})</span>
+      <label className="form-field"><span>{t('movement.fundsReleased')} ({movement.currency})</span>
         <input type="number" min="0" step="0.01" value={finance.fundsReleased} onChange={(event) => setFinance({ ...finance, fundsReleased: event.target.value })} />
       </label>
-      <label className="form-field"><span>Actual expense ({movement.currency})</span>
+      <label className="form-field"><span>{t('movement.actualExpense')} ({movement.currency})</span>
         <input type="number" min="0" step="0.01" value={finance.actualExpense} onChange={(event) => setFinance({ ...finance, actualExpense: event.target.value })} />
       </label>
-      <label className="form-field"><span>Evidence status</span>
+      <label className="form-field"><span>{t('movement.evidenceStatus')}</span>
         <select value={finance.evidenceStatus} onChange={(event) => setFinance({ ...finance, evidenceStatus: event.target.value })}>
-          {EVIDENCE_STATUSES.map((status) => <option key={status}>{status}</option>)}
+          {EVIDENCE_STATUSES.map((status) => <option key={status} value={status}>{t(`estatus.${status}`)}</option>)}
         </select>
       </label>
-      <button className="secondary-btn" type="submit">Record figures</button>
+      <button className="secondary-btn" type="submit">{t('action.recordFigures')}</button>
     </form>}
 
     {canAttach && <EvidenceUpload movement={movement} onUpload={onUpload} />}
@@ -690,8 +777,8 @@ function MovementDetail({ detail, user, token, isDirector, onClose, onEdit, onSt
       onRemove={(item) => onRemoveEvidence(movement, item)}
     />
 
-    <h3 className="form-section-title">Workflow</h3>
-    <p className="workflow-trail">CREATE → COST → REVIEW → APPROVE → RELEASE → EVIDENCE → COMPLETE</p>
+    <h3 className="form-section-title">{t('movement.workflow')}</h3>
+    <p className="workflow-trail">{t('movement.workflowTrail')}</p>
     {nextStatuses.length
       ? <div className="button-row workflow-actions">
           {nextStatuses.map((status) => <button
@@ -703,17 +790,17 @@ function MovementDetail({ detail, user, token, isDirector, onClose, onEdit, onSt
               ...(status === 'Funds Released' ? { fundsReleased: Number(finance.fundsReleased) || Number(movement.estimatedTotal) } : {}),
               ...(status === 'Completed' ? { actualExpense: Number(finance.actualExpense) || 0 } : {})
             })}
-          >{status === 'Pending' && movement.status === 'Draft' ? 'Submit for review' : `Mark ${status}`}</button>)}
-          {isDirector && <input className="reason-input" placeholder="Reason or note (optional)" value={reason} onChange={(event) => setReason(event.target.value)} />}
+          >{status === 'Pending Approval' && movement.status === 'Draft' ? t('action.submitForApproval') : `${t('action.markAs')} ${t(`status.${status}`)}`}</button>)}
+          {isDirector && <input className="reason-input" placeholder={`${t('field.reason')} (${t('field.optional')})`} value={reason} onChange={(event) => setReason(event.target.value)} />}
         </div>
-      : <p className="detail-notes">No further status change is available to your account for this movement.</p>}
+      : <p className="detail-notes">{t('movement.noFurtherStatus')}</p>}
 
     <div className="button-row">
-      {canEdit && <button className="secondary-btn" type="button" onClick={() => onEdit(movement)}>Edit movement</button>}
-      {isDirector && <button className="danger-btn outlined" type="button" onClick={() => onDelete(movement)}>Delete movement</button>}
+      {canEdit && <button className="secondary-btn" type="button" onClick={() => onEdit(movement)}>{t('action.editMovement')}</button>}
+      {isDirector && <button className="danger-btn outlined" type="button" onClick={() => onDelete(movement)}>{t('action.deleteMovement')}</button>}
     </div>
 
-    <h3 className="form-section-title">History of edits and status changes</h3>
+    <h3 className="form-section-title">{t('movement.historyTitle')}</h3>
     {history.length
       ? <ul className="history-list">{history.map((entry) => <li key={entry.id}>
           <strong>{entry.action}</strong>
@@ -724,7 +811,7 @@ function MovementDetail({ detail, user, token, isDirector, onClose, onEdit, onSt
           </span>
           <small>{entry.actorName} · {formatDateTime(entry.createdAt)}</small>
         </li>)}</ul>
-      : <div className="empty-state"><strong>No history recorded yet.</strong><span>Edits and status changes appear here.</span></div>}
+      : <div className="empty-state"><strong>{t('empty.noHistory')}</strong><span>{t('empty.historyBlurb')}</span></div>}
   </section>;
 }
 
@@ -733,6 +820,7 @@ function Fact({ label, value }) {
 }
 
 function EvidenceUpload({ movement, onUpload }) {
+  const t = useT();
   const [kind, setKind] = useState('Receipt');
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
@@ -752,28 +840,29 @@ function EvidenceUpload({ movement, onUpload }) {
   };
 
   return <form className="inline-form" onSubmit={submit}>
-    <label className="form-field"><span>Evidence type</span>
-      <select value={kind} onChange={(event) => setKind(event.target.value)}>{EVIDENCE_KINDS.map((option) => <option key={option}>{option}</option>)}</select>
+    <label className="form-field"><span>{t('field.evidenceType')}</span>
+      <select value={kind} onChange={(event) => setKind(event.target.value)}>{EVIDENCE_KINDS.map((option) => <option key={option} value={option}>{t(`ekind.${option}`)}</option>)}</select>
     </label>
-    <label className="form-field"><span>Amount ({movement.currency})</span>
+    <label className="form-field"><span>{t('field.amount')} ({movement.currency})</span>
       <input type="number" min="0" step="0.01" placeholder="0" value={amount} onChange={(event) => setAmount(event.target.value)} />
     </label>
-    <label className="form-field"><span>Note</span>
-      <input placeholder="Fuel for the return leg" value={note} onChange={(event) => setNote(event.target.value)} />
+    <label className="form-field"><span>{t('field.note')}</span>
+      <input placeholder={t('evidence.fuelNotePlaceholder')} value={note} onChange={(event) => setNote(event.target.value)} />
     </label>
-    <label className="form-field"><span>Files (JPG, PNG, PDF — max 10 MB each)</span>
+    <label className="form-field"><span>{t('field.files')}</span>
       <input key={inputKey} type="file" multiple accept="image/*,application/pdf" onChange={(event) => setFiles(event.target.files)} />
     </label>
-    <button className="secondary-btn" type="submit" disabled={!files?.length}>Upload evidence</button>
+    <button className="secondary-btn" type="submit" disabled={!files?.length}>{t('action.uploadEvidence')}</button>
   </form>;
 }
 
 function EvidenceList({ movement, evidence, token, canRemove, onRemove }) {
+  const t = useT();
   if (!evidence.length) {
-    return <div className="empty-state"><strong>No evidence attached yet.</strong><span>Receipts, invoices, fuel slips, tickets, payment proof and photographs go here.</span></div>;
+    return <div className="empty-state"><strong>{t('empty.noEvidence')}</strong><span>{t('empty.noEvidenceHint')}</span></div>;
   }
   return <div className="table-wrap"><table>
-    <thead><tr><th>Type</th><th>File</th><th>Amount</th><th>Note</th><th>Uploaded by</th><th>Date</th><th>Actions</th></tr></thead>
+    <thead><tr><th>{t('field.type')}</th><th>{t('field.file')}</th><th>{t('field.amount')}</th><th>{t('field.note')}</th><th>{t('field.uploadedBy')}</th><th>{t('table.date')}</th><th>{t('table.actions')}</th></tr></thead>
     <tbody>{evidence.map((item) => <tr key={item.id}>
       <td>{item.kind}</td>
       <td><strong>{item.originalName}</strong><small>{(item.sizeBytes / 1024).toFixed(0)} KB · {item.mimeType}</small></td>
@@ -787,8 +876,8 @@ function EvidenceList({ movement, evidence, token, canRemove, onRemove }) {
           href={`/api/movements/${movement.id}/evidence/${item.id}/file?token=${encodeURIComponent(token)}`}
           target="_blank"
           rel="noreferrer"
-        >View</a>
-        {canRemove && <button className="danger-btn" type="button" onClick={() => onRemove(item)}>Remove</button>}
+        >{t('action.view')}</a>
+        {canRemove && <button className="danger-btn" type="button" onClick={() => onRemove(item)}>{t('action.remove')}</button>}
       </td>
     </tr>)}</tbody>
   </table></div>;
@@ -796,48 +885,52 @@ function EvidenceList({ movement, evidence, token, canRemove, onRemove }) {
 
 // Section 9.
 function MovementReports({ reports, onRun, onClose }) {
+  const t = useT();
   return <section className="report-area">
     <div className="panel-header">
-      <div><h2>Movement &amp; facilitation reports</h2><span>Totals are normalised to USD at each record's own stored rate, then shown in all three currencies.</span></div>
+      <div><h2>{t('movement.reportsTitle')}</h2></div>
       <div className="report-actions">
-        <button className="secondary-btn" type="button" onClick={onRun}>Run report</button>
-        {reports && <button className="text-btn" type="button" onClick={onClose}>Close</button>}
+        <button className="secondary-btn" type="button" onClick={onRun}>{t('action.runReport')}</button>
+        {reports && <button className="text-btn" type="button" onClick={onClose}>{t('action.close')}</button>}
       </div>
     </div>
     {reports && <div className="report-body">
       <div className="metric-grid metric-grid-5">
-        <Metric label="Movements" value={reports.movementCount} />
-        <Metric label="Outstanding requests" value={reports.outstanding} />
-        <Metric label="Completed" value={reports.completed} />
-        <Metric label="Evidence outstanding" value={reports.evidenceOutstanding} />
-        <Metric label="Fuel + transport (RWF)" value={new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(reports.fuelAndTransport.fuel.rwf + reports.fuelAndTransport.transport.rwf)} />
+        <Metric label={t('movement.movements')} value={reports.movementCount} />
+        <Metric label={t('movement.outstandingRequests')} value={reports.outstanding} />
+        <Metric label={t('portal.completed')} value={reports.completed} />
+        <Metric label={t('movement.evidenceOutstanding')} value={reports.evidenceOutstanding} />
+        <Metric label={`${t('cost.fuel')} + ${t('cost.transport')} (RWF)`} value={new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(reports.fuelAndTransport.fuel.rwf + reports.fuelAndTransport.transport.rwf)} />
       </div>
       <div className="totals-strip">
-        <TotalBlock label="Estimated facilitation" totals={reports.totals.estimated} />
-        <TotalBlock label="Funds released" totals={reports.totals.released} />
-        <TotalBlock label="Actual expense" totals={reports.totals.actual} />
-        <TotalBlock label="Balance / return" totals={reports.totals.balance} />
+        <TotalBlock label={t('movement.estimatedFacilitation')} totals={reports.totals.estimated} />
+        <TotalBlock label={t('movement.fundsReleased')} totals={reports.totals.released} />
+        <TotalBlock label={t('movement.actualExpense')} totals={reports.totals.actual} />
+        <TotalBlock label={t('movement.balanceReturn')} totals={reports.totals.balance} />
         <div className="total-block total-block-note">
-          <span>Fuel vs transport</span>
-          <strong>Fuel {formatMoney(reports.fuelAndTransport.fuel.rwf, 'RWF')}</strong>
-          <small>Transport {formatMoney(reports.fuelAndTransport.transport.rwf, 'RWF')}</small>
+          <span>{t('movement.fuelVsTransport')}</span>
+          <strong>{t('cost.fuel')} {formatMoney(reports.fuelAndTransport.fuel.rwf, 'RWF')}</strong>
+          <small>{t('cost.transport')} {formatMoney(reports.fuelAndTransport.transport.rwf, 'RWF')}</small>
         </div>
       </div>
-      <ReportTable title="By month" caption="Total facilitation by month" rows={reports.byMonth} />
-      <ReportTable title="By area of operation" caption="Movement cost supporting each operation" rows={reports.byArea} label={(key) => (key === 'unlinked' ? 'Not linked' : areaLabel(key))} />
-      <ReportTable title="By currency" caption="Currency breakdown of the entered amounts" rows={reports.byCurrency} />
-      <ReportTable title="By status" caption="Outstanding versus settled requests" rows={reports.byStatus} />
-      <ReportTable title="Destination history" caption="Top 25 destinations by facilitation cost" rows={reports.byDestination} />
+      <ReportTable title={t('movement.byMonth')} heading={t('report.month')} rows={reports.byMonth} />
+      <ReportTable title={t('movement.byOperation')} heading={t('app.businessOperation')} rows={reports.byArea} label={(key) => (key === 'unlinked' ? t('filter.notLinked') : areaLabel(key))} />
+      <ReportTable title={t('movement.byCurrency')} heading={t('field.currency')} rows={reports.byCurrency} />
+      <ReportTable title={t('movement.byStatus')} heading={t('table.status')} rows={reports.byStatus} label={(key) => t(`status.${key}`)} />
+      <ReportTable title={t('movement.destinationHistory')} heading={t('table.destination')} rows={reports.byDestination} />
     </div>}
   </section>;
 }
 
-function ReportTable({ title, caption, rows, label = (key) => key }) {
+//  names the first column. It is passed in rather than derived from
+// the title by stripping an English "By ", which only worked in English.
+function ReportTable({ title, heading, rows, label = (key) => key }) {
+  const t = useT();
   if (!rows?.length) return null;
   return <div className="report-block">
-    <div className="panel-header"><div><h2>{title}</h2><span>{caption}</span></div></div>
+    <div className="panel-header"><div><h2>{title}</h2></div></div>
     <div className="table-wrap"><table>
-      <thead><tr><th>{title.replace('By ', '').replace(/^./, (character) => character.toUpperCase())}</th><th>Movements</th><th>Estimated (RWF)</th><th>Released (RWF)</th><th>Actual (RWF)</th><th>Balance (RWF)</th><th>Estimated (USD)</th></tr></thead>
+      <thead><tr><th>{heading}</th><th>{t('movement.movements')}</th><th>{t('movement.estimated')} (RWF)</th><th>{t('movement.released')} (RWF)</th><th>{t('movement.actual')} (RWF)</th><th>{t('movement.balance')} (RWF)</th><th>{t('movement.estimated')} (USD)</th></tr></thead>
       <tbody>{rows.map((row) => <tr key={row.key}>
         <td><strong>{label(row.key)}</strong></td>
         <td>{row.count}</td>
@@ -852,6 +945,7 @@ function ReportTable({ title, caption, rows, label = (key) => key }) {
 }
 
 function RatePanel({ rate, fetchJson, onSave, onError }) {
+  const t = useT();
   const [values, setValues] = useState({ rwfPerUsd: '', cdfPerUsd: '', note: '' });
   const [history, setHistory] = useState(null);
 
@@ -870,25 +964,24 @@ function RatePanel({ rate, fetchJson, onSave, onError }) {
   }}>
     <div className="panel-header">
       <div>
-        <h2>Reference exchange rate</h2>
-        <span>Used to display USD, RWF and CDF equivalents. Saving a new rate never rewrites movements already recorded.</span>
+        <h2>{t('movement.exchangeRateTitle')}</h2>
       </div>
-      <button className="text-btn" type="button" onClick={loadHistory}>Rate history</button>
+      <button className="text-btn" type="button" onClick={loadHistory}>{t('action.rateHistory')}</button>
     </div>
     <div className="form-grid">
-      <label className="form-field"><span>RWF per 1 USD</span>
+      <label className="form-field"><span>{t('movement.rwfPerUsd')}</span>
         <input required type="number" min="0.000001" step="0.01" value={values.rwfPerUsd} onChange={(event) => setValues({ ...values, rwfPerUsd: event.target.value })} />
       </label>
-      <label className="form-field"><span>CDF per 1 USD</span>
+      <label className="form-field"><span>{t('movement.cdfPerUsd')}</span>
         <input required type="number" min="0.000001" step="0.01" value={values.cdfPerUsd} onChange={(event) => setValues({ ...values, cdfPerUsd: event.target.value })} />
       </label>
-      <label className="form-field form-field-wide"><span>Note (source of the rate)</span>
-        <input placeholder="BNR mid-rate, 07 September 2026" value={values.note} onChange={(event) => setValues({ ...values, note: event.target.value })} />
+      <label className="form-field form-field-wide"><span>{t('movement.rateNote')}</span>
+        <input value={values.note} onChange={(event) => setValues({ ...values, note: event.target.value })} />
       </label>
     </div>
-    <button className="primary-btn" type="submit">Save reference rate</button>
+    <button className="primary-btn" type="submit">{t('action.saveRate')}</button>
     {history && <div className="table-wrap"><table>
-      <thead><tr><th>RWF / USD</th><th>CDF / USD</th><th>Note</th><th>Set by</th><th>Date</th></tr></thead>
+      <thead><tr><th>RWF / USD</th><th>CDF / USD</th><th>{t('field.note')}</th><th>{t('movement.setBy')}</th><th>{t('table.date')}</th></tr></thead>
       <tbody>{history.map((entry) => <tr key={entry.id}>
         <td>{Number(entry.rwfPerUsd).toLocaleString()}</td>
         <td>{Number(entry.cdfPerUsd).toLocaleString()}</td>

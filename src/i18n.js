@@ -1,0 +1,791 @@
+// Interface translations: English, Kinyarwanda, French, Kiswahili.
+//
+// One entry per key, with all four languages on the same line. The alternative
+// -- four separate dictionaries -- makes it impossible to see at a glance
+// whether a key has been translated everywhere, and they drift the moment
+// somebody adds a string to one and not the others. Here a gap is visible on
+// the line itself, and `missingTranslations()` below finds any that slip past.
+//
+// A missing language falls back to English, and an unknown key falls back to
+// the key itself, so a gap shows readable English rather than a blank element.
+//
+// The four business-operation names are NOT here. They live in
+// shared/businessOperations.js, with their translations, because the API needs
+// the same names. Use `operationName(id, language)` for those.
+
+import { createContext, useCallback, useContext, useEffect, useState } from 'react';
+
+export const LANGUAGES = [
+  { code: 'en', name: 'English', nativeName: 'English' },
+  { code: 'rw', name: 'Kinyarwanda', nativeName: 'Kinyarwanda' },
+  { code: 'fr', name: 'French', nativeName: 'Français' },
+  { code: 'sw', name: 'Kiswahili', nativeName: 'Kiswahili' }
+];
+
+export const LANGUAGE_CODES = LANGUAGES.map((language) => language.code);
+
+const STRINGS = {
+  // ---- shell ---------------------------------------------------------------
+  'app.name': { en: 'Gisuma', rw: 'Gisuma', fr: 'Gisuma', sw: 'Gisuma' },
+  'app.subtitle': { en: 'Project Operations', rw: 'Imicungire y’Ibikorwa', fr: 'Gestion des opérations', sw: 'Usimamizi wa Shughuli' },
+  'app.workspace': { en: 'Workspace', rw: 'Ahakorerwa', fr: 'Espace de travail', sw: 'Eneo la kazi' },
+  'app.signedInAs': { en: 'Signed in as', rw: 'Winjiye nka', fr: 'Connecté en tant que', sw: 'Umeingia kama' },
+  'app.signOut': { en: 'Sign out', rw: 'Sohoka', fr: 'Se déconnecter', sw: 'Toka' },
+  'app.language': { en: 'Language', rw: 'Ururimi', fr: 'Langue', sw: 'Lugha' },
+  'app.operationsControl': { en: 'OPERATIONS CONTROL', rw: 'IGENZURA RY’IBIKORWA', fr: 'CONTRÔLE DES OPÉRATIONS', sw: 'UDHIBITI WA SHUGHULI' },
+  'app.databaseConnected': { en: 'Database connected', rw: 'Ububikoshingiro bwahujwe', fr: 'Base de données connectée', sw: 'Hifadhidata imeunganishwa' },
+  'app.loading': { en: 'Loading records from database...', rw: 'Turimo gukura amakuru mu bubikoshingiro...', fr: 'Chargement des enregistrements...', sw: 'Inapakia kumbukumbu kutoka kwenye hifadhidata...' },
+  'app.dismiss': { en: 'Dismiss', rw: 'Funga', fr: 'Fermer', sw: 'Funga' },
+  'app.businessOperation': { en: 'Business Operation', rw: 'Igikorwa cy’Ubucuruzi', fr: 'Opération commerciale', sw: 'Shughuli ya Biashara' },
+  'app.allOperations': { en: 'All business operations', rw: 'Ibikorwa byose', fr: 'Toutes les opérations', sw: 'Shughuli zote' },
+
+  'auth.signIn': { en: 'Sign in', rw: 'Injira', fr: 'Se connecter', sw: 'Ingia' },
+  'auth.signInBlurb': { en: 'Access your operational records and approvals.', rw: 'Injira urebe inyandiko z’ibikorwa n’ibyemezo byawe.', fr: 'Accédez à vos enregistrements opérationnels et à vos approbations.', sw: 'Fikia kumbukumbu zako za shughuli na maidhinisho.' },
+  'auth.username': { en: 'Username', rw: 'Izina ry’ukoresha', fr: 'Nom d’utilisateur', sw: 'Jina la mtumiaji' },
+  'auth.password': { en: 'Password', rw: 'Ijambobanga', fr: 'Mot de passe', sw: 'Nenosiri' },
+
+  // ---- navigation ----------------------------------------------------------
+  'nav.dashboard': { en: 'Dashboard', rw: 'Imbonerahamwe', fr: 'Tableau de bord', sw: 'Dashibodi' },
+  'nav.approvalQueue': { en: 'What I Need to Approve', rw: 'Ibingombwa Kwemeza', fr: 'À approuver par moi', sw: 'Ninachopaswa Kuidhinisha' },
+  'nav.projects': { en: 'Projects', rw: 'Imishinga', fr: 'Projets', sw: 'Miradi' },
+  'nav.activities': { en: 'Activities', rw: 'Ibikorwa', fr: 'Activités', sw: 'Shughuli' },
+  'nav.approvals': { en: 'Approvals', rw: 'Ibyemezo', fr: 'Approbations', sw: 'Maidhinisho' },
+  'nav.movements': { en: 'Movements & Facilitation', rw: 'Ingendo n’Ubufasha', fr: 'Déplacements et facilitation', sw: 'Safari na Uwezeshaji' },
+  'nav.users': { en: 'User management', rw: 'Gucunga abakoresha', fr: 'Gestion des utilisateurs', sw: 'Usimamizi wa watumiaji' },
+  'nav.partners': { en: 'External Partners', rw: 'Abafatanyabikorwa bo Hanze', fr: 'Partenaires externes', sw: 'Washirika wa Nje' },
+  'nav.overview': { en: 'Overview', rw: 'Incamake', fr: 'Aperçu', sw: 'Muhtasari' },
+  'nav.reports': { en: 'Reports', rw: 'Raporo', fr: 'Rapports', sw: 'Ripoti' },
+  'nav.updates': { en: 'Updates', rw: 'Amakuru mashya', fr: 'Actualités', sw: 'Taarifa mpya' },
+
+  'role.super-admin': { en: 'Director', rw: 'Umuyobozi', fr: 'Directeur', sw: 'Mkurugenzi' },
+  'role.manager': { en: 'Business operation manager', rw: 'Umuyobozi w’igikorwa', fr: 'Responsable d’opération', sw: 'Meneja wa shughuli' },
+  'role.staff': { en: 'Team member', rw: 'Umukozi', fr: 'Membre de l’équipe', sw: 'Mwanachama wa timu' },
+  'role.partner': { en: 'External business partner', rw: 'Umufatanyabikorwa wo hanze', fr: 'Partenaire commercial externe', sw: 'Mshirika wa biashara wa nje' },
+
+  // ---- workflow statuses ---------------------------------------------------
+  'status.Draft': { en: 'Draft', rw: 'Umushinga', fr: 'Brouillon', sw: 'Rasimu' },
+  'status.Pending Approval': { en: 'Pending Approval', rw: 'Bitegereje Kwemezwa', fr: 'En attente d’approbation', sw: 'Inasubiri Idhini' },
+  'status.Approved': { en: 'Approved', rw: 'Byemejwe', fr: 'Approuvé', sw: 'Imeidhinishwa' },
+  'status.Rejected': { en: 'Rejected', rw: 'Byanzwe', fr: 'Rejeté', sw: 'Imekataliwa' },
+  'status.In Progress': { en: 'In Progress', rw: 'Biragenda', fr: 'En cours', sw: 'Inaendelea' },
+  'status.Completed': { en: 'Completed', rw: 'Byarangiye', fr: 'Terminé', sw: 'Imekamilika' },
+  'status.Cancelled': { en: 'Cancelled', rw: 'Byahagaritswe', fr: 'Annulé', sw: 'Imeghairiwa' },
+  'status.Budget Adjusted': { en: 'Budget Adjusted', rw: 'Ingengo y’imari yahinduwe', fr: 'Budget ajusté', sw: 'Bajeti Imerekebishwa' },
+  'status.Needs Correction': { en: 'Needs Correction', rw: 'Bisaba Gukosorwa', fr: 'À corriger', sw: 'Inahitaji Marekebisho' },
+  'status.On Hold': { en: 'On Hold', rw: 'Bitegereje', fr: 'En suspens', sw: 'Imesimamishwa' },
+  'status.Funds Released': { en: 'Funds Released', rw: 'Amafaranga yatanzwe', fr: 'Fonds débloqués', sw: 'Fedha Zimetolewa' },
+  'status.On Track': { en: 'On Track', rw: 'Bigenda neza', fr: 'Dans les temps', sw: 'Inakwenda vizuri' },
+  'status.In Review': { en: 'In Review', rw: 'Birimo gusuzumwa', fr: 'En examen', sw: 'Inakaguliwa' },
+  'status.Delayed': { en: 'Delayed', rw: 'Byatinze', fr: 'En retard', sw: 'Imechelewa' },
+  'status.Healthy': { en: 'Healthy', rw: 'Bimeze neza', fr: 'Sain', sw: 'Nzuri' },
+
+  // ---- approval workflow ---------------------------------------------------
+  'approval.pending': { en: 'Pending Approval', rw: 'Bitegereje Kwemezwa', fr: 'En attente d’approbation', sw: 'Inasubiri Idhini' },
+  'approval.approved': { en: 'Approved', rw: 'Byemejwe', fr: 'Approuvé', sw: 'Imeidhinishwa' },
+  'approval.rejected': { en: 'Rejected', rw: 'Byanzwe', fr: 'Rejeté', sw: 'Imekataliwa' },
+  'approval.required': { en: 'Approval Required', rw: 'Hakenewe Kwemezwa', fr: 'Approbation requise', sw: 'Idhini Inahitajika' },
+  'approval.waitingFor': { en: 'Waiting for', rw: 'Bitegereje', fr: 'En attente de', sw: 'Inasubiri' },
+  'approval.wasWaitingFor': { en: 'Was waiting for', rw: 'Byari bitegereje', fr: 'Était en attente de', sw: 'Ilikuwa inasubiri' },
+  'approval.status': { en: 'Approval Status', rw: 'Uko Kwemezwa Kugeze', fr: 'Statut d’approbation', sw: 'Hali ya Idhini' },
+  'approval.approvedBy': { en: 'Approved by', rw: 'Byemejwe na', fr: 'Approuvé par', sw: 'Imeidhinishwa na' },
+  'approval.approvedAt': { en: 'Approved at', rw: 'Byemejwe ku wa', fr: 'Approuvé le', sw: 'Imeidhinishwa tarehe' },
+  'approval.rejectedBy': { en: 'Rejected by', rw: 'Byanzwe na', fr: 'Rejeté par', sw: 'Imekataliwa na' },
+  'approval.reason': { en: 'Reason', rw: 'Impamvu', fr: 'Motif', sw: 'Sababu' },
+  'approval.managerApproval': { en: 'Manager Approval', rw: 'Kwemezwa n’Umuyobozi w’igikorwa', fr: 'Approbation du responsable', sw: 'Idhini ya Meneja' },
+  'approval.directorApproval': { en: 'Director Approval', rw: 'Kwemezwa n’Umuyobozi Mukuru', fr: 'Approbation du directeur', sw: 'Idhini ya Mkurugenzi' },
+  'approval.none': { en: 'None — this record needed no sign-off', rw: 'Nta kwemezwa bisaba', fr: 'Aucune — cet enregistrement ne nécessitait pas d’approbation', sw: 'Hakuna — kumbukumbu hii haikuhitaji idhini' },
+  'approval.recordedBy': { en: 'Recorded by', rw: 'Byanditswe na', fr: 'Enregistré par', sw: 'Imeandikwa na' },
+  'approval.review': { en: 'Review', rw: 'Suzuma', fr: 'Examiner', sw: 'Kagua' },
+  'approval.approve': { en: 'Approve', rw: 'Emeza', fr: 'Approuver', sw: 'Idhinisha' },
+  'approval.reject': { en: 'Reject', rw: 'Anga', fr: 'Rejeter', sw: 'Kataa' },
+  'approval.yourDecision': { en: 'Your decision', rw: 'Icyemezo cyawe', fr: 'Votre décision', sw: 'Uamuzi wako' },
+  'approval.queueTitle': { en: 'What I Need to Approve', rw: 'Ibingombwa Kwemeza', fr: 'À approuver par moi', sw: 'Ninachopaswa Kuidhinisha' },
+  'approval.queueBlurb': { en: 'Every activity and movement that names you as its approver and is still undecided.', rw: 'Ibikorwa n’ingendo byose bikwandikaho nk’uwemeza kandi bitaraboneka igisubizo.', fr: 'Toutes les activités et tous les déplacements qui vous désignent comme approbateur et restent en attente.', sw: 'Kila shughuli na safari inayokutaja kama mwidhinishaji na bado haijaamuliwa.' },
+  'approval.queueEmpty': { en: 'Nothing is waiting on your approval.', rw: 'Nta kintu gitegereje icyemezo cyawe.', fr: 'Rien n’attend votre approbation.', sw: 'Hakuna kinachosubiri idhini yako.' },
+  'approval.activitiesWaiting': { en: 'Activities waiting on you', rw: 'Ibikorwa bigutegereje', fr: 'Activités en attente de votre décision', sw: 'Shughuli zinazokusubiri' },
+  'approval.movementsWaiting': { en: 'Movements waiting on you', rw: 'Ingendo zigutegereje', fr: 'Déplacements en attente de votre décision', sw: 'Safari zinazokusubiri' },
+  'approval.onlyYou': { en: 'Nobody else can take these decisions, and nothing appears here that is merely pending on somebody else.', rw: 'Nta wundi ushobora gufata ibi byemezo, kandi nta kigaragara hano gitegereje undi muntu.', fr: 'Personne d’autre ne peut prendre ces décisions, et rien n’apparaît ici qui soit simplement en attente chez quelqu’un d’autre.', sw: 'Hakuna mtu mwingine anayeweza kufanya maamuzi haya, na hakuna kinachoonekana hapa kinachosubiri mtu mwingine.' },
+  'approval.yourQueue': { en: 'YOUR APPROVAL QUEUE', rw: 'IBITEGEREJE ICYEMEZO CYAWE', fr: 'VOTRE FILE D’APPROBATION', sw: 'FOLDA YAKO YA MAIDHINISHO' },
+
+  // ---- shared table headers ------------------------------------------------
+  'table.activityMovement': { en: 'Activity / Movement', rw: 'Igikorwa / Urugendo', fr: 'Activité / Déplacement', sw: 'Shughuli / Safari' },
+  'table.createdBy': { en: 'Created by', rw: 'Byanditswe na', fr: 'Créé par', sw: 'Imeundwa na' },
+  'table.assignedTo': { en: 'Assigned to', rw: 'Byahawe', fr: 'Attribué à', sw: 'Imekabidhiwa kwa' },
+  'table.department': { en: 'Business Operation', rw: 'Igikorwa cy’Ubucuruzi', fr: 'Opération commerciale', sw: 'Shughuli ya Biashara' },
+  'table.budget': { en: 'Budget', rw: 'Ingengo y’imari', fr: 'Budget', sw: 'Bajeti' },
+  'table.date': { en: 'Date', rw: 'Itariki', fr: 'Date', sw: 'Tarehe' },
+  'table.actions': { en: 'Actions', rw: 'Ibikorwa', fr: 'Actions', sw: 'Vitendo' },
+  'table.status': { en: 'Status', rw: 'Aho bigeze', fr: 'Statut', sw: 'Hali' },
+  'table.category': { en: 'Category', rw: 'Icyiciro', fr: 'Catégorie', sw: 'Kundi' },
+  'table.activity': { en: 'Activity', rw: 'Igikorwa', fr: 'Activité', sw: 'Shughuli' },
+  'table.progress': { en: 'Progress', rw: 'Aho bigeze', fr: 'Avancement', sw: 'Maendeleo' },
+  'table.deadline': { en: 'Deadline', rw: 'Itariki ntarengwa', fr: 'Échéance', sw: 'Tarehe ya mwisho' },
+  'table.purpose': { en: 'Purpose', rw: 'Intego', fr: 'Objet', sw: 'Madhumuni' },
+  'table.destination': { en: 'Destination', rw: 'Aho bijya', fr: 'Destination', sw: 'Marudio' },
+  'table.unassigned': { en: 'Unassigned', rw: 'Ntawe byahawe', fr: 'Non attribué', sw: 'Haijakabidhiwa' },
+  'table.none': { en: 'None', rw: 'Nta na kimwe', fr: 'Aucun', sw: 'Hakuna' },
+  'table.noData': { en: 'There is no data to display yet.', rw: 'Nta makuru arahari.', fr: 'Aucune donnée à afficher pour le moment.', sw: 'Hakuna data ya kuonyesha bado.' },
+
+  // ---- actions -------------------------------------------------------------
+  'action.cancel': { en: 'Cancel', rw: 'Reka', fr: 'Annuler', sw: 'Ghairi' },
+  'action.close': { en: 'Close', rw: 'Funga', fr: 'Fermer', sw: 'Funga' },
+  'action.delete': { en: 'Delete', rw: 'Siba', fr: 'Supprimer', sw: 'Futa' },
+  'action.remove': { en: 'Remove', rw: 'Kuraho', fr: 'Retirer', sw: 'Ondoa' },
+  'action.refresh': { en: 'Refresh', rw: 'Vugurura', fr: 'Actualiser', sw: 'Onyesha upya' },
+  'action.decline': { en: 'Decline', rw: 'Anga', fr: 'Refuser', sw: 'Kataa' },
+  'action.print': { en: 'Print', rw: 'Capa', fr: 'Imprimer', sw: 'Chapisha' },
+  'action.exportPdf': { en: 'Export PDF', rw: 'Kuramo PDF', fr: 'Exporter en PDF', sw: 'Hamisha PDF' },
+  'action.exportExcel': { en: 'Export Excel', rw: 'Kuramo Excel', fr: 'Exporter en Excel', sw: 'Hamisha Excel' },
+  'action.applyFilters': { en: 'Apply filters', rw: 'Shyiraho muyunguruzi', fr: 'Appliquer les filtres', sw: 'Tumia vichujio' },
+  'action.clear': { en: 'Clear', rw: 'Siba byose', fr: 'Effacer', sw: 'Futa' },
+  'action.viewAll': { en: 'View all', rw: 'Reba byose', fr: 'Tout voir', sw: 'Ona zote' },
+  'action.openRegister': { en: 'Open register', rw: 'Fungura igitabo', fr: 'Ouvrir le registre', sw: 'Fungua daftari' },
+  'action.openQueue': { en: 'Open the queue', rw: 'Fungura urutonde', fr: 'Ouvrir la file', sw: 'Fungua foleni' },
+  'action.open': { en: 'Open', rw: 'Fungura', fr: 'Ouvrir', sw: 'Fungua' },
+  'action.changePassword': { en: 'Change password', rw: 'Hindura ijambobanga', fr: 'Changer le mot de passe', sw: 'Badilisha nenosiri' },
+  'action.uploadEvidence': { en: 'Upload evidence', rw: 'Ohereza ibimenyetso', fr: 'Téléverser les pièces', sw: 'Pakia ushahidi' },
+  'action.sendForApproval': { en: 'Send for approval', rw: 'Ohereza kwemezwa', fr: 'Envoyer pour approbation', sw: 'Tuma kwa idhini' },
+  'action.saveDraft': { en: 'Save as draft', rw: 'Bika nk’umushinga', fr: 'Enregistrer comme brouillon', sw: 'Hifadhi kama rasimu' },
+  'action.saveDecision': { en: 'Save decision', rw: 'Bika icyemezo', fr: 'Enregistrer la décision', sw: 'Hifadhi uamuzi' },
+  'action.saveAssignment': { en: 'Save assignment', rw: 'Bika uwahawe akazi', fr: 'Enregistrer l’attribution', sw: 'Hifadhi ukabidhi' },
+  'action.startWork': { en: 'Start the work', rw: 'Tangira akazi', fr: 'Commencer le travail', sw: 'Anza kazi' },
+  'action.submitCompleted': { en: 'Submit as completed', rw: 'Ohereza nk’ibyarangiye', fr: 'Soumettre comme terminé', sw: 'Wasilisha kama imekamilika' },
+  'action.recordFigures': { en: 'Record figures', rw: 'Andika imibare', fr: 'Enregistrer les montants', sw: 'Andika takwimu' },
+  'action.runReport': { en: 'Run report', rw: 'Kora raporo', fr: 'Générer le rapport', sw: 'Tengeneza ripoti' },
+  'action.generateReport': { en: 'Generate report', rw: 'Tanga raporo', fr: 'Générer le rapport', sw: 'Tengeneza ripoti' },
+  'action.assignActivity': { en: 'Assign activity', rw: 'Tanga igikorwa', fr: 'Attribuer une activité', sw: 'Kabidhi shughuli' },
+  'action.raiseActivity': { en: 'Raise activity', rw: 'Saba igikorwa', fr: 'Proposer une activité', sw: 'Wasilisha shughuli' },
+  'action.createMovement': { en: '+ Create movement / facilitation', rw: '+ Kora urugendo / ubufasha', fr: '+ Créer un déplacement / une facilitation', sw: '+ Unda safari / uwezeshaji' },
+  'action.editMovement': { en: 'Edit movement', rw: 'Hindura urugendo', fr: 'Modifier le déplacement', sw: 'Hariri safari' },
+  'action.deleteMovement': { en: 'Delete movement', rw: 'Siba urugendo', fr: 'Supprimer le déplacement', sw: 'Futa safari' },
+  'action.rateHistory': { en: 'Rate history', rw: 'Amateka y’igipimo', fr: 'Historique des taux', sw: 'Historia ya kiwango' },
+  'action.saveRate': { en: 'Save reference rate', rw: 'Bika igipimo fatizo', fr: 'Enregistrer le taux de référence', sw: 'Hifadhi kiwango cha marejeleo' },
+  'action.updateRate': { en: 'Update rate', rw: 'Hindura igipimo', fr: 'Modifier le taux', sw: 'Sasisha kiwango' },
+  'action.hideRate': { en: 'Hide rate settings', rw: 'Hisha igenamiterere ry’igipimo', fr: 'Masquer les réglages du taux', sw: 'Ficha mipangilio ya kiwango' },
+  'action.submitForApproval': { en: 'Submit for approval', rw: 'Ohereza kwemezwa', fr: 'Soumettre pour approbation', sw: 'Wasilisha kwa idhini' },
+  'action.markAs': { en: 'Mark', rw: 'Shyira ku', fr: 'Marquer', sw: 'Weka kama' },
+  'action.view': { en: 'View', rw: 'Reba', fr: 'Voir', sw: 'Angalia' },
+
+  // ---- shared form fields --------------------------------------------------
+  'field.name': { en: 'Name', rw: 'Izina', fr: 'Nom', sw: 'Jina' },
+  'field.username': { en: 'Username', rw: 'Izina ry’ukoresha', fr: 'Nom d’utilisateur', sw: 'Jina la mtumiaji' },
+  'field.password': { en: 'Password', rw: 'Ijambobanga', fr: 'Mot de passe', sw: 'Nenosiri' },
+  'field.role': { en: 'Role', rw: 'Inshingano', fr: 'Rôle', sw: 'Jukumu' },
+  'field.reportsTo': { en: 'Reports to', rw: 'Ayoborwa na', fr: 'Rend compte à', sw: 'Anaripoti kwa' },
+  'field.workingArea': { en: 'Business operation', rw: 'Igikorwa cy’ubucuruzi', fr: 'Opération commerciale', sw: 'Shughuli ya biashara' },
+  'field.location': { en: 'Location', rw: 'Aho biherereye', fr: 'Lieu', sw: 'Mahali' },
+  'field.organizationOwner': { en: 'Organization owner', rw: 'Umuryango ubifite', fr: 'Organisation propriétaire', sw: 'Shirika linalomiliki' },
+  'field.status': { en: 'Status', rw: 'Aho bigeze', fr: 'Statut', sw: 'Hali' },
+  'field.category': { en: 'Category', rw: 'Icyiciro', fr: 'Catégorie', sw: 'Kundi' },
+  'field.manager': { en: 'Manager', rw: 'Umuyobozi', fr: 'Responsable', sw: 'Meneja' },
+  'field.budget': { en: 'Budget', rw: 'Ingengo y’imari', fr: 'Budget', sw: 'Bajeti' },
+  'field.spent': { en: 'Spent', rw: 'Byakoreshejwe', fr: 'Dépensé', sw: 'Iliyotumika' },
+  'field.project': { en: 'Project', rw: 'Umushinga', fr: 'Projet', sw: 'Mradi' },
+  'field.quantity': { en: 'Quantity', rw: 'Ingano', fr: 'Quantité', sw: 'Kiasi' },
+  'field.description': { en: 'Description', rw: 'Ibisobanuro', fr: 'Description', sw: 'Maelezo' },
+  'field.activity': { en: 'Activity', rw: 'Igikorwa', fr: 'Activité', sw: 'Shughuli' },
+  'field.deadline': { en: 'Deadline', rw: 'Itariki ntarengwa', fr: 'Échéance', sw: 'Tarehe ya mwisho' },
+  'field.instructions': { en: 'Instructions', rw: 'Amabwiriza', fr: 'Consignes', sw: 'Maagizo' },
+  'field.instructionsForManager': { en: 'Instructions for the manager', rw: 'Amabwiriza y’umuyobozi', fr: 'Consignes pour le responsable', sw: 'Maagizo kwa meneja' },
+  'field.amount': { en: 'Amount', rw: 'Umubare', fr: 'Montant', sw: 'Kiasi' },
+  'field.priority': { en: 'Priority', rw: 'Icyihutirwa', fr: 'Priorité', sw: 'Kipaumbele' },
+  'field.requestedBy': { en: 'Requested by', rw: 'Byasabwe na', fr: 'Demandé par', sw: 'Imeombwa na' },
+  'field.reason': { en: 'Reason', rw: 'Impamvu', fr: 'Motif', sw: 'Sababu' },
+  'field.note': { en: 'Note', rw: 'Icyitonderwa', fr: 'Note', sw: 'Dokezo' },
+  'field.notes': { en: 'Notes', rw: 'Ibyitonderwa', fr: 'Notes', sw: 'Madokezo' },
+  'field.currency': { en: 'Currency', rw: 'Ifaranga', fr: 'Devise', sw: 'Sarafu' },
+  'field.type': { en: 'Type', rw: 'Ubwoko', fr: 'Type', sw: 'Aina' },
+  'field.file': { en: 'File', rw: 'Dosiye', fr: 'Fichier', sw: 'Faili' },
+  'field.uploadedBy': { en: 'Uploaded by', rw: 'Byoherejwe na', fr: 'Téléversé par', sw: 'Imepakiwa na' },
+  'field.evidence': { en: 'Evidence', rw: 'Ibimenyetso', fr: 'Pièces justificatives', sw: 'Ushahidi' },
+  'field.added': { en: 'Added', rw: 'Byongewe', fr: 'Ajouté', sw: 'Imeongezwa' },
+  'field.team': { en: 'Team', rw: 'Itsinda', fr: 'Équipe', sw: 'Timu' },
+  'field.projects': { en: 'Projects', rw: 'Imishinga', fr: 'Projets', sw: 'Miradi' },
+  'field.specifyCategory': { en: 'Specify category', rw: 'Vuga icyiciro', fr: 'Préciser la catégorie', sw: 'Taja kundi' },
+  'field.carriedOutBy': { en: 'Carried out by', rw: 'Bikorwa na', fr: 'Réalisé par', sw: 'Inatekelezwa na' },
+  'field.equivalentRwf': { en: 'Equivalent in RWF (automatic)', rw: 'Bingana na RWF (byikoresha)', fr: 'Équivalent en RWF (automatique)', sw: 'Sawa na RWF (kiotomatiki)' },
+  'field.equivalentCdf': { en: 'Equivalent in CDF / Congo (automatic)', rw: 'Bingana na CDF / Kongo (byikoresha)', fr: 'Équivalent en CDF / Congo (automatique)', sw: 'Sawa na CDF / Kongo (kiotomatiki)' },
+  'field.whatIsNeeded': { en: 'What is needed', rw: 'Icyo ukeneye', fr: 'Ce qui est nécessaire', sw: 'Kinachohitajika' },
+  'field.estimatedAmount': { en: 'Estimated amount', rw: 'Umubare uteganyijwe', fr: 'Montant estimé', sw: 'Kiasi kinachokadiriwa' },
+  'field.reasonForRequest': { en: 'Reason for the request', rw: 'Impamvu y’ubusabe', fr: 'Motif de la demande', sw: 'Sababu ya ombi' },
+  'field.evidenceType': { en: 'Evidence type', rw: 'Ubwoko bw’ibimenyetso', fr: 'Type de pièce', sw: 'Aina ya ushahidi' },
+  'field.files': { en: 'Files (JPG, PNG, PDF — max 10 MB each)', rw: 'Dosiye (JPG, PNG, PDF — ntarengwa 10 MB buri imwe)', fr: 'Fichiers (JPG, PNG, PDF — 10 Mo maximum chacun)', sw: 'Faili (JPG, PNG, PDF — kisichozidi 10 MB kila moja)' },
+  'field.total': { en: 'Total', rw: 'Igiteranyo', fr: 'Total', sw: 'Jumla' },
+  'field.equivalent': { en: 'Equivalent', rw: 'Bingana na', fr: 'Équivalent', sw: 'Sawa na' },
+  'field.search': { en: 'Search', rw: 'Shakisha', fr: 'Rechercher', sw: 'Tafuta' },
+  'field.optional': { en: 'optional', rw: 'bidategetswe', fr: 'facultatif', sw: 'si lazima' },
+  'field.required': { en: 'required', rw: 'birakenewe', fr: 'obligatoire', sw: 'inahitajika' },
+
+  // ---- dashboard -----------------------------------------------------------
+  'dash.systemOverview': { en: 'SYSTEM OVERVIEW', rw: 'INCAMAKE YA SISITEMU', fr: 'VUE D’ENSEMBLE DU SYSTÈME', sw: 'MUHTASARI WA MFUMO' },
+  'dash.headline': { en: 'Operational visibility in one place.', rw: 'Kureba ibikorwa byose ahantu hamwe.', fr: 'La visibilité opérationnelle en un seul endroit.', sw: 'Mwonekano wa shughuli mahali pamoja.' },
+  'dash.blurb': { en: 'Review the records currently available in the system.', rw: 'Suzuma inyandiko ziri muri sisitemu ubu.', fr: 'Consultez les enregistrements actuellement disponibles dans le système.', sw: 'Kagua kumbukumbu zilizopo kwenye mfumo sasa.' },
+  'metric.projects': { en: 'Projects', rw: 'Imishinga', fr: 'Projets', sw: 'Miradi' },
+  'metric.activitiesInProgress': { en: 'Activities in progress', rw: 'Ibikorwa biri gukorwa', fr: 'Activités en cours', sw: 'Shughuli zinazoendelea' },
+  'metric.pendingApprovals': { en: 'Pending approvals', rw: 'Ibitegereje kwemezwa', fr: 'Approbations en attente', sw: 'Maidhinisho yanayosubiri' },
+  'metric.completionRate': { en: 'Completion rate', rw: 'Ijanisha ryarangiye', fr: 'Taux d’achèvement', sw: 'Kiwango cha ukamilishaji' },
+  'metric.registeredUsers': { en: 'Registered users', rw: 'Abakoresha banditse', fr: 'Utilisateurs enregistrés', sw: 'Watumiaji waliosajiliwa' },
+  'metric.needingYourAction': { en: 'Needing your action', rw: 'Bisaba ko ugira icyo ukora', fr: 'Nécessitant votre action', sw: 'Zinazohitaji hatua yako' },
+  'metric.operationManagers': { en: 'Business operation managers', rw: 'Abayobozi b’ibikorwa', fr: 'Responsables d’opération', sw: 'Mameneja wa shughuli' },
+  'metric.teamMembers': { en: 'Team members', rw: 'Abakozi', fr: 'Membres de l’équipe', sw: 'Wanachama wa timu' },
+  'metric.withoutManager': { en: 'Without a manager', rw: 'Badafite umuyobozi', fr: 'Sans responsable', sw: 'Bila meneja' },
+  'metric.operationsWithoutManager': { en: 'Operations without a manager', rw: 'Ibikorwa bidafite umuyobozi', fr: 'Opérations sans responsable', sw: 'Shughuli zisizo na meneja' },
+
+  // ---- panels and empty states ---------------------------------------------
+  'panel.workAssignedToYou': { en: 'Work assigned to you', rw: 'Akazi wahawe', fr: 'Travail qui vous est attribué', sw: 'Kazi uliyokabidhiwa' },
+  'panel.operationsOverview': { en: 'Business operations overview', rw: 'Incamake y’ibikorwa by’ubucuruzi', fr: 'Aperçu des opérations commerciales', sw: 'Muhtasari wa shughuli za biashara' },
+  'panel.operationsOverviewBlurb': { en: 'Every business operation side by side. Select a row to open it in the project register.', rw: 'Ibikorwa byose by’ubucuruzi uko bikurikirana. Hitamo umurongo ubufungure mu gitabo cy’imishinga.', fr: 'Toutes les opérations commerciales côte à côte. Sélectionnez une ligne pour l’ouvrir dans le registre des projets.', sw: 'Kila shughuli ya biashara pamoja. Chagua safu ili kuifungua kwenye daftari la miradi.' },
+  'panel.projects': { en: 'Projects', rw: 'Imishinga', fr: 'Projets', sw: 'Miradi' },
+  'panel.pendingApprovals': { en: 'Pending approvals', rw: 'Ibitegereje kwemezwa', fr: 'Approbations en attente', sw: 'Maidhinisho yanayosubiri' },
+  'panel.projectRegister': { en: 'Project register', rw: 'Igitabo cy’imishinga', fr: 'Registre des projets', sw: 'Daftari la miradi' },
+  'panel.activityRegister': { en: 'Activity register', rw: 'Igitabo cy’ibikorwa', fr: 'Registre des activités', sw: 'Daftari la shughuli' },
+  'panel.approvalRegister': { en: 'Approval register', rw: 'Igitabo cy’ibyemezo', fr: 'Registre des approbations', sw: 'Daftari la maidhinisho' },
+  'panel.userManagement': { en: 'User management', rw: 'Gucunga abakoresha', fr: 'Gestion des utilisateurs', sw: 'Usimamizi wa watumiaji' },
+  'panel.awaitingYourReview': { en: 'Activities awaiting your review', rw: 'Ibikorwa bitegereje isuzuma ryawe', fr: 'Activités en attente de votre examen', sw: 'Shughuli zinazosubiri ukaguzi wako' },
+  'panel.awaitingDirector': { en: 'Your activities awaiting the Director', rw: 'Ibikorwa byawe bitegereje Umuyobozi', fr: 'Vos activités en attente du Directeur', sw: 'Shughuli zako zinazosubiri Mkurugenzi' },
+  'panel.movementRegister': { en: 'Movement register', rw: 'Igitabo cy’ingendo', fr: 'Registre des déplacements', sw: 'Daftari la safari' },
+  'panel.filterMovements': { en: 'Filter movements', rw: 'Yungurura ingendo', fr: 'Filtrer les déplacements', sw: 'Chuja safari' },
+
+  'empty.noProjects': { en: 'No projects have been added.', rw: 'Nta mushinga warongewemo.', fr: 'Aucun projet n’a été ajouté.', sw: 'Hakuna mradi ulioongezwa.' },
+  'empty.noProjectsMatch': { en: 'No projects match the current filters.', rw: 'Nta mushinga uhuye n’ibyo washatse.', fr: 'Aucun projet ne correspond aux filtres actuels.', sw: 'Hakuna mradi unaolingana na vichujio vya sasa.' },
+  'empty.noPendingApprovals': { en: 'No pending approvals.', rw: 'Nta bitegereje kwemezwa.', fr: 'Aucune approbation en attente.', sw: 'Hakuna maidhinisho yanayosubiri.' },
+  'empty.noActivitiesMatch': { en: 'No activities match the current filters.', rw: 'Nta gikorwa gihuye n’ibyo washatse.', fr: 'Aucune activité ne correspond aux filtres actuels.', sw: 'Hakuna shughuli inayolingana na vichujio vya sasa.' },
+  'empty.noApprovalRecords': { en: 'No approval records available.', rw: 'Nta nyandiko z’ibyemezo zihari.', fr: 'Aucun enregistrement d’approbation disponible.', sw: 'Hakuna kumbukumbu za maidhinisho zilizopo.' },
+  'empty.noAccountsMatch': { en: 'No accounts match the current filters.', rw: 'Nta konti ihuye n’ibyo washatse.', fr: 'Aucun compte ne correspond aux filtres actuels.', sw: 'Hakuna akaunti inayolingana na vichujio vya sasa.' },
+  'empty.nothingAssigned': { en: 'Nothing has been assigned to you yet.', rw: 'Nta cyo warahabwa.', fr: 'Rien ne vous a encore été attribué.', sw: 'Hujakabidhiwa chochote bado.' },
+  'empty.nothingWaiting': { en: 'Nothing is waiting on a decision.', rw: 'Nta kintu gitegereje icyemezo.', fr: 'Rien n’est en attente d’une décision.', sw: 'Hakuna kinachosubiri uamuzi.' },
+  'empty.noneOfYours': { en: 'None of your activities are waiting on the Director.', rw: 'Nta gikorwa cyawe gitegereje Umuyobozi.', fr: 'Aucune de vos activités n’est en attente du Directeur.', sw: 'Hakuna shughuli yako inayosubiri Mkurugenzi.' },
+  'empty.noMovements': { en: 'No movements recorded', rw: 'Nta ngendo zanditswe', fr: 'Aucun déplacement enregistré', sw: 'Hakuna safari zilizoandikwa' },
+  'empty.noMovementsHint': { en: 'Create a movement or relax the filters.', rw: 'Kora urugendo cyangwa ugabanye ibyo washatse.', fr: 'Créez un déplacement ou élargissez les filtres.', sw: 'Unda safari au punguza vichujio.' },
+  'empty.noHistory': { en: 'No history recorded yet.', rw: 'Nta mateka yarandikwa.', fr: 'Aucun historique enregistré pour le moment.', sw: 'Hakuna historia iliyoandikwa bado.' },
+  'empty.noHistoryHint': { en: 'Decisions, status changes and uploads appear here.', rw: 'Ibyemezo, impinduka n’ibyoherejwe bigaragara hano.', fr: 'Les décisions, changements de statut et téléversements apparaissent ici.', sw: 'Maamuzi, mabadiliko ya hali na upakiaji huonekana hapa.' },
+  'empty.noEvidence': { en: 'No evidence attached yet.', rw: 'Nta bimenyetso byometsweho.', fr: 'Aucune pièce justificative jointe.', sw: 'Hakuna ushahidi ulioambatanishwa bado.' },
+  'empty.noEvidenceHint': { en: 'Receipts, invoices, fuel slips and photographs go here.', rw: 'Inyemezabwishyu, fagitire, impapuro za lisansi n’amafoto bijya hano.', fr: 'Reçus, factures, bons de carburant et photographies vont ici.', sw: 'Risiti, ankara, vocha za mafuta na picha huwekwa hapa.' },
+  'empty.historyBlurb': { en: 'Edits and status changes appear here.', rw: 'Impinduka n’ibyahinduwe bigaragara hano.', fr: 'Les modifications et changements de statut apparaissent ici.', sw: 'Mabadiliko na hali huonekana hapa.' },
+
+  // ---- add project / add user / raise request forms -------------------------
+  'form.addProject': { en: 'Add project', rw: 'Ongeraho umushinga', fr: 'Ajouter un projet', sw: 'Ongeza mradi' },
+  'form.addProjectBlurb': { en: 'For administrator use when a new project is defined.', rw: 'Bikoreshwa n’umuyobozi iyo hashyizweho umushinga mushya.', fr: 'À l’usage de l’administrateur lors de la définition d’un nouveau projet.', sw: 'Kwa matumizi ya msimamizi wakati mradi mpya unapoanzishwa.' },
+  'form.addUser': { en: 'Add user', rw: 'Ongeraho ukoresha', fr: 'Ajouter un utilisateur', sw: 'Ongeza mtumiaji' },
+  'form.raiseRequest': { en: 'Raise a request', rw: 'Tanga ubusabe', fr: 'Formuler une demande', sw: 'Wasilisha ombi' },
+  'form.raiseRequestBlurb': { en: 'Describe what is needed. The Director reviews it and approves or declines.', rw: 'Sobanura icyo ukeneye. Umuyobozi arabisuzuma akemeza cyangwa akanga.', fr: 'Décrivez ce qui est nécessaire. Le Directeur l’examine et approuve ou refuse.', sw: 'Eleza kinachohitajika. Mkurugenzi atakagua na kuidhinisha au kukataa.' },
+  'form.otherSpecify': { en: 'Other (specify)', rw: 'Ikindi (kivuge)', fr: 'Autre (préciser)', sw: 'Nyingine (taja)' },
+  'form.selectProject': { en: 'Select project', rw: 'Hitamo umushinga', fr: 'Choisir un projet', sw: 'Chagua mradi' },
+  'form.allProjects': { en: 'All projects', rw: 'Imishinga yose', fr: 'Tous les projets', sw: 'Miradi yote' },
+  'form.allStatuses': { en: 'All statuses', rw: 'Aho bigeze hose', fr: 'Tous les statuts', sw: 'Hali zote' },
+  'form.allRoles': { en: 'All roles', rw: 'Inshingano zose', fr: 'Tous les rôles', sw: 'Majukumu yote' },
+  'form.nobodyYet': { en: 'Nobody yet', rw: 'Nta wundi', fr: 'Personne pour l’instant', sw: 'Hakuna bado' },
+  'form.searchProjects': { en: 'Search projects', rw: 'Shakisha imishinga', fr: 'Rechercher des projets', sw: 'Tafuta miradi' },
+  'form.searchUsers': { en: 'Search users', rw: 'Shakisha abakoresha', fr: 'Rechercher des utilisateurs', sw: 'Tafuta watumiaji' },
+  'form.priorityLow': { en: 'Low', rw: 'Bike', fr: 'Faible', sw: 'Chini' },
+  'form.priorityMedium': { en: 'Medium', rw: 'Biringaniye', fr: 'Moyenne', sw: 'Wastani' },
+  'form.priorityHigh': { en: 'High', rw: 'Byinshi', fr: 'Élevée', sw: 'Juu' },
+
+  // ---- activity register and review ----------------------------------------
+  'activities.eyebrow': { en: 'PROJECT ACTIVITY REGISTER', rw: 'IGITABO CY’IBIKORWA BY’UMUSHINGA', fr: 'REGISTRE DES ACTIVITÉS DU PROJET', sw: 'DAFTARI LA SHUGHULI ZA MRADI' },
+  'activities.title': { en: 'Activities and requests', rw: 'Ibikorwa n’ubusabe', fr: 'Activités et demandes', sw: 'Shughuli na maombi' },
+  'activities.directorBlurb': { en: 'Hand work to a business operation manager with its budget and deadline, or review what a manager has raised, and close it once the evidence is in.', rw: 'Ha akazi umuyobozi w’igikorwa hamwe n’ingengo y’imari n’itariki ntarengwa, cyangwa usuzume ibyo umuyobozi yasabye, hanyuma ubifunge nyuma yo kubona ibimenyetso.', fr: 'Confiez le travail à un responsable d’opération avec son budget et son échéance, ou examinez ce qu’un responsable a proposé, puis clôturez une fois les pièces reçues.', sw: 'Kabidhi kazi kwa meneja wa shughuli pamoja na bajeti na tarehe ya mwisho, au kagua alichowasilisha meneja, kisha funga baada ya ushahidi kupokelewa.' },
+  'activities.managerBlurb': { en: 'Approve the work the Director assigns you, or raise the work and the budget you need. Attach the evidence and submit it when it is done.', rw: 'Emeza akazi Umuyobozi aguha, cyangwa usabe akazi n’ingengo y’imari ukeneye. Shyiraho ibimenyetso hanyuma ubyohereze byarangiye.', fr: 'Approuvez le travail que le Directeur vous attribue, ou proposez le travail et le budget dont vous avez besoin. Joignez les pièces et soumettez une fois terminé.', sw: 'Idhinisha kazi Mkurugenzi anayokukabidhi, au wasilisha kazi na bajeti unayohitaji. Ambatisha ushahidi na uwasilishe ikikamilika.' },
+  'activities.awaitingReview': { en: 'Awaiting review', rw: 'Bitegereje isuzuma', fr: 'En attente d’examen', sw: 'Inasubiri ukaguzi' },
+  'activities.assignedToMe': { en: 'Assigned to me', rw: 'Nahawe', fr: 'Qui me sont attribuées', sw: 'Nilizokabidhiwa' },
+  'activities.needsDecision': { en: 'Needs a decision', rw: 'Bisaba icyemezo', fr: 'Nécessite une décision', sw: 'Inahitaji uamuzi' },
+  'activities.completionSubmitted': { en: 'Completion submitted', rw: 'Byoherejwe nk’ibyarangiye', fr: 'Achèvement soumis', sw: 'Ukamilishaji umewasilishwa' },
+  'activities.approveIt': { en: 'Approve it', rw: 'Byemeze', fr: 'À approuver', sw: 'Idhinisha' },
+  'activities.originalBudget': { en: 'Original budget', rw: 'Ingengo y’imari ya mbere', fr: 'Budget initial', sw: 'Bajeti ya awali' },
+  'activities.adjustment': { en: 'Adjustment', rw: 'Impinduka', fr: 'Ajustement', sw: 'Marekebisho' },
+  'activities.raisedBy': { en: 'Raised by', rw: 'Byasabwe na', fr: 'Proposé par', sw: 'Imewasilishwa na' },
+  'activities.notDecided': { en: 'Not decided', rw: 'Ntibyafatiwe icyemezo', fr: 'Non décidé', sw: 'Haijaamuliwa' },
+
+  'review.assignedActivity': { en: 'ASSIGNED ACTIVITY', rw: 'IGIKORWA CYATANZWE', fr: 'ACTIVITÉ ATTRIBUÉE', sw: 'SHUGHULI ILIYOKABIDHIWA' },
+  'review.activityReview': { en: 'ACTIVITY REVIEW', rw: 'ISUZUMA RY’IGIKORWA', fr: 'EXAMEN DE L’ACTIVITÉ', sw: 'UKAGUZI WA SHUGHULI' },
+  'review.requestDetails': { en: 'Request details', rw: 'Ibisobanuro by’ubusabe', fr: 'Détails de la demande', sw: 'Maelezo ya ombi' },
+  'review.activityDetails': { en: 'Activity details', rw: 'Ibisobanuro by’igikorwa', fr: 'Détails de l’activité', sw: 'Maelezo ya shughuli' },
+  'review.instructionsFromDirector': { en: 'Instructions from the Director', rw: 'Amabwiriza y’Umuyobozi', fr: 'Consignes du Directeur', sw: 'Maagizo kutoka kwa Mkurugenzi' },
+  'review.adminDecision': { en: 'Admin decision', rw: 'Icyemezo cy’ubuyobozi', fr: 'Décision de l’administration', sw: 'Uamuzi wa utawala' },
+  'review.assignment': { en: 'Assignment', rw: 'Guha akazi', fr: 'Attribution', sw: 'Ukabidhi' },
+  'review.activityHistory': { en: 'Activity history', rw: 'Amateka y’igikorwa', fr: 'Historique de l’activité', sw: 'Historia ya shughuli' },
+  'review.budgetSetAtAssignment': { en: 'Budget set at assignment', rw: 'Ingengo y’imari yashyizweho igihe cyatangwaga', fr: 'Budget fixé à l’attribution', sw: 'Bajeti iliyowekwa wakati wa ukabidhi' },
+  'review.requestedBudget': { en: 'Requested budget', rw: 'Ingengo y’imari yasabwe', fr: 'Budget demandé', sw: 'Bajeti iliyoombwa' },
+  'review.approvedBudget': { en: 'Approved budget', rw: 'Ingengo y’imari yemejwe', fr: 'Budget approuvé', sw: 'Bajeti iliyoidhinishwa' },
+  'review.approvedBudgetUsd': { en: 'Approved budget (USD)', rw: 'Ingengo y’imari yemejwe (USD)', fr: 'Budget approuvé (USD)', sw: 'Bajeti iliyoidhinishwa (USD)' },
+  'review.budgetAdjustment': { en: 'Budget adjustment', rw: 'Impinduka ku ngengo y’imari', fr: 'Ajustement du budget', sw: 'Marekebisho ya bajeti' },
+  'review.awaitingDirector': { en: 'Awaiting the Director', rw: 'Bitegereje Umuyobozi', fr: 'En attente du Directeur', sw: 'Inasubiri Mkurugenzi' },
+  'review.changedOnReview': { en: 'The budget was changed on review', rw: 'Ingengo y’imari yahinduwe mu isuzuma', fr: 'Le budget a été modifié lors de l’examen', sw: 'Bajeti ilibadilishwa wakati wa ukaguzi' },
+  'review.unchangedSinceAssigned': { en: 'Unchanged since it was assigned', rw: 'Ntacyahindutse kuva gitangwa', fr: 'Inchangé depuis son attribution', sw: 'Haijabadilika tangu ilipokabidhiwa' },
+  'review.unchangedSinceRequested': { en: 'Unchanged since it was requested', rw: 'Ntacyahindutse kuva gisabwa', fr: 'Inchangé depuis la demande', sw: 'Haijabadilika tangu ilipoombwa' },
+  'review.noDescription': { en: 'No description was given.', rw: 'Nta bisobanuro byatanzwe.', fr: 'Aucune description n’a été fournie.', sw: 'Hakuna maelezo yaliyotolewa.' },
+  'review.noMaterials': { en: 'No itemised materials were listed.', rw: 'Nta bikoresho byatondetswe.', fr: 'Aucun matériel détaillé n’a été listé.', sw: 'Hakuna vifaa vilivyoorodheshwa.' },
+  'review.notAssigned': { en: 'Not assigned', rw: 'Ntabyahawe umuntu', fr: 'Non attribué', sw: 'Haijakabidhiwa' },
+  'review.noDeadline': { en: 'No deadline', rw: 'Nta tariki ntarengwa', fr: 'Aucune échéance', sw: 'Hakuna tarehe ya mwisho' },
+  'review.notReviewed': { en: 'Not yet reviewed', rw: 'Ntibirasuzumwa', fr: 'Pas encore examiné', sw: 'Haijakaguliwa bado' },
+  'review.notSubmitted': { en: 'Not submitted', rw: 'Ntibyoherejwe', fr: 'Non soumis', sw: 'Haijawasilishwa' },
+  'review.completionSubmitted': { en: 'Completion submitted', rw: 'Byoherejwe nk’ibyarangiye', fr: 'Achèvement soumis', sw: 'Ukamilishaji umewasilishwa' },
+  'review.reviewedBy': { en: 'Reviewed by', rw: 'Byasuzumwe na', fr: 'Examiné par', sw: 'Imekaguliwa na' },
+  'review.adminNote': { en: 'Admin note', rw: 'Icyitonderwa cy’ubuyobozi', fr: 'Note de l’administration', sw: 'Dokezo la utawala' },
+  'review.directorNote': { en: 'Director/Admin note', rw: 'Icyitonderwa cy’Umuyobozi', fr: 'Note du Directeur', sw: 'Dokezo la Mkurugenzi' },
+  'review.reasonIfReject': { en: 'Reason, if you reject (required to reject)', rw: 'Impamvu, nubyanga (irakenewe kugira ngo wange)', fr: 'Motif, en cas de rejet (obligatoire pour rejeter)', sw: 'Sababu, ukikataa (inahitajika ili kukataa)' },
+  'review.noteForDirector': { en: 'Note for the Director (optional)', rw: 'Icyitonderwa ku Muyobozi (bidategetswe)', fr: 'Note pour le Directeur (facultatif)', sw: 'Dokezo kwa Mkurugenzi (si lazima)' },
+  'review.notDecidedYet': { en: 'This request has not been decided yet. You will see the approved budget and the Director’s note here.', rw: 'Ubu busabe ntibwarafatirwa icyemezo. Uzabona ingengo y’imari yemejwe n’icyitonderwa cy’Umuyobozi hano.', fr: 'Cette demande n’a pas encore été décidée. Le budget approuvé et la note du Directeur apparaîtront ici.', sw: 'Ombi hili bado halijaamuliwa. Utaona bajeti iliyoidhinishwa na dokezo la Mkurugenzi hapa.' },
+  'review.externalVisibility': { en: 'EXTERNAL PARTNER VISIBILITY', rw: 'KUGARAGARA KU BAFATANYABIKORWA BO HANZE', fr: 'VISIBILITÉ POUR LES PARTENAIRES EXTERNES', sw: 'MWONEKANO KWA WASHIRIKA WA NJE' },
+
+  // ---- reports -------------------------------------------------------------
+  'report.title': { en: 'Reports', rw: 'Raporo', fr: 'Rapports', sw: 'Ripoti' },
+  'report.weekly': { en: 'Weekly Report', rw: 'Raporo y’icyumweru', fr: 'Rapport hebdomadaire', sw: 'Ripoti ya wiki' },
+  'report.monthly': { en: 'Monthly Report', rw: 'Raporo y’ukwezi', fr: 'Rapport mensuel', sw: 'Ripoti ya mwezi' },
+  'report.custom': { en: 'Custom Period', rw: 'Igihe wihitiyemo', fr: 'Période personnalisée', sw: 'Kipindi maalum' },
+  'report.anyDayInWeek': { en: 'Any day in the week', rw: 'Umunsi uwo ari wo wose mu cyumweru', fr: 'N’importe quel jour de la semaine', sw: 'Siku yoyote ya wiki' },
+  'report.month': { en: 'Month', rw: 'Ukwezi', fr: 'Mois', sw: 'Mwezi' },
+  'report.startDate': { en: 'Start date', rw: 'Itariki itangira', fr: 'Date de début', sw: 'Tarehe ya kuanza' },
+  'report.endDate': { en: 'End date', rw: 'Itariki irangira', fr: 'Date de fin', sw: 'Tarehe ya mwisho' },
+  'report.activitySummary': { en: 'Activity summary', rw: 'Incamake y’ibikorwa', fr: 'Résumé des activités', sw: 'Muhtasari wa shughuli' },
+  'report.budgetSummary': { en: 'Budget summary', rw: 'Incamake y’ingengo y’imari', fr: 'Résumé du budget', sw: 'Muhtasari wa bajeti' },
+  'report.managerPerformance': { en: 'Manager performance', rw: 'Imikorere y’abayobozi', fr: 'Performance des responsables', sw: 'Utendaji wa mameneja' },
+  'report.activityDetails': { en: 'Activity details', rw: 'Ibisobanuro by’ibikorwa', fr: 'Détail des activités', sw: 'Maelezo ya shughuli' },
+  'report.totalActivities': { en: 'Total activities', rw: 'Ibikorwa byose', fr: 'Total des activités', sw: 'Jumla ya shughuli' },
+  'report.overdue': { en: 'Overdue', rw: 'Byarengeje igihe', fr: 'En retard', sw: 'Zimechelewa' },
+  'report.totalAssignedBudget': { en: 'Total assigned budget', rw: 'Ingengo y’imari yose yatanzwe', fr: 'Budget total attribué', sw: 'Jumla ya bajeti iliyokabidhiwa' },
+  'report.totalRevisedBudget': { en: 'Total revised budget', rw: 'Ingengo y’imari yose yavuguruwe', fr: 'Budget total révisé', sw: 'Jumla ya bajeti iliyorekebishwa' },
+  'report.totalActualSpending': { en: 'Total actual spending', rw: 'Amafaranga yose yakoreshejwe', fr: 'Dépenses réelles totales', sw: 'Jumla ya matumizi halisi' },
+  'report.remainingBudget': { en: 'Remaining budget', rw: 'Ingengo y’imari isigaye', fr: 'Budget restant', sw: 'Bajeti iliyobaki' },
+  'report.activitiesAssigned': { en: 'Activities assigned', rw: 'Ibikorwa byatanzwe', fr: 'Activités attribuées', sw: 'Shughuli zilizokabidhiwa' },
+  'report.totalBudgetHandled': { en: 'Total budget handled', rw: 'Ingengo y’imari yose yacunzwe', fr: 'Budget total géré', sw: 'Jumla ya bajeti iliyosimamiwa' },
+  'report.projectArea': { en: 'Project / business operation', rw: 'Umushinga / igikorwa cy’ubucuruzi', fr: 'Projet / opération commerciale', sw: 'Mradi / shughuli ya biashara' },
+  'report.assignedManager': { en: 'Assigned manager', rw: 'Umuyobozi wahawe', fr: 'Responsable attribué', sw: 'Meneja aliyekabidhiwa' },
+  'report.revisedBudget': { en: 'Revised budget', rw: 'Ingengo y’imari yavuguruwe', fr: 'Budget révisé', sw: 'Bajeti iliyorekebishwa' },
+  'report.actualSpending': { en: 'Actual spending', rw: 'Amafaranga yakoreshejwe', fr: 'Dépenses réelles', sw: 'Matumizi halisi' },
+  'report.dateAssigned': { en: 'Date assigned', rw: 'Itariki byatanzweho', fr: 'Date d’attribution', sw: 'Tarehe ya ukabidhi' },
+  'report.completionDate': { en: 'Completion date', rw: 'Itariki byarangiriyeho', fr: 'Date d’achèvement', sw: 'Tarehe ya kukamilika' },
+  'report.adminNotes': { en: 'Admin notes', rw: 'Ibyitonderwa by’ubuyobozi', fr: 'Notes de l’administration', sw: 'Madokezo ya utawala' },
+
+  // ---- movements module ----------------------------------------------------
+  'movement.eyebrow': { en: 'MOVEMENTS & FACILITATION', rw: 'INGENDO N’UBUFASHA', fr: 'DÉPLACEMENTS ET FACILITATION', sw: 'SAFARI NA UWEZESHAJI' },
+  'movement.blurb': { en: 'Movements of personnel, equipment and materials, the funds facilitating them, and the evidence returned.', rw: 'Ingendo z’abakozi, ibikoresho n’ibintu, amafaranga abifasha, n’ibimenyetso byagaruwe.', fr: 'Déplacements du personnel, des équipements et des matériaux, les fonds qui les facilitent, et les pièces justificatives retournées.', sw: 'Safari za wafanyakazi, vifaa na malighafi, fedha zinazoziwezesha, na ushahidi uliorejeshwa.' },
+  'movement.movementOfficer': { en: 'Movement Officer', rw: 'Ushinzwe ingendo', fr: 'Agent des déplacements', sw: 'Afisa wa safari' },
+  'movement.linkedMovements': { en: 'linked movements', rw: 'ingendo zifitanye isano', fr: 'déplacements liés', sw: 'safari zinazohusiana' },
+  'movement.totalRequests': { en: 'Total requests', rw: 'Ubusabe bwose', fr: 'Total des demandes', sw: 'Jumla ya maombi' },
+  'movement.pendingApproval': { en: 'Pending approval', rw: 'Bitegereje kwemezwa', fr: 'En attente d’approbation', sw: 'Inasubiri idhini' },
+  'movement.estimatedFacilitation': { en: 'Estimated facilitation', rw: 'Ubufasha buteganyijwe', fr: 'Facilitation estimée', sw: 'Uwezeshaji uliokadiriwa' },
+  'movement.fundsReleased': { en: 'Funds released', rw: 'Amafaranga yatanzwe', fr: 'Fonds débloqués', sw: 'Fedha zilizotolewa' },
+  'movement.actualExpense': { en: 'Actual expense', rw: 'Ikiguzi nyacyo', fr: 'Dépense réelle', sw: 'Gharama halisi' },
+  'movement.balanceReturn': { en: 'Balance / return', rw: 'Amasigaye / ayagarutse', fr: 'Solde / retour', sw: 'Salio / marejesho' },
+  'movement.referenceRate': { en: 'Reference rate', rw: 'Igipimo fatizo', fr: 'Taux de référence', sw: 'Kiwango cha marejeleo' },
+  'movement.reference': { en: 'Reference', rw: 'Nimero', fr: 'Référence', sw: 'Rejea' },
+  'movement.referenceNo': { en: 'Reference no.', rw: 'Nimero y’urugendo', fr: 'N° de référence', sw: 'Nambari ya rejea' },
+  'movement.movementType': { en: 'Movement type', rw: 'Ubwoko bw’urugendo', fr: 'Type de déplacement', sw: 'Aina ya safari' },
+  'movement.relatedArea': { en: 'Related business operation', rw: 'Igikorwa cy’ubucuruzi gifitanye isano', fr: 'Opération commerciale liée', sw: 'Shughuli ya biashara inayohusiana' },
+  'movement.route': { en: 'Route', rw: 'Inzira', fr: 'Itinéraire', sw: 'Njia' },
+  'movement.origin': { en: 'Origin', rw: 'Aho ruva', fr: 'Origine', sw: 'Chanzo' },
+  'movement.departure': { en: 'Departure', rw: 'Kugenda', fr: 'Départ', sw: 'Kuondoka' },
+  'movement.departureDate': { en: 'Departure date', rw: 'Itariki yo kugenda', fr: 'Date de départ', sw: 'Tarehe ya kuondoka' },
+  'movement.returnDate': { en: 'Return date', rw: 'Itariki yo kugaruka', fr: 'Date de retour', sw: 'Tarehe ya kurudi' },
+  'movement.return': { en: 'Return', rw: 'Kugaruka', fr: 'Retour', sw: 'Kurudi' },
+  'movement.personTeam': { en: 'Person / team', rw: 'Umuntu / itsinda', fr: 'Personne / équipe', sw: 'Mtu / timu' },
+  'movement.transportType': { en: 'Transport type', rw: 'Ubwoko bw’ubwikorezi', fr: 'Type de transport', sw: 'Aina ya usafiri' },
+  'movement.transport': { en: 'Transport', rw: 'Ubwikorezi', fr: 'Transport', sw: 'Usafiri' },
+  'movement.vehicleDriver': { en: 'Vehicle / driver (optional)', rw: 'Imodoka / umushoferi (bidategetswe)', fr: 'Véhicule / chauffeur (facultatif)', sw: 'Gari / dereva (si lazima)' },
+  'movement.vehicleDriverShort': { en: 'Vehicle / driver', rw: 'Imodoka / umushoferi', fr: 'Véhicule / chauffeur', sw: 'Gari / dereva' },
+  'movement.costBreakdown': { en: 'Facilitation cost breakdown', rw: 'Isesengura ry’ikiguzi cy’ubufasha', fr: 'Détail des coûts de facilitation', sw: 'Mchanganuo wa gharama za uwezeshaji' },
+  'movement.costItem': { en: 'Cost item', rw: 'Igice cy’ikiguzi', fr: 'Poste de coût', sw: 'Kipengele cha gharama' },
+  'movement.evidenceAccountability': { en: 'Evidence & accountability', rw: 'Ibimenyetso n’ukubazwa', fr: 'Pièces justificatives et redevabilité', sw: 'Ushahidi na uwajibikaji' },
+  'movement.evidenceStatus': { en: 'Evidence status', rw: 'Aho ibimenyetso bigeze', fr: 'Statut des pièces', sw: 'Hali ya ushahidi' },
+  'movement.workflow': { en: 'Workflow', rw: 'Uko bikurikirana', fr: 'Flux de travail', sw: 'Mtiririko wa kazi' },
+  'movement.workflowTrail': { en: 'CREATE → COST → REVIEW → APPROVE → RELEASE → EVIDENCE → COMPLETE', rw: 'KORA → IKIGUZI → SUZUMA → EMEZA → TANGA → IBIMENYETSO → RANGIZA', fr: 'CRÉER → COÛT → EXAMINER → APPROUVER → DÉBLOQUER → PIÈCES → CLÔTURER', sw: 'UNDA → GHARAMA → KAGUA → IDHINISHA → TOA → USHAHIDI → KAMILISHA' },
+  'movement.noFurtherStatus': { en: 'No further status change is available to your account for this movement.', rw: 'Nta yindi mpinduka konti yawe ishobora gukora kuri uru rugendo.', fr: 'Aucun autre changement de statut n’est disponible pour votre compte sur ce déplacement.', sw: 'Hakuna mabadiliko mengine ya hali yanayopatikana kwa akaunti yako kwa safari hii.' },
+  'movement.historyTitle': { en: 'History of edits and status changes', rw: 'Amateka y’impinduka', fr: 'Historique des modifications et changements de statut', sw: 'Historia ya mabadiliko na hali' },
+  'movement.reportsTitle': { en: 'Movement & facilitation reports', rw: 'Raporo z’ingendo n’ubufasha', fr: 'Rapports sur les déplacements et la facilitation', sw: 'Ripoti za safari na uwezeshaji' },
+  'movement.byMonth': { en: 'By month', rw: 'Ku kwezi', fr: 'Par mois', sw: 'Kwa mwezi' },
+  'movement.byOperation': { en: 'By business operation', rw: 'Ku gikorwa cy’ubucuruzi', fr: 'Par opération commerciale', sw: 'Kwa shughuli ya biashara' },
+  'movement.byCurrency': { en: 'By currency', rw: 'Ku ifaranga', fr: 'Par devise', sw: 'Kwa sarafu' },
+  'movement.byStatus': { en: 'By status', rw: 'Ku ho bigeze', fr: 'Par statut', sw: 'Kwa hali' },
+  'movement.destinationHistory': { en: 'Destination history', rw: 'Amateka y’aho bagiye', fr: 'Historique des destinations', sw: 'Historia ya marudio' },
+  'movement.outstandingRequests': { en: 'Outstanding requests', rw: 'Ubusabe butarangiye', fr: 'Demandes en suspens', sw: 'Maombi yaliyosalia' },
+  'movement.evidenceOutstanding': { en: 'Evidence outstanding', rw: 'Ibimenyetso bitaraboneka', fr: 'Pièces manquantes', sw: 'Ushahidi unaosubiriwa' },
+  'movement.fuelVsTransport': { en: 'Fuel vs transport', rw: 'Lisansi ugereranyije n’ubwikorezi', fr: 'Carburant vs transport', sw: 'Mafuta dhidi ya usafiri' },
+  'movement.exchangeRateTitle': { en: 'Reference exchange rate', rw: 'Igipimo fatizo cy’ivunjisha', fr: 'Taux de change de référence', sw: 'Kiwango cha ubadilishaji cha marejeleo' },
+  'movement.rwfPerUsd': { en: 'RWF per 1 USD', rw: 'RWF kuri 1 USD', fr: 'RWF pour 1 USD', sw: 'RWF kwa 1 USD' },
+  'movement.cdfPerUsd': { en: 'CDF per 1 USD', rw: 'CDF kuri 1 USD', fr: 'CDF pour 1 USD', sw: 'CDF kwa 1 USD' },
+  'movement.rateNote': { en: 'Note (source of the rate)', rw: 'Icyitonderwa (aho igipimo giturutse)', fr: 'Note (source du taux)', sw: 'Dokezo (chanzo cha kiwango)' },
+  'movement.setBy': { en: 'Set by', rw: 'Cyashyizweho na', fr: 'Défini par', sw: 'Imewekwa na' },
+  'movement.estimated': { en: 'Estimated', rw: 'Biteganyijwe', fr: 'Estimé', sw: 'Iliyokadiriwa' },
+  'movement.released': { en: 'Released', rw: 'Byatanzwe', fr: 'Débloqué', sw: 'Iliyotolewa' },
+  'movement.actual': { en: 'Actual', rw: 'Nyacyo', fr: 'Réel', sw: 'Halisi' },
+  'movement.balance': { en: 'Balance', rw: 'Amasigaye', fr: 'Solde', sw: 'Salio' },
+  'movement.departureFrom': { en: 'Departure from', rw: 'Kugenda uhereye', fr: 'Départ à partir du', sw: 'Kuondoka kuanzia' },
+  'movement.departureTo': { en: 'Departure to', rw: 'Kugenda kugeza', fr: 'Départ jusqu’au', sw: 'Kuondoka hadi' },
+  'movement.searchPlaceholder': { en: 'Reference, purpose, route, person', rw: 'Nimero, intego, inzira, umuntu', fr: 'Référence, objet, itinéraire, personne', sw: 'Rejea, madhumuni, njia, mtu' },
+
+  // ---- external partners and visibility ------------------------------------
+  'partners.title': { en: 'External Partners', rw: 'Abafatanyabikorwa bo Hanze', fr: 'Partenaires externes', sw: 'Washirika wa Nje' },
+  'partners.blurb': { en: 'People outside the organisation who may follow one business operation. View only — they cannot approve, reject or change anything.', rw: 'Abantu bo hanze y’umuryango bashobora gukurikira igikorwa kimwe cy’ubucuruzi. Kureba gusa — ntibashobora kwemeza, kwanga cyangwa guhindura.', fr: 'Personnes extérieures à l’organisation autorisées à suivre une seule opération commerciale. Lecture seule — elles ne peuvent ni approuver, ni rejeter, ni modifier.', sw: 'Watu wa nje ya shirika wanaoweza kufuatilia shughuli moja ya biashara. Kuangalia tu — hawawezi kuidhinisha, kukataa au kubadilisha chochote.' },
+  'partners.add': { en: 'Add External Partner', rw: 'Ongeraho Umufatanyabikorwa', fr: 'Ajouter un partenaire externe', sw: 'Ongeza Mshirika wa Nje' },
+  'partners.name': { en: 'Name', rw: 'Amazina', fr: 'Nom', sw: 'Jina' },
+  'partners.email': { en: 'Email', rw: 'Imeyili', fr: 'E-mail', sw: 'Barua pepe' },
+  'partners.username': { en: 'Username', rw: 'Izina ry’ukoresha', fr: 'Nom d’utilisateur', sw: 'Jina la mtumiaji' },
+  'partners.password': { en: 'Password', rw: 'Ijambobanga', fr: 'Mot de passe', sw: 'Nenosiri' },
+  'partners.accessLevel': { en: 'Access Level', rw: 'Urwego rwo Kugera', fr: 'Niveau d’accès', sw: 'Kiwango cha Ufikiaji' },
+  'partners.viewOnly': { en: 'View Only', rw: 'Kureba Gusa', fr: 'Lecture seule', sw: 'Kuangalia Tu' },
+  'partners.invite': { en: 'Invite partner', rw: 'Tumira umufatanyabikorwa', fr: 'Inviter le partenaire', sw: 'Alika mshirika' },
+  'partners.status': { en: 'Access', rw: 'Uburenganzira', fr: 'Accès', sw: 'Ufikiaji' },
+  'partners.active': { en: 'Active', rw: 'Bikora', fr: 'Actif', sw: 'Hai' },
+  'partners.suspended': { en: 'Suspended', rw: 'Byahagaritswe by’agateganyo', fr: 'Suspendu', sw: 'Imesimamishwa' },
+  'partners.revoked': { en: 'Revoked', rw: 'Byamburwe', fr: 'Révoqué', sw: 'Imebatilishwa' },
+  'partners.suspend': { en: 'Suspend', rw: 'Hagarika by’agateganyo', fr: 'Suspendre', sw: 'Simamisha' },
+  'partners.restore': { en: 'Restore', rw: 'Garura', fr: 'Rétablir', sw: 'Rejesha' },
+  'partners.revoke': { en: 'Revoke', rw: 'Ambura', fr: 'Révoquer', sw: 'Batilisha' },
+  'partners.remove': { en: 'Remove', rw: 'Siba', fr: 'Supprimer', sw: 'Ondoa' },
+  'partners.resetPassword': { en: 'Reset password', rw: 'Hindura ijambobanga', fr: 'Réinitialiser le mot de passe', sw: 'Weka upya nenosiri' },
+  'partners.visibleRecords': { en: 'Records they can see', rw: 'Ibyo bashobora kureba', fr: 'Enregistrements visibles', sw: 'Kumbukumbu wanazoweza kuona' },
+  'partners.empty': { en: 'No external partners have been given access yet.', rw: 'Nta mufatanyabikorwa wo hanze urahabwa uburenganzira.', fr: 'Aucun partenaire externe n’a encore reçu d’accès.', sw: 'Hakuna mshirika wa nje aliyepewa ufikiaji bado.' },
+  'partners.total': { en: 'External partners', rw: 'Abafatanyabikorwa bo hanze', fr: 'Partenaires externes', sw: 'Washirika wa nje' },
+  'partners.activeCount': { en: 'Active', rw: 'Bakora', fr: 'Actifs', sw: 'Hai' },
+  'partners.changeOperation': { en: 'Business operation', rw: 'Igikorwa cy’ubucuruzi', fr: 'Opération commerciale', sw: 'Shughuli ya biashara' },
+  'partners.eyebrow': { en: 'EXTERNAL BUSINESS PARTNER ACCESS', rw: 'UBURENGANZIRA BW’ABAFATANYABIKORWA BO HANZE', fr: 'ACCÈS DES PARTENAIRES COMMERCIAUX EXTERNES', sw: 'UFIKIAJI WA WASHIRIKA WA BIASHARA WA NJE' },
+
+  'portal.title': { en: 'Business Operation Access', rw: 'Kugera ku Gikorwa cy’Ubucuruzi', fr: 'Accès à une opération commerciale', sw: 'Ufikiaji wa Shughuli ya Biashara' },
+  'portal.welcome': { en: 'You are following', rw: 'Urimo gukurikira', fr: 'Vous suivez', sw: 'Unafuatilia' },
+  'portal.accessNote': { en: 'View only. You can follow this business operation; you cannot approve, reject or change anything.', rw: 'Kureba gusa. Ushobora gukurikira iki gikorwa; ntushobora kwemeza, kwanga cyangwa guhindura.', fr: 'Lecture seule. Vous pouvez suivre cette opération commerciale ; vous ne pouvez ni approuver, ni rejeter, ni modifier.', sw: 'Kuangalia tu. Unaweza kufuatilia shughuli hii ya biashara; huwezi kuidhinisha, kukataa au kubadilisha.' },
+  'portal.activities': { en: 'Activities', rw: 'Ibikorwa', fr: 'Activités', sw: 'Shughuli' },
+  'portal.movements': { en: 'Movements', rw: 'Ingendo', fr: 'Déplacements', sw: 'Safari' },
+  'portal.inProgress': { en: 'In progress', rw: 'Biragenda', fr: 'En cours', sw: 'Zinaendelea' },
+  'portal.completed': { en: 'Completed', rw: 'Byarangiye', fr: 'Terminées', sw: 'Zimekamilika' },
+  'portal.completionRate': { en: 'Completion rate', rw: 'Ijanisha ryarangiye', fr: 'Taux d’achèvement', sw: 'Kiwango cha ukamilishaji' },
+  'portal.approvedBudget': { en: 'Approved budget', rw: 'Ingengo y’imari yemejwe', fr: 'Budget approuvé', sw: 'Bajeti iliyoidhinishwa' },
+  'portal.recentUpdates': { en: 'Recent updates', rw: 'Amakuru aheruka', fr: 'Actualités récentes', sw: 'Taarifa za hivi karibuni' },
+  'portal.noUpdates': { en: 'No updates have been published yet.', rw: 'Nta makuru mashya aratangazwa.', fr: 'Aucune actualité n’a encore été publiée.', sw: 'Hakuna taarifa zilizochapishwa bado.' },
+  'portal.noActivities': { en: 'No approved activities have been published for this business operation yet.', rw: 'Nta bikorwa byemejwe biratangazwa kuri iki gikorwa cy’ubucuruzi.', fr: 'Aucune activité approuvée n’a encore été publiée pour cette opération commerciale.', sw: 'Hakuna shughuli zilizoidhinishwa zilizochapishwa kwa shughuli hii ya biashara bado.' },
+  'portal.noMovements': { en: 'No approved movements have been published for this business operation yet.', rw: 'Nta ngendo zemejwe ziratangazwa kuri iki gikorwa cy’ubucuruzi.', fr: 'Aucun déplacement approuvé n’a encore été publié pour cette opération commerciale.', sw: 'Hakuna safari zilizoidhinishwa zilizochapishwa kwa shughuli hii ya biashara bado.' },
+  'portal.byMonth': { en: 'By month', rw: 'Ku kwezi', fr: 'Par mois', sw: 'Kwa mwezi' },
+  'portal.byCategory': { en: 'By category', rw: 'Ku cyiciro', fr: 'Par catégorie', sw: 'Kwa kundi' },
+  'portal.period': { en: 'Period', rw: 'Igihe', fr: 'Période', sw: 'Kipindi' },
+  'portal.milestone': { en: 'Milestone', rw: 'Intambwe', fr: 'Étape', sw: 'Hatua' },
+  'portal.approvedOnly': { en: 'Approved information only', rw: 'Amakuru yemejwe gusa', fr: 'Informations approuvées uniquement', sw: 'Taarifa zilizoidhinishwa tu' },
+  'portal.approvedOnlyNote': { en: 'Everything shown here has been approved internally and released for external viewing.', rw: 'Ibigaragara hano byose byemejwe imbere mu muryango kandi byemerewe kureberwa hanze.', fr: 'Tout ce qui figure ici a été approuvé en interne et autorisé à la consultation externe.', sw: 'Kila kitu kinachoonyeshwa hapa kimeidhinishwa ndani ya shirika na kuruhusiwa kuonwa na watu wa nje.' },
+
+  'visibility.visible': { en: 'Visible to partners', rw: 'Bigaragara ku bafatanyabikorwa', fr: 'Visible par les partenaires', sw: 'Inaonekana kwa washirika' },
+  'visibility.hidden': { en: 'Hidden from partners', rw: 'Bihishwe ku bafatanyabikorwa', fr: 'Masqué aux partenaires', sw: 'Imefichwa kwa washirika' },
+  'visibility.show': { en: 'Make visible to partners', rw: 'Bigaragaze ku bafatanyabikorwa', fr: 'Rendre visible aux partenaires', sw: 'Ionyeshe kwa washirika' },
+  'visibility.hide': { en: 'Hide from partners', rw: 'Bihishe ku bafatanyabikorwa', fr: 'Masquer aux partenaires', sw: 'Ificha kwa washirika' },
+  'visibility.note': { en: 'An approved record in this business operation is visible to its external partners. Internal notes, evidence and the audit trail are never shared.', rw: 'Inyandiko yemejwe muri iki gikorwa igaragara ku bafatanyabikorwa bacyo. Inyandiko z’imbere, ibimenyetso n’amateka ntibisangirwa.', fr: 'Un enregistrement approuvé dans cette opération est visible par ses partenaires externes. Les notes internes, les pièces justificatives et l’historique ne sont jamais partagés.', sw: 'Kumbukumbu iliyoidhinishwa katika shughuli hii inaonekana kwa washirika wake wa nje. Maelezo ya ndani, ushahidi na historia havishirikiwi kamwe.' },
+  'visibility.notApprovedYet': { en: 'Not yet approved, so no external partner can see it whatever this is set to.', rw: 'Ntibiremezwa, bityo nta mufatanyabikorwa wo hanze ubibona uko byashyizwe kose.', fr: 'Pas encore approuvé : aucun partenaire externe ne peut le voir, quel que soit ce réglage.', sw: 'Bado haijaidhinishwa, hivyo hakuna mshirika wa nje anayeweza kuiona bila kujali mpangilio huu.' },
+
+  // ---- account register ----------------------------------------------------
+  'user.reportsToNobody': { en: 'Reports to nobody', rw: 'Nta wo ayoborwa na we', fr: 'Ne rend compte à personne', sw: 'Haripoti kwa mtu' },
+  'user.noManager': { en: 'No manager', rw: 'Nta muyobozi', fr: 'Aucun responsable', sw: 'Hakuna meneja' },
+  'user.allOperations': { en: 'All business operations', rw: 'Ibikorwa byose by’ubucuruzi', fr: 'Toutes les opérations commerciales', sw: 'Shughuli zote za biashara' },
+  'user.notAssigned': { en: 'Not assigned', rw: 'Ntabyahawe', fr: 'Non attribué', sw: 'Haijakabidhiwa' },
+  'user.passwordReset': { en: 'Reset', rw: 'Cyahinduwe', fr: 'Réinitialisé', sw: 'Imewekwa upya' },
+  'user.passwordOriginal': { en: 'Original', rw: 'Icya mbere', fr: 'D’origine', sw: 'Ya awali' },
+  'field.action': { en: 'Action', rw: 'Igikorwa', fr: 'Action', sw: 'Kitendo' },
+
+  // ---- filter dropdowns ----------------------------------------------------
+  'filter.allTypes': { en: 'All types', rw: 'Ubwoko bwose', fr: 'Tous les types', sw: 'Aina zote' },
+  'filter.allCurrencies': { en: 'All currencies', rw: 'Amafaranga yose', fr: 'Toutes les devises', sw: 'Sarafu zote' },
+  'filter.notLinked': { en: 'Not linked', rw: 'Ntabifitanye isano', fr: 'Non lié', sw: 'Haijaunganishwa' },
+  'filter.blurb': { en: 'By date, status, destination, person or team, currency, type or related operation.', rw: 'Ukurikije itariki, aho bigeze, aho bijya, umuntu cyangwa itsinda, ifaranga, ubwoko cyangwa igikorwa gifitanye isano.', fr: 'Par date, statut, destination, personne ou équipe, devise, type ou opération liée.', sw: 'Kwa tarehe, hali, marudio, mtu au timu, sarafu, aina au shughuli inayohusiana.' },
+
+  // ---- movement form -------------------------------------------------------
+  'movement.formBlurb': { en: 'Record why the movement happened, where it went, who travelled and what it cost.', rw: 'Andika impamvu urugendo rwabaye, aho rwagiye, uwagenze n’ikiguzi cyarwo.', fr: 'Consignez pourquoi le déplacement a eu lieu, où il est allé, qui a voyagé et ce qu’il a coûté.', sw: 'Andika kwa nini safari ilifanyika, ilipoenda, nani alisafiri na iligharimu kiasi gani.' },
+  'movement.generatedOnSave': { en: 'Generated on save', rw: 'Bizakorwa igihe cyo kubika', fr: 'Généré à l’enregistrement', sw: 'Itatengenezwa wakati wa kuhifadhi' },
+  'movement.notLinkedOption': { en: 'Not linked — Movements & Facilitation only', rw: 'Ntabifitanye isano — Ingendo n’Ubufasha gusa', fr: 'Non lié — Déplacements et facilitation uniquement', sw: 'Haijaunganishwa — Safari na Uwezeshaji tu' },
+  'movement.newMovement': { en: 'New movement / facilitation', rw: 'Urugendo / ubufasha bushya', fr: 'Nouveau déplacement / facilitation', sw: 'Safari / uwezeshaji mpya' },
+  'movement.editMovementTitle': { en: 'Edit movement', rw: 'Hindura urugendo', fr: 'Modifier le déplacement', sw: 'Hariri safari' },
+  'movement.actualRate': { en: 'actual transaction rate', rw: 'igipimo nyacyo cy’ubucuruzi', fr: 'taux de transaction réel', sw: 'kiwango halisi cha muamala' },
+  'movement.refRate': { en: 'reference rate', rw: 'igipimo fatizo', fr: 'taux de référence', sw: 'kiwango cha marejeleo' },
+  'movement.movements': { en: 'Movements', rw: 'Ingendo', fr: 'Déplacements', sw: 'Safari' },
+
+  // ---- evidence ------------------------------------------------------------
+  'evidence.notePlaceholder': { en: 'e.g. Receipt for 10 hoes', rw: 'urugero: Inyemezabwishyu y’isuka 10', fr: 'ex. Reçu pour 10 houes', sw: 'mf. Risiti ya majembe 10' },
+  'evidence.fuelNotePlaceholder': { en: 'Fuel for the return leg', rw: 'Lisansi yo kugaruka', fr: 'Carburant pour le retour', sw: 'Mafuta ya safari ya kurudi' },
+
+  // ---- account and activity forms ------------------------------------------
+  'form.addUserBlurbHash': { en: 'The password is hashed before it is stored and can never be read back — only reset.', rw: 'Ijambobanga rihishwa mbere yo kubikwa kandi ntirishobora gusomwa — rihindurwa gusa.', fr: 'Le mot de passe est haché avant d’être stocké et ne peut jamais être relu — seulement réinitialisé.', sw: 'Nenosiri hufichwa kabla ya kuhifadhiwa na haliwezi kusomwa tena — hubadilishwa tu.' },
+  'form.selectOperation': { en: 'Select business operation', rw: 'Hitamo igikorwa cy’ubucuruzi', fr: 'Choisir une opération commerciale', sw: 'Chagua shughuli ya biashara' },
+  'form.selectCategory': { en: 'Select category', rw: 'Hitamo icyiciro', fr: 'Choisir une catégorie', sw: 'Chagua kundi' },
+  'form.selectManager': { en: 'Select a manager', rw: 'Hitamo umuyobozi', fr: 'Choisir un responsable', sw: 'Chagua meneja' },
+  'form.noManagerYet': { en: 'No manager yet', rw: 'Nta muyobozi araboneka', fr: 'Pas encore de responsable', sw: 'Hakuna meneja bado' },
+  'form.addManager': { en: 'Add manager', rw: 'Ongeraho umuyobozi', fr: 'Ajouter un responsable', sw: 'Ongeza meneja' },
+  'form.addTeamMember': { en: 'Add team member', rw: 'Ongeraho umukozi', fr: 'Ajouter un membre de l’équipe', sw: 'Ongeza mwanachama wa timu' },
+  'form.assignAnActivity': { en: 'Assign an activity', rw: 'Tanga igikorwa', fr: 'Attribuer une activité', sw: 'Kabidhi shughuli' },
+  'form.raiseAnActivity': { en: 'Raise an activity', rw: 'Saba igikorwa', fr: 'Proposer une activité', sw: 'Wasilisha shughuli' },
+  'form.selectedProject': { en: 'Selected project', rw: 'Umushinga wahiswemo', fr: 'Projet sélectionné', sw: 'Mradi uliochaguliwa' },
+  'form.selectProjectFirst': { en: 'Select an existing project before entering activity details.', rw: 'Hitamo umushinga uriho mbere yo kwandika ibisobanuro by’igikorwa.', fr: 'Sélectionnez un projet existant avant de saisir les détails de l’activité.', sw: 'Chagua mradi uliopo kabla ya kuingiza maelezo ya shughuli.' },
+  'form.goesToManager': { en: 'It goes straight to the manager, funded, for them to approve.', rw: 'Kijya ku muyobozi ako kanya, gifite ingengo y’imari, ngo akemeze.', fr: 'Elle est transmise directement au responsable, financée, pour qu’il l’approuve.', sw: 'Inakwenda moja kwa moja kwa meneja, ikiwa na fedha, ili aiidhinishe.' },
+  'form.submittedToDirector': { en: 'It is submitted for the Director to review.', rw: 'Cyoherezwa ku Muyobozi ngo agisuzume.', fr: 'Elle est soumise à l’examen du Directeur.', sw: 'Inawasilishwa kwa Mkurugenzi ili aikague.' },
+  'form.whatWorkInvolves': { en: 'What the work involves', rw: 'Icyo akazi karimo', fr: 'En quoi consiste le travail', sw: 'Kazi inahusisha nini' },
+  'form.whyWorkNeeded': { en: 'Why the work is needed', rw: 'Impamvu akazi gakenewe', fr: 'Pourquoi ce travail est nécessaire', sw: 'Kwa nini kazi inahitajika' },
+  'form.materialsToBuy': { en: 'Materials / items to buy', rw: 'Ibikoresho / ibintu byo kugura', fr: 'Matériel / articles à acheter', sw: 'Vifaa / bidhaa za kununua' },
+  'form.materialsRequested': { en: 'Materials / items requested', rw: 'Ibikoresho / ibintu byasabwe', fr: 'Matériel / articles demandés', sw: 'Vifaa / bidhaa zilizoombwa' },
+  'form.onePerLine': { en: 'One per line', rw: 'Kimwe kuri buri murongo', fr: 'Un par ligne', sw: 'Moja kwa kila mstari' },
+  'form.budgetUsd': { en: 'Budget (USD)', rw: 'Ingengo y’imari (USD)', fr: 'Budget (USD)', sw: 'Bajeti (USD)' },
+  'form.requestedBudgetUsd': { en: 'Requested budget (USD)', rw: 'Ingengo y’imari isabwa (USD)', fr: 'Budget demandé (USD)', sw: 'Bajeti iliyoombwa (USD)' },
+  'form.amountReleased': { en: 'Amount released for this work', rw: 'Amafaranga yatanzwe kuri aka kazi', fr: 'Montant débloqué pour ce travail', sw: 'Kiasi kilichotolewa kwa kazi hii' },
+  'form.amountNeeded': { en: 'Enter the amount needed', rw: 'Andika amafaranga akenewe', fr: 'Saisissez le montant nécessaire', sw: 'Weka kiasi kinachohitajika' },
+  'form.calculatedFromUsd': { en: 'Calculated from USD', rw: 'Bibarwa uhereye kuri USD', fr: 'Calculé à partir de l’USD', sw: 'Imehesabiwa kutoka USD' },
+  'form.signed': { en: 'Signed', rw: 'Byashyizweho umukono', fr: 'Signé', sw: 'Imesainiwa' },
+  'form.submitForReview': { en: 'Submit for review', rw: 'Ohereza gusuzumwa', fr: 'Soumettre pour examen', sw: 'Wasilisha kwa ukaguzi' },
+  'form.noManagerCovers': { en: 'No manager covers this business operation yet. Add one under User management first.', rw: 'Nta muyobozi urahabwa iki gikorwa cy’ubucuruzi. Banza wongereho umwe muri Gucunga abakoresha.', fr: 'Aucun responsable ne couvre encore cette opération commerciale. Ajoutez-en un dans Gestion des utilisateurs.', sw: 'Hakuna meneja anayeshughulikia shughuli hii ya biashara bado. Ongeza mmoja katika Usimamizi wa watumiaji.' },
+
+  // ---- reports screen ------------------------------------------------------
+  'report.blurb': { en: 'Review project activities, budgets, spending and performance by period.', rw: 'Suzuma ibikorwa by’umushinga, ingengo y’imari, amafaranga yakoreshejwe n’imikorere ku gihe.', fr: 'Examinez les activités, budgets, dépenses et performances du projet par période.', sw: 'Kagua shughuli za mradi, bajeti, matumizi na utendaji kwa kipindi.' },
+  'report.working': { en: 'Working...', rw: 'Birimo gukorwa...', fr: 'Traitement en cours...', sw: 'Inafanya kazi...' },
+  'report.chooseValidRange': { en: 'Choose a start date on or before the end date.', rw: 'Hitamo itariki itangira iri mbere cyangwa ingana n’iyo irangira.', fr: 'Choisissez une date de début antérieure ou égale à la date de fin.', sw: 'Chagua tarehe ya kuanza iliyo kabla au sawa na tarehe ya mwisho.' },
+  'report.noneInPeriod': { en: 'No activities fall in this period.', rw: 'Nta gikorwa kiri muri iki gihe.', fr: 'Aucune activité ne relève de cette période.', sw: 'Hakuna shughuli katika kipindi hiki.' },
+  'report.nothingBetween': { en: 'Nothing was assigned or raised in the period selected.', rw: 'Nta cyatanzwe cyangwa cyasabwe muri icyo gihe.', fr: 'Rien n’a été attribué ni proposé durant la période choisie.', sw: 'Hakuna kilichokabidhiwa au kuwasilishwa katika kipindi kilichochaguliwa.' },
+  'report.generated': { en: 'generated', rw: 'byakozwe', fr: 'généré', sw: 'imetengenezwa' },
+  'report.to': { en: 'to', rw: 'kugeza', fr: 'au', sw: 'hadi' },
+
+  // ---- review screen hints -------------------------------------------------
+  'review.assignedBy': { en: 'Assigned by', rw: 'Byatanzwe na', fr: 'Attribué par', sw: 'Imekabidhiwa na' },
+  'review.submittedBy': { en: 'Submitted by', rw: 'Byoherejwe na', fr: 'Soumis par', sw: 'Imewasilishwa na' },
+  'review.toWhom': { en: 'to', rw: 'kuri', fr: 'à', sw: 'kwa' },
+  'review.waitingOnYou': { en: 'This activity is waiting on you. Review the details above, then approve or reject it. Nobody else can take this decision.', rw: 'Iki gikorwa kigutegereje. Suzuma ibisobanuro haruguru, hanyuma wemeze cyangwa wange. Nta wundi ushobora gufata iki cyemezo.', fr: 'Cette activité est en attente de votre décision. Examinez les détails ci-dessus, puis approuvez ou rejetez. Personne d’autre ne peut prendre cette décision.', sw: 'Shughuli hii inakusubiri. Kagua maelezo hapo juu, kisha idhinisha au kataa. Hakuna mtu mwingine anayeweza kufanya uamuzi huu.' },
+  'review.waitingOnOther': { en: 'to approve or reject this. It stays in their approval queue until they decide.', rw: 'ngo abyemeze cyangwa abyange. Bizaguma ku rutonde rwabo kugeza bafashe icyemezo.', fr: 'pour approuver ou rejeter. Cela reste dans leur file d’approbation jusqu’à leur décision.', sw: 'ili aidhinishe au akatae. Itabaki kwenye foleni yao ya maidhinisho hadi waamue.' },
+  'review.sentBackToYou': { en: 'This work was sent back to you. Put right what the note asks for, attach the evidence, and submit it again.', rw: 'Aka kazi kagarutse kuri wowe. Kosora ibyo icyitonderwa gisaba, ushyireho ibimenyetso, hanyuma wongere wohereze.', fr: 'Ce travail vous a été renvoyé. Corrigez ce que demande la note, joignez les pièces et soumettez à nouveau.', sw: 'Kazi hii imerudishwa kwako. Rekebisha kile dokezo linachoomba, ambatisha ushahidi, kisha wasilisha tena.' },
+  'review.completionAwaiting': { en: 'The manager has submitted this work. Review the evidence below, then set the status to Completed.', rw: 'Umuyobozi yohereje aka kazi. Suzuma ibimenyetso hepfo, hanyuma ushyire aho bigeze kuri Byarangiye.', fr: 'Le responsable a soumis ce travail. Examinez les pièces ci-dessous, puis passez le statut à Terminé.', sw: 'Meneja amewasilisha kazi hii. Kagua ushahidi hapa chini, kisha weka hali kuwa Imekamilika.' },
+  'review.reassignClearsAcceptance': { en: 'Handing this to someone else clears the acceptance, so the new manager has to approve it themselves.', rw: 'Guha undi ibi bihanagura kwemera kwabanje, bityo umuyobozi mushya agomba kubyemeza ubwe.', fr: 'Confier ceci à quelqu’un d’autre annule l’acceptation : le nouveau responsable devra l’approuver lui-même.', sw: 'Kumkabidhi mtu mwingine kunafuta ukubali, hivyo meneja mpya lazima aiidhinishe mwenyewe.' },
+  'review.needsCorrectionHint': { en: 'This sends the work back to the manager, who corrects it and submits it again. Say what needs correcting.', rw: 'Ibi bisubiza akazi ku muyobozi, akagakosora akongera kukohereza. Vuga icyo agomba gukosora.', fr: 'Cela renvoie le travail au responsable, qui le corrige et le soumet à nouveau. Précisez ce qui doit être corrigé.', sw: 'Hii inarudisha kazi kwa meneja, anaisahihisha na kuiwasilisha tena. Sema kinachohitaji kusahihishwa.' },
+  'review.considerAdjusted': { en: 'Consider recording this as Budget Adjusted.', rw: 'Wakwibaza kubyandika nk’Ingengo y’imari yahinduwe.', fr: 'Envisagez de l’enregistrer comme Budget ajusté.', sw: 'Fikiria kuiandika kama Bajeti Imerekebishwa.' },
+  'review.noManagerCoversArea': { en: 'No manager covers this business operation yet. Add one under User management before handing this work over.', rw: 'Nta muyobozi urahabwa iki gikorwa cy’ubucuruzi. Banza wongereho umwe muri Gucunga abakoresha mbere yo guha undi aka kazi.', fr: 'Aucun responsable ne couvre encore cette opération commerciale. Ajoutez-en un dans Gestion des utilisateurs avant de confier ce travail.', sw: 'Hakuna meneja anayeshughulikia shughuli hii ya biashara bado. Ongeza mmoja katika Usimamizi wa watumiaji kabla ya kukabidhi kazi hii.' },
+  'review.directorAdmin': { en: 'Director/Admin', rw: 'Umuyobozi Mukuru', fr: 'Directeur/Administrateur', sw: 'Mkurugenzi/Msimamizi' },
+  'review.theDirector': { en: 'the Director', rw: 'Umuyobozi', fr: 'le Directeur', sw: 'Mkurugenzi' },
+
+  // ---- deadline flags ------------------------------------------------------
+  'deadline.overdue': { en: 'overdue', rw: 'byarengeje igihe', fr: 'en retard', sw: 'imechelewa' },
+  'deadline.dueToday': { en: 'Due today', rw: 'Bigomba kurangira uyu munsi', fr: 'À rendre aujourd’hui', sw: 'Inatakiwa leo' },
+  'deadline.dueInDays': { en: 'Due in', rw: 'Bisigaje', fr: 'Échéance dans', sw: 'Inabaki' },
+  'deadline.days': { en: 'days', rw: 'iminsi', fr: 'jours', sw: 'siku' },
+
+  // ---- audit trail field labels --------------------------------------------
+  'trail.approvedBudget': { en: 'Budget', rw: 'Ingengo y’imari', fr: 'Budget', sw: 'Bajeti' },
+  'trail.requestedBudget': { en: 'Requested budget', rw: 'Ingengo y’imari yasabwe', fr: 'Budget demandé', sw: 'Bajeti iliyoombwa' },
+  'trail.status': { en: 'Status', rw: 'Aho bigeze', fr: 'Statut', sw: 'Hali' },
+  'trail.adminNote': { en: 'Note', rw: 'Icyitonderwa', fr: 'Note', sw: 'Dokezo' },
+  'trail.evidence': { en: 'Evidence', rw: 'Ibimenyetso', fr: 'Pièces justificatives', sw: 'Ushahidi' },
+  'trail.completionSubmittedAt': { en: 'Completion', rw: 'Kurangiza', fr: 'Achèvement', sw: 'Ukamilishaji' },
+  'trail.activity': { en: 'Activity', rw: 'Igikorwa', fr: 'Activité', sw: 'Shughuli' },
+  'trail.assignedTo': { en: 'Carried out by', rw: 'Bikorwa na', fr: 'Réalisé par', sw: 'Inatekelezwa na' },
+  'trail.deadline': { en: 'Deadline', rw: 'Itariki ntarengwa', fr: 'Échéance', sw: 'Tarehe ya mwisho' },
+  'trail.instructions': { en: 'Instructions', rw: 'Amabwiriza', fr: 'Consignes', sw: 'Maagizo' },
+  'trail.approvalStatus': { en: 'Approval', rw: 'Kwemezwa', fr: 'Approbation', sw: 'Idhini' },
+  'trail.approvalRequiredFrom': { en: 'Approver', rw: 'Uwemeza', fr: 'Approbateur', sw: 'Mwidhinishaji' },
+  'trail.externallyVisible': { en: 'Partner visibility', rw: 'Kugaragara ku bafatanyabikorwa', fr: 'Visibilité partenaires', sw: 'Mwonekano kwa washirika' },
+  'trail.estimatedTotal': { en: 'Estimated total', rw: 'Igiteranyo giteganyijwe', fr: 'Total estimé', sw: 'Jumla iliyokadiriwa' },
+  'trail.fundsReleased': { en: 'Funds released', rw: 'Amafaranga yatanzwe', fr: 'Fonds débloqués', sw: 'Fedha zilizotolewa' },
+  'trail.actualExpense': { en: 'Actual expense', rw: 'Ikiguzi nyacyo', fr: 'Dépense réelle', sw: 'Gharama halisi' },
+  'trail.evidenceStatus': { en: 'Evidence status', rw: 'Aho ibimenyetso bigeze', fr: 'Statut des pièces', sw: 'Hali ya ushahidi' },
+  'trail.reason': { en: 'Reason', rw: 'Impamvu', fr: 'Motif', sw: 'Sababu' },
+
+  // ---- movement form and detail --------------------------------------------
+  'movement.notesPlaceholder': { en: 'Anything the Director should know about this movement', rw: 'Icyo ari cyo cyose Umuyobozi agomba kumenya kuri uru rugendo', fr: 'Tout ce que le Directeur doit savoir sur ce déplacement', sw: 'Chochote Mkurugenzi anapaswa kujua kuhusu safari hii' },
+  'movement.rateStored': { en: 'Rate stored with this record', rw: 'Igipimo cyabitswe kuri iyi nyandiko', fr: 'Taux enregistré avec ce dossier', sw: 'Kiwango kilichohifadhiwa na kumbukumbu hii' },
+  'movement.useActualRate': { en: 'Use the actual transaction rate instead of the reference rate', rw: 'Koresha igipimo nyacyo cy’ubucuruzi aho gukoresha igipimo fatizo', fr: 'Utiliser le taux de transaction réel au lieu du taux de référence', sw: 'Tumia kiwango halisi cha muamala badala ya kiwango cha marejeleo' },
+  'movement.rwfPerUsdShort': { en: 'RWF per USD', rw: 'RWF kuri USD', fr: 'RWF par USD', sw: 'RWF kwa USD' },
+  'movement.cdfPerUsdShort': { en: 'CDF per USD', rw: 'CDF kuri USD', fr: 'CDF par USD', sw: 'CDF kwa USD' },
+  'movement.saveChanges': { en: 'Save changes', rw: 'Bika impinduka', fr: 'Enregistrer les modifications', sw: 'Hifadhi mabadiliko' },
+  'movement.createAndSubmit': { en: 'Create and submit for approval', rw: 'Kora hanyuma wohereze kwemezwa', fr: 'Créer et soumettre pour approbation', sw: 'Unda na uwasilishe kwa idhini' },
+  'movement.equivalentAt': { en: 'Equivalent at the rate stored with this record', rw: 'Bingana ku gipimo cyabitswe kuri iyi nyandiko', fr: 'Équivalent au taux enregistré avec ce dossier', sw: 'Sawa kwa kiwango kilichohifadhiwa na kumbukumbu hii' },
+
+  // ---- cost lines ----------------------------------------------------------
+  'cost.transport': { en: 'Transport', rw: 'Ubwikorezi', fr: 'Transport', sw: 'Usafiri' },
+  'cost.fuel': { en: 'Fuel', rw: 'Lisansi', fr: 'Carburant', sw: 'Mafuta' },
+  'cost.accommodation': { en: 'Accommodation', rw: 'Icumbi', fr: 'Hébergement', sw: 'Malazi' },
+  'cost.meals': { en: 'Meals / Allowance', rw: 'Ifunguro / Amafaranga y’urugendo', fr: 'Repas / Indemnités', sw: 'Chakula / Posho' },
+  'cost.handling': { en: 'Loading / Handling', rw: 'Gupakira / Gupakurura', fr: 'Chargement / Manutention', sw: 'Upakiaji / Ushughulikiaji' },
+  'cost.other': { en: 'Other Expenses', rw: 'Ibindi biciro', fr: 'Autres dépenses', sw: 'Gharama nyingine' },
+
+  // ---- movement types ------------------------------------------------------
+  // The English value is what the database stores and the CHECK constraint
+  // allows; these are only how it reads on screen.
+  'mtype.Staff': { en: 'Staff', rw: 'Abakozi', fr: 'Personnel', sw: 'Wafanyakazi' },
+  'mtype.Equipment': { en: 'Equipment', rw: 'Ibikoresho', fr: 'Équipement', sw: 'Vifaa' },
+  'mtype.Materials': { en: 'Materials', rw: 'Ibikoresho fatizo', fr: 'Matériaux', sw: 'Malighafi' },
+  'mtype.Field Operation': { en: 'Field Operation', rw: 'Igikorwa cyo ku butaka', fr: 'Opération de terrain', sw: 'Operesheni ya uwandani' },
+  'mtype.Other': { en: 'Other', rw: 'Ibindi', fr: 'Autre', sw: 'Nyingine' },
+
+  // ---- evidence kinds ------------------------------------------------------
+  'ekind.Receipt': { en: 'Receipt', rw: 'Inyemezabwishyu', fr: 'Reçu', sw: 'Risiti' },
+  'ekind.Invoice': { en: 'Invoice', rw: 'Fagitire', fr: 'Facture', sw: 'Ankara' },
+  'ekind.Fuel Slip': { en: 'Fuel Slip', rw: 'Urupapuro rwa lisansi', fr: 'Bon de carburant', sw: 'Vocha ya mafuta' },
+  'ekind.Delivery Note': { en: 'Delivery Note', rw: 'Urupapuro rwo gutanga', fr: 'Bon de livraison', sw: 'Hati ya utoaji' },
+  'ekind.Hotel Receipt': { en: 'Hotel Receipt', rw: 'Inyemezabwishyu ya hoteli', fr: 'Reçu d’hôtel', sw: 'Risiti ya hoteli' },
+  'ekind.Transport Ticket': { en: 'Transport Ticket', rw: 'Itike y’urugendo', fr: 'Titre de transport', sw: 'Tikiti ya usafiri' },
+  'ekind.Payment Proof': { en: 'Payment Proof', rw: 'Icyemezo cyo kwishyura', fr: 'Preuve de paiement', sw: 'Uthibitisho wa malipo' },
+  'ekind.Photograph': { en: 'Photograph', rw: 'Ifoto', fr: 'Photographie', sw: 'Picha' },
+  'ekind.Other': { en: 'Other', rw: 'Ibindi', fr: 'Autre', sw: 'Nyingine' },
+
+  // ---- evidence status -----------------------------------------------------
+  'estatus.Pending': { en: 'Pending', rw: 'Bitegereje', fr: 'En attente', sw: 'Inasubiri' },
+  'estatus.Partial': { en: 'Partial', rw: 'Bimwe na bimwe', fr: 'Partiel', sw: 'Sehemu' },
+  'estatus.Complete': { en: 'Complete', rw: 'Byuzuye', fr: 'Complet', sw: 'Kamili' },
+
+  // ---- monthly planning ----------------------------------------------------
+  'nav.monthlyPlans': { en: 'Monthly Plans', rw: 'Gahunda z’Ukwezi', fr: 'Plans mensuels', sw: 'Mipango ya Mwezi' },
+  'monthly.title': { en: 'Monthly planning', rw: 'Gutegura ukwezi', fr: 'Planification mensuelle', sw: 'Upangaji wa mwezi' },
+  'monthly.eyebrow': { en: 'MONTHLY PLANNING & BUDGET', rw: 'GAHUNDA N’INGENGO Y’IMARI Y’UKWEZI', fr: 'PLANIFICATION ET BUDGET MENSUELS', sw: 'UPANGAJI NA BAJETI YA MWEZI' },
+  'monthly.blurb': { en: 'At the start of each month the Director plans the work for every business operation with the manager responsible, and confirms the budget for it.', rw: 'Mu ntangiriro z’ukwezi, Umuyobozi ategura akazi ka buri gikorwa cy’ubucuruzi hamwe n’umuyobozi ubishinzwe, akemeza ingengo y’imari yako.', fr: 'Au début de chaque mois, le Directeur planifie le travail de chaque opération commerciale avec le responsable concerné et en confirme le budget.', sw: 'Mwanzoni mwa kila mwezi, Mkurugenzi hupanga kazi ya kila shughuli ya biashara na meneja husika, na kuidhinisha bajeti yake.' },
+  'monthly.noMoneyNotice': { en: 'The platform records approved budgets, expenses and evidence. It does not transfer money — the funds are given to the manager outside the platform.', rw: 'Uru rubuga rwandika ingengo y’imari yemejwe, amafaranga yakoreshejwe n’ibimenyetso. Ntirwohereza amafaranga — ahabwa umuyobozi hanze y’urubuga.', fr: 'La plateforme enregistre les budgets approuvés, les dépenses et les pièces justificatives. Elle ne transfère pas d’argent — les fonds sont remis au responsable en dehors de la plateforme.', sw: 'Jukwaa hurekodi bajeti zilizoidhinishwa, matumizi na ushahidi. Halihamishi fedha — fedha hukabidhiwa meneja nje ya jukwaa.' },
+  'monthly.month': { en: 'Month', rw: 'Ukwezi', fr: 'Mois', sw: 'Mwezi' },
+  'monthly.createPlan': { en: 'Create monthly plan', rw: 'Kora gahunda y’ukwezi', fr: 'Créer un plan mensuel', sw: 'Unda mpango wa mwezi' },
+  'monthly.responsibleManager': { en: 'Responsible manager', rw: 'Umuyobozi ubishinzwe', fr: 'Responsable désigné', sw: 'Meneja mhusika' },
+  'monthly.plannedBudget': { en: 'Planned budget', rw: 'Ingengo y’imari yateganyijwe', fr: 'Budget planifié', sw: 'Bajeti iliyopangwa' },
+  'monthly.approvedAllocation': { en: 'Approved allocation', rw: 'Amafaranga yemejwe', fr: 'Allocation approuvée', sw: 'Mgao ulioidhinishwa' },
+  'monthly.totalSpent': { en: 'Total spent', rw: 'Byose byakoreshejwe', fr: 'Total dépensé', sw: 'Jumla iliyotumika' },
+  'monthly.remainingBalance': { en: 'Remaining balance', rw: 'Amasigaye', fr: 'Solde restant', sw: 'Salio lililobaki' },
+  'monthly.totalToGive': { en: 'Total amount to give the manager', rw: 'Amafaranga yose yo guha umuyobozi', fr: 'Montant total à remettre au responsable', sw: 'Jumla ya kumpa meneja' },
+  'monthly.confirmPlan': { en: 'Confirm the monthly plan', rw: 'Emeza gahunda y’ukwezi', fr: 'Confirmer le plan mensuel', sw: 'Thibitisha mpango wa mwezi' },
+  'monthly.confirmHint': { en: 'Confirming records that this allocation was approved. Hand the money to the manager outside the platform.', rw: 'Kwemeza byandika ko aya mafaranga yemejwe. Ha umuyobozi amafaranga hanze y’urubuga.', fr: 'La confirmation enregistre que cette allocation a été approuvée. Remettez l’argent au responsable en dehors de la plateforme.', sw: 'Kuthibitisha kunarekodi kuwa mgao huu umeidhinishwa. Mpe meneja fedha nje ya jukwaa.' },
+  'monthly.reopen': { en: 'Reopen the month', rw: 'Fungura ukwezi', fr: 'Rouvrir le mois', sw: 'Fungua mwezi tena' },
+  'monthly.addActivity': { en: 'Add a planned activity', rw: 'Ongeraho igikorwa cyateganyijwe', fr: 'Ajouter une activité planifiée', sw: 'Ongeza shughuli iliyopangwa' },
+  'monthly.expectedCompletion': { en: 'Expected completion', rw: 'Itariki byitezweho kurangira', fr: 'Achèvement prévu', sw: 'Tarehe inayotarajiwa kukamilika' },
+  'monthly.myActivities': { en: 'My activities this month', rw: 'Ibikorwa byanjye by’uku kwezi', fr: 'Mes activités du mois', sw: 'Shughuli zangu za mwezi huu' },
+  'monthly.totalApprovedBudget': { en: 'Total approved budget', rw: 'Ingengo y’imari yose yemejwe', fr: 'Budget total approuvé', sw: 'Jumla ya bajeti iliyoidhinishwa' },
+  'monthly.planStatus.Draft': { en: 'Draft', rw: 'Umushinga', fr: 'Brouillon', sw: 'Rasimu' },
+  'monthly.planStatus.Confirmed': { en: 'Confirmed', rw: 'Byemejwe', fr: 'Confirmé', sw: 'Imethibitishwa' },
+  'monthly.planStatus.Closed': { en: 'Closed', rw: 'Bwarangiye', fr: 'Clôturé', sw: 'Imefungwa' },
+  'monthly.noPlans': { en: 'No monthly plan exists for this month yet.', rw: 'Nta gahunda y’uku kwezi irahari.', fr: 'Aucun plan n’existe encore pour ce mois.', sw: 'Hakuna mpango wa mwezi huu bado.' },
+  'monthly.noActivitiesInPlan': { en: 'No activities have been planned yet.', rw: 'Nta gikorwa cyarateganywa.', fr: 'Aucune activité n’a encore été planifiée.', sw: 'Hakuna shughuli iliyopangwa bado.' },
+  'monthly.planHistory': { en: 'Plan history', rw: 'Amateka ya gahunda', fr: 'Historique du plan', sw: 'Historia ya mpango' },
+  'monthly.openPlan': { en: 'Open the plan', rw: 'Fungura gahunda', fr: 'Ouvrir le plan', sw: 'Fungua mpango' },
+  'monthly.attachActivity': { en: 'Attach an approved off-plan activity', rw: 'Shyiramo igikorwa cyemejwe kitari muri gahunda', fr: 'Rattacher une activité approuvée hors plan', sw: 'Ambatisha shughuli iliyoidhinishwa isiyo kwenye mpango' },
+  'monthly.offPlanHint': { en: 'An activity a manager raised is not part of the approved budget until you attach it here.', rw: 'Igikorwa umuyobozi yasabye ntikiba mu ngengo y’imari yemejwe kugeza ukishyizemo hano.', fr: 'Une activité proposée par un responsable ne fait pas partie du budget approuvé tant que vous ne l’avez pas rattachée ici.', sw: 'Shughuli aliyowasilisha meneja si sehemu ya bajeti iliyoidhinishwa hadi uiambatishe hapa.' },
+
+  // ---- expenses ------------------------------------------------------------
+  'expense.title': { en: 'Actual expenses', rw: 'Amafaranga yakoreshejwe', fr: 'Dépenses réelles', sw: 'Matumizi halisi' },
+  'expense.record': { en: 'Record an expense', rw: 'Andika ikoreshwa ry’amafaranga', fr: 'Enregistrer une dépense', sw: 'Andika matumizi' },
+  'expense.amountSpent': { en: 'Amount spent', rw: 'Amafaranga yakoreshejwe', fr: 'Montant dépensé', sw: 'Kiasi kilichotumika' },
+  'expense.dateSpent': { en: 'Date spent', rw: 'Itariki byakoreshejweho', fr: 'Date de la dépense', sw: 'Tarehe ya matumizi' },
+  'expense.paymentMethod': { en: 'Payment method', rw: 'Uburyo bwo kwishyura', fr: 'Mode de paiement', sw: 'Njia ya malipo' },
+  'expense.recordedBy': { en: 'Recorded by', rw: 'Byanditswe na', fr: 'Enregistré par', sw: 'Imeandikwa na' },
+  'expense.none': { en: 'No expenses recorded yet.', rw: 'Nta mafaranga yakoreshejwe yanditswe.', fr: 'Aucune dépense enregistrée.', sw: 'Hakuna matumizi yaliyoandikwa bado.' },
+  'expense.noneHint': { en: 'Record what was actually spent, with the payment evidence for it.', rw: 'Andika ibyakoreshejwe by’ukuri, hamwe n’ibimenyetso byo kwishyura.', fr: 'Enregistrez ce qui a réellement été dépensé, avec la preuve de paiement.', sw: 'Andika kilichotumika kweli, pamoja na ushahidi wa malipo.' },
+  'expense.overBudget': { en: 'Expense exceeds the remaining approved budget. Submit a budget change request to Admin.', rw: 'Ayo mafaranga arenze ingengo y’imari isigaye yemejwe. Saba Umuyobozi guhindura ingengo y’imari.', fr: 'La dépense dépasse le budget approuvé restant. Soumettez une demande de modification budgétaire au Directeur.', sw: 'Matumizi yanazidi bajeti iliyoidhinishwa iliyobaki. Wasilisha ombi la mabadiliko ya bajeti kwa Msimamizi.' },
+  'expense.remainingOnActivity': { en: 'Remaining on this activity', rw: 'Asigaye kuri iki gikorwa', fr: 'Restant sur cette activité', sw: 'Iliyobaki kwenye shughuli hii' },
+  'expense.noEvidence': { en: 'No payment evidence', rw: 'Nta bimenyetso byo kwishyura', fr: 'Aucune preuve de paiement', sw: 'Hakuna ushahidi wa malipo' },
+  'expense.attachEvidence': { en: 'Attach payment evidence', rw: 'Shyiraho ibimenyetso byo kwishyura', fr: 'Joindre une preuve de paiement', sw: 'Ambatisha ushahidi wa malipo' },
+
+  'pmethod.Cash': { en: 'Cash', rw: 'Amafaranga ahita atangwa', fr: 'Espèces', sw: 'Fedha taslimu' },
+  'pmethod.Bank Transfer': { en: 'Bank Transfer', rw: 'Kohereza kuri banki', fr: 'Virement bancaire', sw: 'Uhamisho wa benki' },
+  'pmethod.Mobile Money': { en: 'Mobile Money', rw: 'Amafaranga kuri telefone', fr: 'Argent mobile', sw: 'Pesa ya simu' },
+  'pmethod.Cheque': { en: 'Cheque', rw: 'Sheki', fr: 'Chèque', sw: 'Hundi' },
+  'pmethod.Credit': { en: 'Credit', rw: 'Ideni', fr: 'Crédit', sw: 'Mkopo' },
+  'pmethod.Other': { en: 'Other', rw: 'Ubundi buryo', fr: 'Autre', sw: 'Nyingine' },
+
+  // ---- the two evidence kinds, as sections --------------------------------
+  'evidence.payment': { en: 'Payment evidence', rw: 'Ibimenyetso byo kwishyura', fr: 'Preuves de paiement', sw: 'Ushahidi wa malipo' },
+  'evidence.activity': { en: 'Activity completion evidence', rw: 'Ibimenyetso by’uko akazi karangiye', fr: 'Preuves d’achèvement', sw: 'Ushahidi wa kukamilika kwa kazi' },
+  'evidence.paymentHint': { en: 'Receipts, invoices, payment slips and payment confirmations.', rw: 'Inyemezabwishyu, fagitire n’ibyemezo byo kwishyura.', fr: 'Reçus, factures, bordereaux et confirmations de paiement.', sw: 'Risiti, ankara, vocha na uthibitisho wa malipo.' },
+  'evidence.activityHint': { en: 'Photos, videos, documents, completion reports and delivery evidence.', rw: 'Amafoto, amashusho, inyandiko, raporo z’uko byarangiye n’ibimenyetso byo gutanga.', fr: 'Photos, vidéos, documents, rapports d’achèvement et preuves de livraison.', sw: 'Picha, video, nyaraka, ripoti za kukamilika na ushahidi wa utoaji.' },
+
+  // ---- the monthly review --------------------------------------------------
+  'review.monthly': { en: 'Monthly review', rw: 'Isuzuma ry’ukwezi', fr: 'Revue mensuelle', sw: 'Ukaguzi wa mwezi' },
+  'review.completedActivities': { en: 'Completed activities', rw: 'Ibikorwa byarangiye', fr: 'Activités terminées', sw: 'Shughuli zilizokamilika' },
+  'review.pendingActivities': { en: 'Pending activities', rw: 'Ibikorwa bitararangira', fr: 'Activités en cours', sw: 'Shughuli zinazoendelea' },
+  'review.missingEvidence': { en: 'Missing activity evidence', rw: 'Ibimenyetso by’akazi bibura', fr: 'Preuves d’activité manquantes', sw: 'Ushahidi wa shughuli unaokosekana' },
+  'review.expensesWithoutEvidence': { en: 'Expenses without payment evidence', rw: 'Amafaranga yakoreshejwe adafite ibimenyetso', fr: 'Dépenses sans preuve de paiement', sw: 'Matumizi bila ushahidi wa malipo' },
+  'review.documented': { en: 'documented', rw: 'bifite ibimenyetso', fr: 'documentées', sw: 'zenye ushahidi' },
+
+  // ---- the month-end report ------------------------------------------------
+  'monthend.title': { en: 'Month-end report', rw: 'Raporo y’impera z’ukwezi', fr: 'Rapport de fin de mois', sw: 'Ripoti ya mwisho wa mwezi' },
+  'monthend.submit': { en: 'Submit the month-end report', rw: 'Ohereza raporo y’impera z’ukwezi', fr: 'Soumettre le rapport de fin de mois', sw: 'Wasilisha ripoti ya mwisho wa mwezi' },
+  'monthend.unusedBalance': { en: 'Explanation of the unused balance', rw: 'Ibisobanuro ku mafaranga asigaye', fr: 'Explication du solde inutilisé', sw: 'Maelezo ya salio lisilotumika' },
+  'monthend.budgetDifference': { en: 'Explanation of budget differences', rw: 'Ibisobanuro ku itandukaniro ry’ingengo y’imari', fr: 'Explication des écarts budgétaires', sw: 'Maelezo ya tofauti za bajeti' },
+  'monthend.accept': { en: 'Accept and close the month', rw: 'Emera hanyuma ufunge ukwezi', fr: 'Accepter et clôturer le mois', sw: 'Kubali na ufunge mwezi' },
+  'monthend.return': { en: 'Return to the manager', rw: 'Subiza ku muyobozi', fr: 'Renvoyer au responsable', sw: 'Rudisha kwa meneja' },
+  'monthend.reviewNote': { en: 'Review note', rw: 'Icyitonderwa cy’isuzuma', fr: 'Note d’examen', sw: 'Dokezo la ukaguzi' },
+  'monthend.notSubmitted': { en: 'The month-end report has not been submitted yet.', rw: 'Raporo y’impera z’ukwezi ntiraboneka.', fr: 'Le rapport de fin de mois n’a pas encore été soumis.', sw: 'Ripoti ya mwisho wa mwezi haijawasilishwa bado.' },
+  'monthend.status.Submitted': { en: 'Submitted', rw: 'Yoherejwe', fr: 'Soumis', sw: 'Imewasilishwa' },
+  'monthend.status.Accepted': { en: 'Accepted', rw: 'Yemewe', fr: 'Accepté', sw: 'Imekubaliwa' },
+  'monthend.status.Returned': { en: 'Returned', rw: 'Yasubijwe', fr: 'Renvoyé', sw: 'Imerudishwa' }
+};
+
+const STORAGE_KEY = 'ops-language';
+
+export function storedLanguage() {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved && LANGUAGE_CODES.includes(saved)) return saved;
+    // Fall back to the browser's own preference before English, so a
+    // Kinyarwanda, French or Kiswahili speaker is not made to change it on
+    // every visit.
+    const preferred = (navigator?.language || 'en').slice(0, 2).toLowerCase();
+    return LANGUAGE_CODES.includes(preferred) ? preferred : 'en';
+  } catch {
+    return 'en';
+  }
+}
+
+// The language the display helpers that are NOT React components should use --
+// the ones called from inside tables and previews to name an operation or a
+// deadline. They cannot call a hook, and threading a prop into every one of
+// them would touch every component for a lookup. App sets this synchronously at
+// the top of its render, so a language change is reflected on the same render.
+// It is only ever read for display.
+let currentLanguage = 'en';
+
+export function setDisplayLanguage(language) {
+  currentLanguage = language;
+}
+
+export function displayLanguage() {
+  return currentLanguage;
+}
+
+// A missing language falls back to English, and an unknown key to itself, so a
+// gap shows readable English rather than an empty element or "undefined".
+export function translate(language, key) {
+  const entry = STRINGS[key];
+  if (!entry) return key;
+  return entry[language] || entry.en || key;
+}
+
+// Every key that is not translated into every language. Used by the test suite
+// so a string added in English alone fails a check rather than quietly showing
+// English to a Kinyarwanda reader.
+export function missingTranslations() {
+  const gaps = [];
+  for (const [key, entry] of Object.entries(STRINGS)) {
+    const missing = LANGUAGE_CODES.filter((code) => !entry[code]);
+    if (missing.length) gaps.push({ key, missing });
+  }
+  return gaps;
+}
+
+export function translationKeys() {
+  return Object.keys(STRINGS);
+}
+
+// Carried through the tree rather than passed down every component signature:
+// the tables, forms and detail panels that need it sit several levels below the
+// screen that knows the language, and threading a prop through each one would
+// touch every component for nothing.
+export const LanguageContext = createContext({
+  language: 'en',
+  setLanguage: () => {},
+  t: (key) => translate('en', key)
+});
+
+export function useT() {
+  return useContext(LanguageContext).t;
+}
+
+export function useI18n() {
+  return useContext(LanguageContext);
+}
+
+export function useLanguage() {
+  const [language, setLanguage] = useState(storedLanguage);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, language);
+    } catch {
+      // A browser with storage blocked still works; the choice just does not
+      // survive a reload.
+    }
+    document.documentElement.lang = language;
+  }, [language]);
+
+  const t = useCallback((key) => translate(language, key), [language]);
+
+  return { language, setLanguage, t };
+}
