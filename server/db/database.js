@@ -3,6 +3,8 @@ import bcrypt from 'bcryptjs';
 import pg from 'pg';
 import { migrateMovementModule } from './movementSchema.js';
 import { migrateActivityModule } from './activitySchema.js';
+import { migrateMonthlyModule } from './monthlySchema.js';
+import { BUSINESS_OPERATIONS } from '../../shared/businessOperations.js';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
@@ -39,6 +41,23 @@ pool.on('error', (error) => {
   console.error('Idle database client error (connection discarded):', error.message);
 });
 
+// The pool's own 'error' event only covers clients sitting idle in the pool. A
+// client checked out with pool.connect() -- which every transaction in this API
+// uses -- emits 'error' on the client itself, and an EventEmitter with no
+// listener for 'error' throws. Supabase drops connections routinely, so a
+// dropped socket mid-transaction was taking the whole process down with an
+// unhandled 'error' event rather than failing the one request.
+//
+// Attaching a listener at connect time covers the client for its whole life, in
+// the pool and out of it. pg still discards the broken connection and still
+// rejects the in-flight query, so the route's catch/ROLLBACK path runs as usual
+// and the caller gets a 500 instead of the server dying.
+pool.on('connect', (client) => {
+  client.on('error', (error) => {
+    console.error('Database client error (connection discarded):', error.message);
+  });
+});
+
 // A connection that died while parked in the pool fails before the statement is
 // ever sent, so one retry on a fresh connection is safe and invisible to the
 // caller. Anything the database itself rejected is rethrown untouched.
@@ -59,6 +78,19 @@ pool.query = async (...args) => {
     return runQuery(...args);
   }
 };
+// Rolling back on a connection that has already died throws again, and that
+// second error replaces the real one in the catch block that called it -- so the
+// caller is told "Connection terminated" when the actual failure was a
+// constraint violation. The transaction is dead either way: a broken connection
+// never committed anything.
+export async function safeRollback(client) {
+  try {
+    await client.query('ROLLBACK');
+  } catch (error) {
+    console.warn('Rollback skipped on a dead connection:', error.message);
+  }
+}
+
 export async function initDatabase() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS sectors (
@@ -69,14 +101,19 @@ export async function initDatabase() {
     );
   `);
 
-  await pool.query(`
-    INSERT INTO sectors (id, name, short_name) VALUES
-      ('farming', 'Farming Activity', 'Farming'),
-      ('mining', 'Mining Activity', 'Mining'),
-      ('agriculture', 'Agriculture Activity', 'Agriculture'),
-      ('movement', 'Logistics & Facilitation', 'Logistics')
-    ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, short_name = EXCLUDED.short_name;
-  `);
+  // The four business operations, named from shared/businessOperations.js so
+  // the table, the API and the browser cannot drift apart. The ids are the ones
+  // already referenced by every foreign key, so only the names are refreshed.
+  await pool.query(
+    `INSERT INTO sectors (id, name, short_name)
+     SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[])
+     ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, short_name = EXCLUDED.short_name`,
+    [
+      BUSINESS_OPERATIONS.map((operation) => operation.id),
+      BUSINESS_OPERATIONS.map((operation) => operation.name),
+      BUSINESS_OPERATIONS.map((operation) => operation.shortName)
+    ]
+  );
 
   await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
@@ -172,6 +209,39 @@ export async function initDatabase() {
     // reports to one of the managers working the same sector. Pointing an
     // account at itself is refused here; longer loops are refused by the API.
     await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS manager_id INTEGER REFERENCES users(id) ON DELETE SET NULL');
+
+    // ---- external business partner accounts ---------------------------------
+    //
+    // An external partner is an ordinary row in `users` with role 'partner' and
+    // exactly one business operation in `sector`. Reusing the account table
+    // means one authentication path, one password policy and one place a
+    // Director looks -- rather than a parallel identity system.
+    //
+    // `status` gates sign-in for every account, not only partners, so suspend
+    // and revoke are real rather than a hidden menu item: authMiddleware turns
+    // anything other than 'active' into a refusal on the very next request.
+    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active'");
+    await pool.query('ALTER TABLE users DROP CONSTRAINT IF EXISTS users_status_check');
+    await pool.query("ALTER TABLE users ADD CONSTRAINT users_status_check CHECK (status IN ('active', 'suspended', 'revoked'))");
+    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)');
+    // View-only is the only level an external partner is ever given; the
+    // partner routes set it explicitly. The default is 'internal' because every
+    // other way an account is created -- the account register, the seeded
+    // Director -- makes an internal user, and a default of 'view-only' would
+    // quietly label new managers as external.
+    await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS access_level VARCHAR(20) NOT NULL DEFAULT 'internal'");
+    await pool.query("ALTER TABLE users ALTER COLUMN access_level SET DEFAULT 'internal'");
+    await pool.query('ALTER TABLE users DROP CONSTRAINT IF EXISTS users_access_level_check');
+    await pool.query("ALTER TABLE users ADD CONSTRAINT users_access_level_check CHECK (access_level IN ('view-only', 'internal'))");
+    // A partner must always have exactly one operation to be scoped to. An
+    // account with none would fall through every sector filter.
+    await pool.query('ALTER TABLE users DROP CONSTRAINT IF EXISTS users_partner_needs_operation');
+    await pool.query(`ALTER TABLE users ADD CONSTRAINT users_partner_needs_operation
+      CHECK (role <> 'partner' OR sector IS NOT NULL)`);
+    await pool.query("CREATE INDEX IF NOT EXISTS users_partner_idx ON users(role, sector) WHERE role = 'partner'");
+    // Internal staff keep the internal access level; only partners are view-only.
+    await pool.query("UPDATE users SET access_level = 'internal' WHERE role <> 'partner' AND access_level <> 'internal'");
+    await pool.query("UPDATE users SET access_level = 'view-only' WHERE role = 'partner' AND access_level <> 'view-only'");
     await pool.query(`
       DO $$
       BEGIN
@@ -219,6 +289,8 @@ export async function initDatabase() {
 
     await migrateMovementModule(pool);
     await migrateActivityModule(pool);
+    // Monthly planning sits on top of the activity register, so it migrates last.
+    await migrateMonthlyModule(pool);
 
   const userCheck = await pool.query('SELECT id FROM users WHERE username = $1', ['admin']);
   if (userCheck.rowCount === 0) {

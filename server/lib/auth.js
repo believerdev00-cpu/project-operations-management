@@ -7,6 +7,28 @@ if (!jwtSecret) {
   throw new Error('JWT_SECRET is required. Configure it before starting the API.');
 }
 
+// The only paths an external business partner may reach. Everything else in the
+// API is refused to them here, before any route handler runs.
+//
+// This is an allowlist rather than a blocklist on purpose: a route added later
+// is out of a partner's reach by default, and becomes reachable only when
+// somebody deliberately writes it into this list. A blocklist would silently
+// expose every new endpoint.
+//
+// The partner router itself is read-only, so this also means a partner has no
+// path to any write anywhere in the system.
+const PARTNER_ALLOWED_PATHS = [
+  /^\/api\/partner(\/|$)/,
+  /^\/api\/auth\/session$/,
+  /^\/api\/sectors$/,
+  /^\/api\/health$/
+];
+
+function partnerMayReach(originalUrl) {
+  const path = String(originalUrl || '').split('?')[0];
+  return PARTNER_ALLOWED_PATHS.some((allowed) => allowed.test(path));
+}
+
 export async function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization || '';
   const headerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
@@ -31,11 +53,22 @@ export async function authMiddleware(req, res, next) {
   // reassigned manager loses the old sector immediately, a deleted one loses access.
   try {
     const result = await pool.query(
-      'SELECT id, username, name, role, sector, password_changed_at FROM users WHERE id = $1',
+      'SELECT id, username, name, role, sector, email, status, access_level, password_changed_at FROM users WHERE id = $1',
       [claims.id]
     );
     if (!result.rowCount) {
       return res.status(401).json({ message: 'Account no longer exists.' });
+    }
+    // Suspend and revoke take effect on the very next request rather than when
+    // the token happens to expire, because the status is read from the row here
+    // rather than trusted from the twelve-hour-old claims.
+    const accountStatus = result.rows[0].status || 'active';
+    if (accountStatus !== 'active') {
+      return res.status(403).json({
+        message: accountStatus === 'suspended'
+          ? 'This account is suspended. Contact the administrator.'
+          : 'Access to this account has been revoked.'
+      });
     }
     // A token minted before the password was reset must not survive the reset.
     // `iat` is whole seconds while the reset carries milliseconds, so the two
@@ -47,7 +80,23 @@ export async function authMiddleware(req, res, next) {
     if (changedAt && claims.iat && claims.iat < Math.ceil(new Date(changedAt).getTime() / 1000)) {
       return res.status(401).json({ message: 'Your password was changed. Sign in again.' });
     }
-    const { password_changed_at: _ignored, ...user } = result.rows[0];
+    const { password_changed_at: _ignored, access_level: accessLevel, ...rest } = result.rows[0];
+    const user = { ...rest, accessLevel: accessLevel || 'internal' };
+
+    // An external partner reaches their own read-only surface and nothing else.
+    // Checked here, in front of every authenticated route, so no individual
+    // handler has to remember to do it and none can forget.
+    if (user.role === 'partner' && !partnerMayReach(req.originalUrl)) {
+      return res.status(403).json({
+        message: 'External partner access is limited to your assigned business operation.'
+      });
+    }
+    // An account with no operation cannot be scoped to one, so it would read
+    // either nothing or everything depending on the query. Refuse instead.
+    if (user.role === 'partner' && !user.sector) {
+      return res.status(403).json({ message: 'This partner account has no business operation assigned.' });
+    }
+
     req.user = user;
     next();
   } catch (error) {
