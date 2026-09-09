@@ -982,6 +982,9 @@ router.get('/:id/evidence/:evidenceId/file', asyncRoute(async (req, res) => {
 
   res.type(record.mime_type);
   res.setHeader('Content-Disposition', `inline; filename="${record.original_name.replace(/"/g, '')}"`);
+  // Who may read this file is decided per request, so no shared cache and no
+  // browser may keep a copy that outlives the check.
+  res.setHeader('Cache-Control', 'private, no-store');
   // The disk gives back a stream, remote storage a buffer already in hand.
   if (Buffer.isBuffer(file)) return res.send(file);
   return file.pipe(res);

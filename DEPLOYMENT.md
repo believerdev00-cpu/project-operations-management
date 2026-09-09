@@ -94,3 +94,22 @@ npm run dev          # API on :5000 and the Vite client on :5173
   booting and opening a database connection.
 - **Existing local uploads are not migrated.** Any evidence already sitting in
   `server/uploads` stays on your machine; it is not copied into the bucket.
+
+## A note on deleted evidence and Supabase's CDN
+
+Supabase Storage sits behind a CDN that caches an object once it has been read,
+and it keeps serving that copy for a while after the object is deleted. This was
+measured, not assumed: a delete returns `Successfully deleted` and the next read
+still answers `200` with `CF-Cache-Status: HIT` for at least 16 seconds. No
+`cache-control` value avoids it -- Supabase prefixes `public, ` to whatever the
+upload sends, so `no-store` arrives as `public, no-store` and is cached anyway.
+
+This is not visible to anyone using the application. The storage URL is never
+handed out; evidence is only ever read through
+`/api/activities/:id/evidence/:evidenceId/file`, which looks the row up in the
+database first and returns 404 as soon as the row is gone. The stale copy can
+only be reached by someone who already holds the service role key and the exact
+object path.
+
+What follows from it: **treat the service role key as the thing that protects
+deleted files**, and rotate it if it is ever exposed.

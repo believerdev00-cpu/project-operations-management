@@ -55,7 +55,12 @@ export async function saveFile(folder, storedName, buffer, mimeType) {
     headers: {
       Authorization: `Bearer ${serviceKey}`,
       'Content-Type': mimeType || 'application/octet-stream',
-      'cache-control': 'max-age=3600'
+      // Never cacheable. Evidence is private and permission-checked on every
+      // read, and a cacheable object keeps being served by the CDN in front of
+      // storage after it has been deleted -- verified: a delete returns
+      // "Successfully deleted" and the next read still answers 200 from cache.
+      // Deleted evidence has to be gone the moment it is deleted.
+      'cache-control': 'no-store'
     },
     body: buffer
   });
