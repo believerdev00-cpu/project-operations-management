@@ -10,3 +10,6 @@ server/uploads
 
 # Vercel CLI
 .vercel
+
+.vercel
+.env*
