@@ -564,14 +564,21 @@ router.post('/', asyncRoute(async (req, res) => {
     }
     await logHistory(client, id, req.user, entries);
     await client.query('COMMIT');
-    const saved = await loadActivity(id, req.user);
-    res.status(201).json(mapActivity(saved));
   } catch (error) {
     await safeRollback(client);
     throw error;
   } finally {
     client.release();
   }
+
+  // Reloaded only after the transaction's connection is back in the pool. The
+  // reload goes through pool.query, and on Vercel the pool holds exactly one
+  // connection (max: 1 in db/database.js) -- asking it for a second while this
+  // one was still checked out waited out connectionTimeoutMillis and threw.
+  // That happened *after* the COMMIT, so the activity was written and the caller
+  // still got "Server or database error".
+  const saved = await loadActivity(id, req.user);
+  res.status(201).json(mapActivity(saved));
 }));
 
 // Correcting the request itself. The decision fields are not reachable here --

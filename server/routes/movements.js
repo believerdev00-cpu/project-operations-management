@@ -580,6 +580,7 @@ router.post('/', asyncRoute(async (req, res) => {
     if (!holder.rowCount) throw new MovementError(400, 'The person this movement is assigned to does not exist.');
   }
 
+  let movementId = null;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -653,13 +654,21 @@ router.post('/', asyncRoute(async (req, res) => {
     }
     await logHistory(client, id, req.user, entries);
     await client.query('COMMIT');
-    res.status(201).json(mapMovement((await pool.query(`${SELECT_MOVEMENT} WHERE m.id = $1`, [result.rows[0].id])).rows[0]));
+    movementId = result.rows[0].id;
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
   } finally {
     client.release();
   }
+
+  // Reloaded only after the transaction's connection is back in the pool. The
+  // reload goes through pool.query, and on Vercel the pool holds exactly one
+  // connection (max: 1 in db/database.js) -- asking it for a second while this
+  // one was still checked out waited out connectionTimeoutMillis and threw.
+  // That happened *after* the COMMIT, so the movement was written and the caller
+  // still got "Server or database error".
+  res.status(201).json(mapMovement((await pool.query(`${SELECT_MOVEMENT} WHERE m.id = $1`, [movementId])).rows[0]));
 }));
 
 // Only the Director may pin an actual transaction rate onto a record.
@@ -952,15 +961,17 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
     }
     await logHistory(client, existing.id, req.user, entries);
     await client.query('COMMIT');
-    // Reloaded through the joined view: RETURNING * carries no approver or
-    // assignee names, and the client renders those on the detail screen.
-    res.json(mapMovement(await loadMovement(existing.id, req.user)));
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
   } finally {
     client.release();
   }
+
+  // Reloaded through the joined view: RETURNING * carries no approver or
+  // assignee names, and the client renders those on the detail screen. It
+  // runs after the release for the pool reason given on the create route.
+  res.json(mapMovement(await loadMovement(existing.id, req.user)));
 }));
 
 // Whether an external business partner in this operation may see this movement.
@@ -1038,15 +1049,17 @@ router.patch('/:id/finance', asyncRoute(async (req, res) => {
     }
     await logHistory(client, existing.id, req.user, entries);
     await client.query('COMMIT');
-    // Reloaded through the joined view: RETURNING * carries no approver or
-    // assignee names, and the client renders those on the detail screen.
-    res.json(mapMovement(await loadMovement(existing.id, req.user)));
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
   } finally {
     client.release();
   }
+
+  // Reloaded through the joined view: RETURNING * carries no approver or
+  // assignee names, and the client renders those on the detail screen. It
+  // runs after the release for the pool reason given on the create route.
+  res.json(mapMovement(await loadMovement(existing.id, req.user)));
 }));
 
 router.delete('/:id', asyncRoute(async (req, res) => {

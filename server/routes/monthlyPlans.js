@@ -370,6 +370,7 @@ router.post('/', asyncRoute(async (req, res) => {
     manager = found.rows[0];
   }
 
+  let planId = null;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -383,7 +384,7 @@ router.post('/', asyncRoute(async (req, res) => {
       ...(manager ? [{ action: 'Manager assigned', field: 'managerId', oldValue: null, newValue: String(manager.id) }] : [])
     ]);
     await client.query('COMMIT');
-    res.status(201).json(mapPlan(await loadPlan(inserted.rows[0].id, req.user)));
+    planId = inserted.rows[0].id;
   } catch (error) {
     await safeRollback(client);
     // One plan per operation per month, enforced by a unique index.
@@ -394,6 +395,14 @@ router.post('/', asyncRoute(async (req, res) => {
   } finally {
     client.release();
   }
+
+  // Reloaded only after the transaction's connection is back in the pool. The
+  // reload goes through pool.query, and on Vercel the pool holds exactly one
+  // connection (max: 1 in db/database.js) -- asking it for a second while this
+  // one was still checked out waited out connectionTimeoutMillis and threw.
+  // That happened *after* the COMMIT, so the plan was written and the caller
+  // still got "Server or database error".
+  res.status(201).json(mapPlan(await loadPlan(planId, req.user)));
 }));
 
 // Section 10: the Director may change the plan before or during the month.
