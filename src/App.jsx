@@ -1042,7 +1042,10 @@ Minimum 6 characters.`, '');
             <Metric label={t('metric.operationManagers')} value={register.roleCounts?.manager || 0} />
             <Metric label={t('metric.teamMembers')} value={register.roleCounts?.staff || 0} />
             <Metric label={t('metric.withoutManager')} value={register.unassigned || 0} />
-            <Metric label={t('metric.operationsWithoutManager')} value={sectors.filter((sector) => !register.users.some((account) => account.role === 'manager' && account.sector === sector.id)).length} />
+            {/* A manager who covers every operation covers this one too, so they
+                count here as well -- matching on sector alone read their NULL
+                sector as covering nothing and left every operation uncovered. */}
+            <Metric label={t('metric.operationsWithoutManager')} value={sectors.filter((sector) => !register.users.some((account) => account.role === 'manager' && (account.coversAllSectors || account.sector === sector.id))).length} />
           </div>
           <section className="toolbar-row"><div className="filter-group">
             <select value={userRoleFilter} onChange={(event) => setUserRoleFilter(event.target.value)}>
