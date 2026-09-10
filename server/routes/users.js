@@ -1,7 +1,7 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
 import { pool } from '../db/database.js';
-import { asyncRoute, isAdmin, requiredText, sectorIds } from '../lib/http.js';
+import { ALL_OPERATIONS, asyncRoute, isAdmin, requiredText, sectorIds, withinScope } from '../lib/http.js';
 
 const router = express.Router();
 
@@ -25,6 +25,7 @@ function mapAccount(row) {
     name: row.name,
     role: row.role,
     sector: row.sector,
+    coversAllSectors: Boolean(row.covers_all_sectors),
     managerId: row.manager_id ?? null,
     managerName: row.manager_name ?? null,
     managerSector: row.manager_sector ?? null,
@@ -37,7 +38,7 @@ function mapAccount(row) {
 
 // Password hashes are never selected into any response built from this list.
 const ACCOUNT_SELECT = `
-  SELECT u.id, u.username, u.name, u.role, u.sector, u.manager_id, u.created_at, u.password_changed_at,
+  SELECT u.id, u.username, u.name, u.role, u.sector, u.covers_all_sectors, u.manager_id, u.created_at, u.password_changed_at,
          m.name AS manager_name, m.sector AS manager_sector,
          (SELECT COUNT(*) FROM projects p WHERE p.manager_id = u.id)::int AS assigned_projects,
          (SELECT COUNT(*) FROM users t WHERE t.manager_id = u.id)::int AS team_size
@@ -104,25 +105,32 @@ router.post('/', adminOnly('Only the administrator can create accounts.'), async
     return res.status(400).json({ message: 'Choose a role: sector manager or team member.' });
   }
   // Every non-Director account is scoped to one sector; without it their own
-  // sector-scoped queries would read back nothing.
-  if (!sectorIds.has(sector)) {
+  // sector-scoped queries would read back nothing. The one exception is a
+  // manager marked as covering all of them, which is scoped by the flag instead.
+  const coversAll = role === 'manager' && sector === ALL_OPERATIONS;
+  if (!coversAll && !sectorIds.has(sector)) {
     return res.status(400).json({ message: 'A valid working area is required.' });
   }
+  const storedSector = coversAll ? null : sector;
 
   const managerId = req.body?.managerId ? Number(req.body.managerId) : null;
   if (managerId) {
-    const manager = await pool.query("SELECT id, sector FROM users WHERE id = $1 AND role = 'manager'", [managerId]);
+    const manager = await pool.query(
+      "SELECT id, sector, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager'",
+      [managerId]
+    );
     if (!manager.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
-    if (manager.rows[0].sector !== sector) {
+    // A manager covering every operation may hold staff from any of them.
+    if (!coversAll && !withinScope(manager.rows[0], sector)) {
       return res.status(400).json({ message: 'The manager works in a different area. Pick a manager from the same working area.' });
     }
   }
 
   try {
     const inserted = await pool.query(
-      `INSERT INTO users (username, password_hash, name, role, sector, manager_id)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-      [username.trim(), bcrypt.hashSync(password.trim(), 10), name.trim(), role, sector, managerId]
+      `INSERT INTO users (username, password_hash, name, role, sector, manager_id, covers_all_sectors)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [username.trim(), bcrypt.hashSync(password.trim(), 10), name.trim(), role, storedSector, managerId, coversAll]
     );
     res.status(201).json(await loadAccount(inserted.rows[0].id));
   } catch (error) {
@@ -160,7 +168,7 @@ router.patch('/:id/password', adminOnly('Only the administrator can change a pas
 // be listed on a team whose records they cannot see.
 router.patch('/:id/assignment', adminOnly('Only the administrator can change an assignment.'), asyncRoute(async (req, res) => {
   const payload = req.body || {};
-  const existing = await pool.query('SELECT id, role, sector, manager_id FROM users WHERE id = $1', [req.params.id]);
+  const existing = await pool.query('SELECT id, role, sector, manager_id, covers_all_sectors FROM users WHERE id = $1', [req.params.id]);
   if (!existing.rowCount) return res.status(404).json({ message: 'Account not found.' });
 
   const target = existing.rows[0];
@@ -175,10 +183,17 @@ router.patch('/:id/assignment', adminOnly('Only the administrator can change an 
     return res.status(400).json({ message: 'Provide a working area, a manager, or both.' });
   }
 
-  const sector = sectorGiven ? payload.sector : target.sector;
-  if (!sectorIds.has(sector)) {
+  // 'all' is only meaningful for a manager. Left unspecified, an account that
+  // already covers everything keeps doing so rather than silently collapsing to
+  // a single area.
+  const requestedSector = sectorGiven
+    ? payload.sector
+    : (target.covers_all_sectors ? ALL_OPERATIONS : target.sector);
+  const coversAll = target.role === 'manager' && requestedSector === ALL_OPERATIONS;
+  if (!coversAll && !sectorIds.has(requestedSector)) {
     return res.status(400).json({ message: 'A valid working area is required.' });
   }
+  const sector = coversAll ? null : requestedSector;
 
   let managerId = managerGiven
     ? (payload.managerId === null || payload.managerId === '' ? null : Number(payload.managerId))
@@ -188,9 +203,12 @@ router.patch('/:id/assignment', adminOnly('Only the administrator can change an 
     if (!Number.isInteger(managerId)) return res.status(400).json({ message: 'The selected manager is invalid.' });
     if (managerId === target.id) return res.status(400).json({ message: 'An account cannot report to itself.' });
 
-    const manager = await pool.query("SELECT id, sector FROM users WHERE id = $1 AND role = 'manager'", [managerId]);
+    const manager = await pool.query(
+      "SELECT id, sector, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager'",
+      [managerId]
+    );
     if (!manager.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
-    if (manager.rows[0].sector !== sector) {
+    if (!coversAll && !withinScope(manager.rows[0], sector)) {
       return res.status(400).json({
         message: 'That manager works in a different area. Move the user to the manager\'s area, or pick a manager from this one.'
       });
@@ -201,7 +219,10 @@ router.patch('/:id/assignment', adminOnly('Only the administrator can change an 
   }
 
   try {
-    await pool.query('UPDATE users SET sector = $2, manager_id = $3 WHERE id = $1', [target.id, sector, managerId]);
+    await pool.query(
+      'UPDATE users SET sector = $2, manager_id = $3, covers_all_sectors = $4 WHERE id = $1',
+      [target.id, sector, managerId, coversAll]
+    );
   } catch (error) {
     const message = translateConstraintError(error);
     if (!message) throw error;
@@ -210,8 +231,10 @@ router.patch('/:id/assignment', adminOnly('Only the administrator can change an 
 
   // Moving a manager to another area strands the team that reported to them in
   // the area they left, so the link is dropped rather than left inconsistent.
+  // A manager who now covers every area strands nobody: their team is in scope
+  // whichever area each member sits in.
   let detached = 0;
-  if (target.role === 'manager' && sector !== target.sector) {
+  if (target.role === 'manager' && !coversAll && sector !== target.sector) {
     const cleared = await pool.query('UPDATE users SET manager_id = NULL WHERE manager_id = $1 AND sector <> $2 RETURNING id', [target.id, sector]);
     detached = cleared.rowCount;
   }

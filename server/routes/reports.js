@@ -18,7 +18,7 @@ import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 import { pool } from '../db/database.js';
 import { sectors } from '../data/seedData.js';
-import { asyncRoute, isAdmin, managerScope } from '../lib/http.js';
+import { asyncRoute, hasFullScope, isAdmin, managerScope } from '../lib/http.js';
 import { round2 } from '../lib/rates.js';
 
 const router = express.Router();
@@ -352,9 +352,12 @@ export async function buildReport(user, period) {
     period,
     generatedAt: new Date().toISOString(),
     scope: {
+      // isDirector stays a question about authority -- it drives what the report
+      // header claims about who produced it. The sector labels below describe
+      // coverage, so an all-operations manager reads as all working areas.
       isDirector: isAdmin(user),
-      sector: isAdmin(user) ? null : user.sector,
-      sectorName: isAdmin(user) ? 'All working areas' : sectorName(user.sector),
+      sector: hasFullScope(user) ? null : user.sector,
+      sectorName: hasFullScope(user) ? 'All working areas' : sectorName(user.sector),
       viewer: user.name
     },
     basis: 'Activities are counted in the period they were assigned or raised.',

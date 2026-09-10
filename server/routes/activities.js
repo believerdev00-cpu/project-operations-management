@@ -21,7 +21,7 @@ import express from 'express';
 import multer from 'multer';
 import { pool, safeRollback } from '../db/database.js';
 import { ACTIVITY_STATUSES, ACTIVITY_ORIGINS } from '../db/activitySchema.js';
-import { asyncRoute, isAdmin, managerScope, requiredText, validNumber, validateSector } from '../lib/http.js';
+import { asyncRoute, hasFullScope, isAdmin, managerScope, requiredText, validNumber, validateSector, withinScope } from '../lib/http.js';
 import { canApprove, pendingForMeSql, resolveDirector, APPROVER_ROLE_LABELS } from '../lib/approvals.js';
 import { PAYMENT_METHODS } from '../db/monthlySchema.js';
 import {
@@ -324,7 +324,7 @@ function canEditRequest(user, row) {
 }
 
 function canAttachEvidence(user, row) {
-  return isAdmin(user) || user.sector === row.sector;
+  return withinScope(user, row.sector);
 }
 
 router.use((req, res, next) => {
@@ -425,14 +425,14 @@ router.post('/', asyncRoute(async (req, res) => {
   if (invalid) return res.status(400).json({ message: invalid });
 
   const projectResult = await pool.query(
-    `SELECT id, sector FROM projects WHERE id = $1${isAdmin(req.user) ? '' : ' AND sector = $2'}`,
-    isAdmin(req.user) ? [payload.projectId] : [payload.projectId, req.user.sector]
+    `SELECT id, sector FROM projects WHERE id = $1${hasFullScope(req.user) ? '' : ' AND sector = $2'}`,
+    hasFullScope(req.user) ? [payload.projectId] : [payload.projectId, req.user.sector]
   );
   if (!projectResult.rowCount) return res.status(404).json({ message: 'Select an existing project before assigning an activity.' });
 
   const sector = validateSector(payload.sector, projectResult.rows[0].sector);
   if (!sector) return res.status(400).json({ message: 'Activity sector is invalid.' });
-  if (!isAdmin(req.user) && sector !== req.user.sector) {
+  if (!withinScope(req.user, sector)) {
     return res.status(403).json({ message: 'You can only record activities in your own sector.' });
   }
 
@@ -451,11 +451,15 @@ router.post('/', asyncRoute(async (req, res) => {
     if (!assignedTo) {
       return res.status(400).json({ message: 'Choose the manager who will carry out this activity.' });
     }
-    const manager = await pool.query("SELECT id, sector FROM users WHERE id = $1 AND role = 'manager'", [assignedTo]);
+    const manager = await pool.query(
+      "SELECT id, sector, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager'",
+      [assignedTo]
+    );
     if (!manager.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
-    // A manager only ever reads their own working area, so handing them work in
-    // another one would leave them assigned to a record they cannot open.
-    if (manager.rows[0].sector !== sector) {
+    // A manager only ever reads the working areas they cover, so handing them
+    // work outside those would leave them assigned to a record they cannot open.
+    // A manager who covers every area can be handed anything.
+    if (!withinScope(manager.rows[0], sector)) {
       return res.status(400).json({ message: 'That manager works in a different area. Pick a manager from the same working area.' });
     }
     deadline = payload.deadline ? String(payload.deadline).slice(0, 10) : null;
@@ -583,14 +587,14 @@ router.put('/:id', asyncRoute(async (req, res) => {
   if (invalid) return res.status(400).json({ message: invalid });
 
   const projectResult = await pool.query(
-    `SELECT id, sector FROM projects WHERE id = $1${isAdmin(req.user) ? '' : ' AND sector = $2'}`,
-    isAdmin(req.user) ? [payload.projectId] : [payload.projectId, req.user.sector]
+    `SELECT id, sector FROM projects WHERE id = $1${hasFullScope(req.user) ? '' : ' AND sector = $2'}`,
+    hasFullScope(req.user) ? [payload.projectId] : [payload.projectId, req.user.sector]
   );
   if (!projectResult.rowCount) return res.status(404).json({ message: 'Select an existing project before assigning an activity.' });
 
   const sector = validateSector(payload.sector, projectResult.rows[0].sector);
   if (!sector) return res.status(400).json({ message: 'Activity sector is invalid.' });
-  if (!isAdmin(req.user) && sector !== req.user.sector) {
+  if (!withinScope(req.user, sector)) {
     return res.status(403).json({ message: 'You can only record activities in your own sector.' });
   }
 
@@ -1002,7 +1006,7 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
   // approved. Approving and rejecting go through /approval, which checks that
   // the caller is the named approver; everything else is the Director's.
   const ownsIt = !isAdmin(req.user)
-    && req.user.sector === existing.sector
+    && withinScope(req.user, existing.sector)
     && (existing.assigned_to === null || existing.assigned_to === req.user.id);
   const managerStart = ownsIt
     && status === 'In Progress'
@@ -1064,7 +1068,7 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
 // the record: the Director reviews the evidence and sets Completed.
 router.post('/:id/completion', asyncRoute(async (req, res) => {
   const existing = await loadActivity(req.params.id, req.user);
-  if (!isAdmin(req.user) && req.user.sector !== existing.sector) {
+  if (!withinScope(req.user, existing.sector)) {
     return res.status(403).json({ message: 'You can only submit activities in your own sector.' });
   }
   if (!WORKABLE_STATUSES.includes(existing.status)) {
@@ -1117,9 +1121,12 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
   if (managerGiven) {
     assignedTo = payload.assignedTo === null || payload.assignedTo === '' ? null : Number(payload.assignedTo);
     if (assignedTo) {
-      const manager = await pool.query("SELECT id, sector, name FROM users WHERE id = $1 AND role = 'manager'", [assignedTo]);
+      const manager = await pool.query(
+        "SELECT id, sector, name, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager'",
+        [assignedTo]
+      );
       if (!manager.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
-      if (manager.rows[0].sector !== existing.sector) {
+      if (!withinScope(manager.rows[0], existing.sector)) {
         return res.status(400).json({ message: 'That manager works in a different area. Pick a manager from the same working area.' });
       }
     }
@@ -1183,7 +1190,7 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
 // approval below, which keeps the original figure intact in requested_budget.
 router.post('/:id/budget-requests', asyncRoute(async (req, res) => {
   const existing = await loadActivity(req.params.id, req.user);
-  if (!isAdmin(req.user) && req.user.sector !== existing.sector) {
+  if (!withinScope(req.user, existing.sector)) {
     return res.status(403).json({ message: 'You can only ask about activities in your own working area.' });
   }
   const { amount, reason } = req.body || {};

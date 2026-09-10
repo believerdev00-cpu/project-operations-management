@@ -53,7 +53,7 @@ export async function authMiddleware(req, res, next) {
   // reassigned manager loses the old sector immediately, a deleted one loses access.
   try {
     const result = await pool.query(
-      'SELECT id, username, name, role, sector, email, status, access_level, password_changed_at FROM users WHERE id = $1',
+      'SELECT id, username, name, role, sector, email, status, access_level, covers_all_sectors, password_changed_at FROM users WHERE id = $1',
       [claims.id]
     );
     if (!result.rowCount) {
@@ -80,8 +80,16 @@ export async function authMiddleware(req, res, next) {
     if (changedAt && claims.iat && claims.iat < Math.ceil(new Date(changedAt).getTime() / 1000)) {
       return res.status(401).json({ message: 'Your password was changed. Sign in again.' });
     }
-    const { password_changed_at: _ignored, access_level: accessLevel, ...rest } = result.rows[0];
-    const user = { ...rest, accessLevel: accessLevel || 'internal' };
+    const {
+      password_changed_at: _ignored,
+      access_level: accessLevel,
+      covers_all_sectors: coversAllSectors,
+      ...rest
+    } = result.rows[0];
+    // Read back from the row rather than the claims, for the same reason role and
+    // sector are: revoking the flag has to bite on the next request, not in
+    // twelve hours when the token expires.
+    const user = { ...rest, accessLevel: accessLevel || 'internal', coversAllSectors: Boolean(coversAllSectors) };
 
     // An external partner reaches their own read-only surface and nothing else.
     // Checked here, in front of every authenticated route, so no individual

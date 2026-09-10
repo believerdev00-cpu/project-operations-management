@@ -251,6 +251,19 @@ export async function initDatabase() {
       END $$;
     `);
     await pool.query('CREATE INDEX IF NOT EXISTS users_manager_idx ON users(manager_id)');
+    // A manager normally covers exactly one business operation, named in `sector`.
+    // This flag lifts that to all of them, which is what a single-manager setup
+    // needs: one account carries every operation instead of one account per
+    // operation. It widens what the account can SEE and be handed, and nothing
+    // else -- assigning work and deciding approvals stay with the Director.
+    //
+    // `sector` is left NULL on such an account. It is a foreign key into
+    // sectors(id), so there is no in-band value like 'all' to put there, and a
+    // NULL plus this flag says "every operation" without inventing a fake row.
+    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS covers_all_sectors BOOLEAN NOT NULL DEFAULT FALSE');
+    await pool.query('ALTER TABLE users DROP CONSTRAINT IF EXISTS users_covers_all_is_manager');
+    await pool.query(`ALTER TABLE users ADD CONSTRAINT users_covers_all_is_manager
+      CHECK (covers_all_sectors = FALSE OR (role = 'manager' AND sector IS NULL))`);
     await pool.query(`
       CREATE OR REPLACE FUNCTION enforce_manager_sector_limit()
       RETURNS trigger AS $$
@@ -292,8 +305,16 @@ export async function initDatabase() {
     // Monthly planning sits on top of the activity register, so it migrates last.
     await migrateMonthlyModule(pool);
 
-  const userCheck = await pool.query('SELECT id FROM users WHERE username = $1', ['admin']);
-  if (userCheck.rowCount === 0) {
+  // The Director is identified by the role, not by a fixed username. Keyed on
+  // username = 'admin', renaming that account -- which its owner is free to do
+  // from User management -- made the next boot conclude no Director existed and
+  // seed a second one alongside it.
+  //
+  // The display name is not written back either, for the same reason: it is the
+  // owner's to set, and forcing 'Director Admin' on every boot silently undid
+  // any rename.
+  const director = await pool.query("SELECT id FROM users WHERE role = 'super-admin' ORDER BY id LIMIT 1");
+  if (director.rowCount === 0) {
     if (!process.env.ADMIN_PASSWORD) {
       throw new Error('ADMIN_PASSWORD is required to seed the initial admin account.');
     }
@@ -301,21 +322,16 @@ export async function initDatabase() {
       'INSERT INTO users (username, password_hash, name, role) VALUES ($1, $2, $3, $4)',
       ['admin', bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10), 'Director Admin', 'super-admin']
     );
-  } else {
-    // Never re-hash the password here. Overwriting it on every boot reverted any
-    // rotation and pinned the account to whatever .env happened to hold.
-    // Set ADMIN_PASSWORD_RESET=true for a single deliberate recovery boot.
-    await pool.query(
-      "UPDATE users SET name = $2, role = 'super-admin' WHERE username = $1",
-      ['admin', 'Director Admin']
-    );
-    if (process.env.ADMIN_PASSWORD_RESET === 'true' && process.env.ADMIN_PASSWORD) {
-      await pool.query('UPDATE users SET password_hash = $2 WHERE username = $1', [
-        'admin',
-        bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10)
-      ]);
-      console.warn('ADMIN_PASSWORD_RESET is set: the admin password was reset. Unset it and restart.');
-    }
+  } else if (process.env.ADMIN_PASSWORD_RESET === 'true' && process.env.ADMIN_PASSWORD) {
+    // Never re-hash the password on an ordinary boot. Overwriting it every time
+    // reverted any rotation and pinned the account to whatever .env happened to
+    // hold. Set ADMIN_PASSWORD_RESET=true for a single deliberate recovery boot,
+    // which acts on whichever account currently holds the role.
+    await pool.query('UPDATE users SET password_hash = $2 WHERE id = $1', [
+      director.rows[0].id,
+      bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10)
+    ]);
+    console.warn('ADMIN_PASSWORD_RESET is set: the Director password was reset. Unset it and restart.');
   }
 
 }

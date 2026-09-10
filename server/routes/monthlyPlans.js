@@ -22,7 +22,7 @@
 
 import express from 'express';
 import { pool, safeRollback } from '../db/database.js';
-import { asyncRoute, isAdmin, requiredText, sectorIds, validNumber } from '../lib/http.js';
+import { asyncRoute, hasFullScope, isAdmin, requiredText, sectorIds, validNumber } from '../lib/http.js';
 import { PLAN_PRIORITIES, PLAN_STATUSES, REPORT_STATUSES } from '../db/monthlySchema.js';
 import { round2 } from '../lib/rates.js';
 import {
@@ -161,7 +161,7 @@ function mapPlan(row) {
 async function loadPlan(id, user) {
   const values = [id];
   let scope = '';
-  if (!isAdmin(user)) {
+  if (!hasFullScope(user)) {
     values.push(user.sector);
     scope = ` AND p.sector = $${values.length}`;
   }
@@ -195,7 +195,7 @@ router.get('/', asyncRoute(async (req, res) => {
     filters.push(`p.sector = $${values.length}`);
   }
   // The scope a manager cannot ask their way out of.
-  if (!isAdmin(req.user)) {
+  if (!hasFullScope(req.user)) {
     values.push(req.user.sector);
     filters.push(`p.sector = $${values.length}`);
   }
@@ -214,7 +214,7 @@ router.get('/review', asyncRoute(async (req, res) => {
 
   const values = [month];
   let scope = '';
-  if (!isAdmin(req.user)) {
+  if (!hasFullScope(req.user)) {
     values.push(req.user.sector);
     scope = ` AND p.sector = $${values.length}`;
   }

@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { initDatabase, pool } from './db/database.js';
 import { sectors } from './data/seedData.js';
 import { authMiddleware, jwtSecret } from './lib/auth.js';
-import { asyncRoute, isAdmin, managerScope, requiredText, sectorIds, validNumber, validateSector } from './lib/http.js';
+import { asyncRoute, hasFullScope, isAdmin, managerScope, requiredText, sectorIds, validNumber, validateSector, withinScope } from './lib/http.js';
 import { pendingForMeSql } from './lib/approvals.js';
 import movementRouter, { mapMovement } from './routes/movements.js';
 import rateRouter from './routes/rates.js';
@@ -97,11 +97,18 @@ app.get('/api/sectors', authMiddleware, (req, res) => {
 app.get('/api/managers', authMiddleware, asyncRoute(async (req, res) => {
   const values = [];
   let scope = '';
-  if (!isAdmin(req.user)) {
+  if (!hasFullScope(req.user)) {
     values.push(req.user.sector);
-    scope = ` AND sector = $${values.length}`;
+    // An all-operations manager belongs to every list, so a scoped caller sees
+    // them alongside their own operation's managers rather than missing the one
+    // account that can actually take the work.
+    scope = ` AND (sector = $${values.length} OR covers_all_sectors)`;
   }
-  const result = await pool.query(`SELECT id, username, name, role, sector FROM users WHERE role = 'manager'${scope} ORDER BY name`, values);
+  const result = await pool.query(
+    `SELECT id, username, name, role, sector, covers_all_sectors AS "coversAllSectors"
+     FROM users WHERE role = 'manager'${scope} ORDER BY name`,
+    values
+  );
   res.json(result.rows);
 }));
 
@@ -127,7 +134,7 @@ app.post('/api/managers', authMiddleware, asyncRoute(async (req, res) => {
 app.post('/api/auth/login', loginLimiter, asyncRoute(async (req, res) => {
   const { username, password } = req.body || {};
   const result = await pool.query(
-    'SELECT id, username, password_hash, name, role, sector, status, access_level FROM users WHERE username = $1',
+    'SELECT id, username, password_hash, name, role, sector, status, access_level, covers_all_sectors FROM users WHERE username = $1',
     [username]
   );
   const user = result.rows[0];
@@ -148,7 +155,8 @@ app.post('/api/auth/login', loginLimiter, asyncRoute(async (req, res) => {
 
   const publicUser = {
     id: user.id, username: user.username, name: user.name, role: user.role, sector: user.sector,
-    accessLevel: user.access_level || 'internal'
+    accessLevel: user.access_level || 'internal',
+    coversAllSectors: Boolean(user.covers_all_sectors)
   };
   const token = jwt.sign(publicUser, jwtSecret, { expiresIn: '12h' });
   res.json({ token, user: publicUser });
@@ -156,7 +164,7 @@ app.post('/api/auth/login', loginLimiter, asyncRoute(async (req, res) => {
 
 app.get('/api/auth/session', authMiddleware, asyncRoute(async (req, res) => {
   const result = await pool.query(
-    'SELECT id, username, name, role, sector, email, status, access_level FROM users WHERE id = $1',
+    'SELECT id, username, name, role, sector, email, status, access_level, covers_all_sectors FROM users WHERE id = $1',
     [req.user.id]
   );
   const row = result.rows[0];
@@ -165,7 +173,8 @@ app.get('/api/auth/session', authMiddleware, asyncRoute(async (req, res) => {
       ? {
           id: row.id, username: row.username, name: row.name, role: row.role,
           sector: row.sector, email: row.email || null,
-          status: row.status || 'active', accessLevel: row.access_level || 'internal'
+          status: row.status || 'active', accessLevel: row.access_level || 'internal',
+          coversAllSectors: Boolean(row.covers_all_sectors)
         }
       : null
   });
@@ -174,7 +183,7 @@ app.get('/api/auth/session', authMiddleware, asyncRoute(async (req, res) => {
 app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
   // Parameterized rather than interpolated: every other query in this file binds
   // its values, and the sector should be no different.
-  const scoped = !isAdmin(req.user);
+  const scoped = !hasFullScope(req.user);
   const scopeValues = scoped ? [req.user.sector] : [];
   const whereSector = scoped ? ' WHERE sector = $1' : '';
   const andSector = scoped ? ' AND sector = $1' : '';
@@ -430,10 +439,10 @@ app.put('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
 
   // Authorize against the sector the project is in now, not the one the caller
   // sent, and refuse to let a manager move a project out of their own sector.
-  if (!isAdmin(req.user) && existingProject.rows[0].sector !== req.user.sector) {
+  if (!withinScope(req.user, existingProject.rows[0].sector)) {
     return res.status(403).json({ message: 'Managers can only update projects in their assigned sector.' });
   }
-  if (!isAdmin(req.user) && sector !== req.user.sector) {
+  if (!withinScope(req.user, sector)) {
     return res.status(403).json({ message: 'Managers cannot move a project to another sector.' });
   }
 
@@ -445,9 +454,9 @@ app.put('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
     `UPDATE projects
      SET name = $2, sector = $3, manager_id = $4, location = $5, owner = $6, status = $7, progress = $8,
        budget = $9, spent = $10, category = $11, updated_at = NOW()
-     WHERE id = $1${isAdmin(req.user) ? '' : ' AND sector = $12'}
+     WHERE id = $1${hasFullScope(req.user) ? '' : ' AND sector = $12'}
      RETURNING *`,
-    isAdmin(req.user)
+    hasFullScope(req.user)
       ? [req.params.id, payload.name, sector, managerId, payload.location, payload.owner, payload.status, Number(payload.progress || 0), Number(payload.budget || 0), Number(payload.spent || 0), payload.category || 'General']
       : [req.params.id, payload.name, sector, managerId, payload.location, payload.owner, payload.status, Number(payload.progress || 0), Number(payload.budget || 0), Number(payload.spent || 0), payload.category || 'General', req.user.sector]
   );
@@ -512,7 +521,7 @@ app.get('/api/approvals', authMiddleware, asyncRoute(async (req, res) => {
 app.post('/api/approvals', authMiddleware, asyncRoute(async (req, res) => {
   const payload = req.body || {};
   const sector = validateSector(payload.sector, 'agriculture');
-  if (!isAdmin(req.user) && sector !== req.user.sector) return res.status(403).json({ message: 'Managers can only submit approvals in their assigned sector.' });
+  if (!withinScope(req.user, sector)) return res.status(403).json({ message: 'Managers can only submit approvals in their assigned sector.' });
   if (!sector || !requiredText(payload.title) || !requiredText(payload.owner)) {
     return res.status(400).json({ message: 'Approval title, sector, and owner are required.' });
   }
@@ -533,7 +542,7 @@ app.post('/api/approvals', authMiddleware, asyncRoute(async (req, res) => {
 
 app.patch('/api/approvals/:id', authMiddleware, asyncRoute(async (req, res) => {
   const payload = req.body || {};
-  const existing = await pool.query(`SELECT * FROM approvals WHERE id = $1${isAdmin(req.user) ? '' : ' AND sector = $2'}`, isAdmin(req.user) ? [req.params.id] : [req.params.id, req.user.sector]);
+  const existing = await pool.query(`SELECT * FROM approvals WHERE id = $1${hasFullScope(req.user) ? '' : ' AND sector = $2'}`, hasFullScope(req.user) ? [req.params.id] : [req.params.id, req.user.sector]);
   if (!existing.rowCount) return res.status(404).json({ message: 'Approval not found.' });
 
   const current = existing.rows[0];
@@ -555,7 +564,7 @@ app.patch('/api/approvals/:id', authMiddleware, asyncRoute(async (req, res) => {
   if (decides && current.requested_by_id === req.user.id) {
     return res.status(403).json({ message: 'You cannot approve or reject an approval you requested yourself.' });
   }
-  if (!isAdmin(req.user) && sector !== req.user.sector) {
+  if (!withinScope(req.user, sector)) {
     return res.status(403).json({ message: 'Managers cannot move an approval to another sector.' });
   }
 
@@ -588,7 +597,7 @@ app.patch('/api/approvals/:id', authMiddleware, asyncRoute(async (req, res) => {
 }));
 
 app.delete('/api/approvals/:id', authMiddleware, asyncRoute(async (req, res) => {
-  const result = await pool.query(`DELETE FROM approvals WHERE id = $1${isAdmin(req.user) ? '' : ' AND sector = $2'} RETURNING *`, isAdmin(req.user) ? [req.params.id] : [req.params.id, req.user.sector]);
+  const result = await pool.query(`DELETE FROM approvals WHERE id = $1${hasFullScope(req.user) ? '' : ' AND sector = $2'} RETURNING *`, hasFullScope(req.user) ? [req.params.id] : [req.params.id, req.user.sector]);
   if (!result.rowCount) return res.status(404).json({ message: 'Approval not found.' });
   res.json({ message: 'Approval deleted successfully.', deletedApproval: mapApproval(result.rows[0]) });
 }));

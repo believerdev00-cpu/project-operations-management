@@ -7,7 +7,7 @@
 // recorded afterwards is what was spent, the evidence for it, and what is left.
 // There is no transaction, wallet, transfer or gateway anywhere in this module.
 
-import { isAdmin } from './http.js';
+import { hasFullScope, isAdmin } from './http.js';
 
 // 'YYYY-MM' as the browser sends it, to the first of that month as the column
 // stores it. Built from the parts rather than through Date, which would read a
@@ -61,7 +61,7 @@ export function fromCents(value) {
 // activities assigned to them, and nothing else.
 
 export function canReadPlan(user, plan) {
-  if (isAdmin(user)) return true;
+  if (hasFullScope(user)) return true;
   // A manager reads the plan for their own business operation. Being named on
   // it is not required -- a manager covering Farming can see Farming's month
   // even if the Director has since named somebody else on it -- but another
@@ -81,7 +81,7 @@ export function isPlanManager(user, plan) {
 export function canRecordExpense(user, activity) {
   if (isAdmin(user)) return true;
   if (!activity.assigned_to || Number(activity.assigned_to) !== Number(user.id)) return false;
-  return Boolean(user.sector) && activity.sector === user.sector;
+  return hasFullScope(user) || (Boolean(user.sector) && activity.sector === user.sector);
 }
 
 // Financial records are never deleted by the person who created them. Only the

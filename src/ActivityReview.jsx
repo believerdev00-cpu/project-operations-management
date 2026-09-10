@@ -222,7 +222,7 @@ export function ActivityReview({
   // already on the record stays listed even if their area has since changed, so
   // the cell is never blank.
   const managerOptions = useMemo(() => {
-    const sameArea = managers.filter((manager) => manager.sector === activity.sector);
+    const sameArea = managers.filter((manager) => manager.coversAllSectors || manager.sector === activity.sector);
     if (activity.assignedTo && !sameArea.some((manager) => manager.id === activity.assignedTo)) {
       return [{ id: activity.assignedTo, name: activity.assignedToName || `User #${activity.assignedTo}` }, ...sameArea];
     }
@@ -239,7 +239,11 @@ export function ActivityReview({
   const hasAssignmentChanges = Object.keys(assignmentChanges).length > 0;
 
   const due = deadlineNote(activity, language);
-  const canAttach = isDirector || user.sector === activity.sector;
+  // Mirrors withinScope in server/lib/http.js: a manager marked as covering every
+  // business operation is inside every area, and so has no single `sector` to
+  // compare against.
+  const inMyArea = Boolean(user.coversAllSectors) || user.sector === activity.sector;
+  const canAttach = isDirector || inMyArea;
   // Whether this user is the person the record is waiting on. The API checks
   // the same thing again before it writes anything.
   const iAmApprover = canApproveRecord(user, activity);
@@ -248,7 +252,7 @@ export function ActivityReview({
   const canChangeBudget = iAmApprover && isDirector;
   // The one move a manager owns on their own work, mirroring the status route:
   // starting what has been approved.
-  const canWorkOnIt = !isDirector && user.sector === activity.sector
+  const canWorkOnIt = !isDirector && inMyArea
     && (activity.assignedTo === null || activity.assignedTo === user.id);
   const managerCanStart = canWorkOnIt && STARTABLE_STATUSES.includes(activity.status)
     && (!activity.approvalRequired || activity.approvalStatus === 'approved');

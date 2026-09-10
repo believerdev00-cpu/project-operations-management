@@ -45,6 +45,11 @@ const sectors = BUSINESS_OPERATIONS.map((operation) => ({
 
 const OTHER_CATEGORY = 'Other (specify)';
 
+// The working area a manager who covers every operation is filed under. It is
+// not an operation id -- the API translates it into "no single area, covers all"
+// on the account row -- so it must never be looked up in `sectors`.
+const ALL_OPERATIONS = 'all';
+
 function categoriesForSector(sectorId) {
   return sectors.find((sector) => sector.id === sectorId)?.categories || [];
 }
@@ -310,7 +315,10 @@ Minimum 6 characters.`, '');
   // rather than leaving the pair inconsistent and the save refused.
   const changeUserSector = (account, sector) => {
     const manager = managers.find((candidate) => candidate.id === account.managerId);
-    return updateAssignment(account, { sector, managerId: manager && manager.sector === sector ? manager.id : null });
+    // An all-operations manager works in the new area too, so the link survives
+    // the move; one confined to the area being left does not.
+    const keepsManager = manager && (manager.coversAllSectors || manager.sector === sector);
+    return updateAssignment(account, { sector, managerId: keepsManager ? manager.id : null });
   };
 
   const decideApproval = async (approval, status) => {
@@ -845,7 +853,9 @@ Minimum 6 characters.`, '');
         <div className="sidebar-label">{t('app.signedInAs')}</div>
         <strong>{user.name}</strong>
         <span>{t(`role.${user.role}`)}</span>
-        {user.sector && <span>{t('app.businessOperation')}: {sectorName(user.sector)}</span>}
+        {user.coversAllSectors
+          ? <span>{t('app.businessOperation')}: {t('user.allOperations')}</span>
+          : user.sector && <span>{t('app.businessOperation')}: {sectorName(user.sector)}</span>}
         <button className="logout-btn" onClick={logout} type="button">{t('app.signOut')}</button>
       </div>
     </aside>
@@ -1094,7 +1104,7 @@ function UserTable({ users, managers, onChangeManager, onChangeSector, onResetPa
       // the API applies; the current manager stays listed so the cell is never
       // blank while the two are still in step.
       const managerOptions = managers.filter((manager) => manager.id !== account.id
-        && (manager.sector === account.sector || manager.id === account.managerId));
+        && (manager.coversAllSectors || manager.sector === account.sector || manager.id === account.managerId));
       return <tr key={account.id}>
         <td><strong>{account.name}</strong><small>#{account.id}</small></td>
         <td>{account.username}</td>
@@ -1105,8 +1115,10 @@ function UserTable({ users, managers, onChangeManager, onChangeSector, onResetPa
             {managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}
           </select>}</td>
         <td>{isDirector ? <span className="muted-cell">{t('user.allOperations')}</span>
-          : <select value={account.sector || ''} onChange={(event) => onChangeSector(account, event.target.value)}>
-            {!account.sector && <option value="">{t('user.notAssigned')}</option>}
+          : <select value={account.coversAllSectors ? ALL_OPERATIONS : (account.sector || '')} onChange={(event) => onChangeSector(account, event.target.value)}>
+            {!account.sector && !account.coversAllSectors && <option value="">{t('user.notAssigned')}</option>}
+            {/* Offered only to managers: the API refuses it for a team member. */}
+            {account.role === 'manager' && <option value={ALL_OPERATIONS}>{t('user.allOperations')}</option>}
             {sectors.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}
           </select>}</td>
         <td>{account.assignedProjects}</td>
@@ -1297,15 +1309,19 @@ function AccountForm({ form, setForm, managers, onSubmit }) {
   const t = useT();
   // A manager heads an area, so they report to nobody and the field is hidden.
   const showsManager = form.role === 'staff';
-  const managerOptions = managers.filter((manager) => manager.sector === form.sector);
+  const managerOptions = managers.filter((manager) => manager.coversAllSectors || manager.sector === form.sector);
   return <form className="form-panel" id="account-form" onSubmit={onSubmit}>
     <div className="panel-header"><div><h2>{t('form.addUser')}</h2><span>{t('form.addUserBlurbHash')}</span></div></div>
     <div className="form-grid">
       <Field label={t('field.name')}><input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></Field>
       <Field label={t('field.username')}><input required autoComplete="off" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></Field>
       <Field label={t('field.password')}><input required minLength="6" type="password" autoComplete="new-password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></Field>
-      <Field label={t('field.role')}><select required value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value, managerId: '' })}><option value="manager">{t('role.manager')}</option><option value="staff">{t('role.staff')}</option></select></Field>
-      <Field label={t('field.workingArea')}><select required value={form.sector || ''} onChange={(event) => setForm({ ...form, sector: event.target.value, managerId: '' })}><option value="">{t('form.selectOperation')}</option>{sectors.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}</select></Field>
+      {/* Switching to a team member drops an "all operations" choice that only a
+          manager may hold, rather than submitting a value the API will refuse. */}
+      <Field label={t('field.role')}><select required value={form.role} onChange={(event) => { const role = event.target.value; setForm({ ...form, role, managerId: '', sector: role !== 'manager' && form.sector === ALL_OPERATIONS ? '' : form.sector }); }}><option value="manager">{t('role.manager')}</option><option value="staff">{t('role.staff')}</option></select></Field>
+      {/* Only a manager can carry every operation at once; a team member always
+          sits in exactly one, so the choice is offered for managers alone. */}
+      <Field label={t('field.workingArea')}><select required value={form.sector || ''} onChange={(event) => setForm({ ...form, sector: event.target.value, managerId: '' })}><option value="">{t('form.selectOperation')}</option>{form.role === 'manager' && <option value={ALL_OPERATIONS}>{t('user.allOperations')}</option>}{sectors.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}</select></Field>
       {showsManager && <Field label={t('field.reportsTo')}><select value={form.managerId || ''} onChange={(event) => setForm({ ...form, managerId: event.target.value })} disabled={!form.sector}><option value="">{t('form.noManagerYet')}</option>{managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}</select></Field>}
     </div>
     <button className="primary-btn" type="submit">{form.role === 'manager' ? t('form.addManager') : t('form.addTeamMember')}</button>
@@ -1320,7 +1336,9 @@ function ActivityForm({ form, setForm, projects, selectedProject, sectorOptions,
   const t = useT();
   // A manager only ever reads their own working area, so only the managers who
   // cover the chosen area can be handed the work. The API refuses the rest.
-  const managerOptions = managers.filter((manager) => manager.sector === form.sector);
+  // A manager covering every operation can take work in any of them, so they
+  // belong in every list alongside that operation's own managers.
+  const managerOptions = managers.filter((manager) => manager.coversAllSectors || manager.sector === form.sector);
   const incomplete = !form.projectId || !form.category.trim() || !form.activity.trim()
     || Number(form.quantity) <= 0 || form.costUsd === '' || (isDirector && !form.assignedTo);
 

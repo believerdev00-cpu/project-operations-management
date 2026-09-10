@@ -185,7 +185,7 @@ export default function MonthlyPlans({ user, fetchJson, managers, activities: re
   }, [review]);
 
   const managerOptions = useMemo(
-    () => managers.filter((manager) => manager.sector === newPlan.operation),
+    () => managers.filter((manager) => manager.coversAllSectors || manager.sector === newPlan.operation),
     [managers, newPlan.operation]
   );
 

@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { pool } from '../db/database.js';
 import { deleteFile, readFile, saveFile, storedFileName } from '../lib/storage.js';
 import { authMiddleware } from '../lib/auth.js';
-import { asyncRoute, isAdmin, requiredText, validNumber, sectorIds } from '../lib/http.js';
+import { asyncRoute, hasFullScope, isAdmin, requiredText, validNumber, sectorIds } from '../lib/http.js';
 import { MOVEMENT_STATUSES } from '../db/movementSchema.js';
 import { canApprove, pendingForMeSql, resolveDirector, APPROVER_ROLE_LABELS } from '../lib/approvals.js';
 import { CURRENCIES, convertAmount, getCurrentRate, round2 } from '../lib/rates.js';
@@ -64,7 +64,8 @@ class MovementError extends Error {
 }
 
 function canCreate(user) {
-  return isAdmin(user) || user.sector === 'movement';
+  // An all-operations manager covers Logistics & Facilitation like any other.
+  return hasFullScope(user) || user.sector === 'movement';
 }
 
 // Section 7 keeps approval, funds and final expenditure with the Director.
@@ -223,7 +224,7 @@ const SELECT_MOVEMENT = `
 // module; a manager of another area sees the movements that supported it
 // (section 5), which is the only movement data that concerns them.
 function visibilityScope(user, values) {
-  if (isAdmin(user) || user.sector === 'movement') return '';
+  if (hasFullScope(user) || user.sector === 'movement') return '';
   values.push(user.sector);
   return `m.related_area = $${values.length}`;
 }
@@ -360,7 +361,7 @@ function canEdit(user, row) {
   if (isAdmin(user)) return true;
   // A movement officer may correct their own request only while it is still
   // theirs to change; once it is with its approver it is read-only to them.
-  return user.sector === 'movement'
+  return (hasFullScope(user) || user.sector === 'movement')
     && row.created_by === user.id
     && ['Draft', 'Pending Approval'].includes(row.status);
 }
@@ -1070,7 +1071,7 @@ router.post('/:id/evidence', upload.array('files', 10), asyncRoute(async (req, r
   // Nothing has been written anywhere yet -- the files are still in memory --
   // so a refused upload leaves no bytes behind and needs no cleanup.
   const existing = await loadMovement(req.params.id, req.user);
-  if (!isAdmin(req.user) && !(req.user.sector === 'movement' && existing.created_by === req.user.id)) {
+  if (!isAdmin(req.user) && !((hasFullScope(req.user) || req.user.sector === 'movement') && existing.created_by === req.user.id)) {
     return res.status(403).json({ message: 'You cannot attach evidence to this movement.' });
   }
   if (!req.files?.length) return res.status(400).json({ message: 'Select at least one receipt, invoice or photograph to upload.' });
