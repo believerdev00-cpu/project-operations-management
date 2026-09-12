@@ -75,8 +75,20 @@ export async function saveFile(folder, storedName, buffer, mimeType) {
 export async function readFile(folder, storedName) {
   if (!usingRemoteStorage) {
     const absolute = path.join(diskRoot, folder, path.basename(storedName));
-    if (!fs.existsSync(absolute)) return null;
-    return fs.createReadStream(absolute);
+    // Opened first and only then handed back, so a file deleted between a check
+    // and the open is a 404 here -- a stream erroring with no listener attached
+    // is an uncaught exception that takes the whole API down.
+    try {
+      await fs.promises.access(absolute, fs.constants.R_OK);
+    } catch {
+      return null;
+    }
+    const stream = fs.createReadStream(absolute);
+    stream.on('error', (error) => {
+      console.error('Evidence read failed:', error.message);
+      stream.destroy();
+    });
+    return stream;
   }
   const response = await fetch(objectUrl(folder, storedName), {
     headers: { Authorization: `Bearer ${serviceKey}` }

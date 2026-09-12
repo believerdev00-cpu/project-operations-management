@@ -29,23 +29,35 @@ function partnerMayReach(originalUrl) {
   return PARTNER_ALLOWED_PATHS.some((allowed) => allowed.test(path));
 }
 
+// Evidence files are opened by the browser through a plain URL, which cannot
+// carry an Authorization header, so those two read-only routes -- and only
+// those -- accept the token as a query parameter. Honouring ?token= everywhere
+// turned any copied evidence link, or a URL sitting in a proxy log, into a
+// bearer token for every write route in the API.
+const QUERY_TOKEN_PATH = /^\/api\/(activities|movements)\/[^/]+\/evidence\/[^/]+\/file$/;
+
+function queryTokenAllowed(req) {
+  const path = String(req.originalUrl || '').split('?')[0];
+  return req.method === 'GET' && QUERY_TOKEN_PATH.test(path);
+}
+
 export async function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization || '';
   const headerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-  // Evidence files are opened by the browser through a plain URL, which cannot
-  // carry an Authorization header, so those routes pass the token as a query
-  // parameter instead. Everything else keeps using the header.
-  const token = headerToken || (typeof req.query.token === 'string' ? req.query.token : null);
+  const queryToken = typeof req.query.token === 'string' && queryTokenAllowed(req) ? req.query.token : null;
+  const token = headerToken || queryToken;
 
+  // Every refusal here carries a code as well as a sentence, so the browser can
+  // explain it in the reader's own language rather than show the English.
   if (!token) {
-    return res.status(401).json({ message: 'Authentication required.' });
+    return res.status(401).json({ code: 'AUTH_REQUIRED', message: 'Authentication required.' });
   }
 
   let claims;
   try {
     claims = jwt.verify(token, jwtSecret);
   } catch (error) {
-    return res.status(401).json({ message: 'Token is invalid or expired.' });
+    return res.status(401).json({ code: 'TOKEN_INVALID', message: 'Token is invalid or expired.' });
   }
 
   // The token carries a snapshot up to 12h old. Role and sector decide what the
@@ -57,14 +69,18 @@ export async function authMiddleware(req, res, next) {
       [claims.id]
     );
     if (!result.rowCount) {
-      return res.status(401).json({ message: 'Account no longer exists.' });
+      return res.status(401).json({ code: 'ACCOUNT_GONE', message: 'Account no longer exists.' });
     }
     // Suspend and revoke take effect on the very next request rather than when
     // the token happens to expire, because the status is read from the row here
     // rather than trusted from the twelve-hour-old claims.
     const accountStatus = result.rows[0].status || 'active';
     if (accountStatus !== 'active') {
+      // Coded, so the browser can tell "this account may no longer sign in" --
+      // which ends the session -- from an ordinary 403 on one action.
       return res.status(403).json({
+        code: 'ACCOUNT_INACTIVE',
+        status: accountStatus,
         message: accountStatus === 'suspended'
           ? 'This account is suspended. Contact the administrator.'
           : 'Access to this account has been revoked.'
@@ -78,7 +94,7 @@ export async function authMiddleware(req, res, next) {
     // the reset is refused, and the user simply signs in again.
     const changedAt = result.rows[0].password_changed_at;
     if (changedAt && claims.iat && claims.iat < Math.ceil(new Date(changedAt).getTime() / 1000)) {
-      return res.status(401).json({ message: 'Your password was changed. Sign in again.' });
+      return res.status(401).json({ code: 'PASSWORD_CHANGED', message: 'Your password was changed. Sign in again.' });
     }
     const {
       password_changed_at: _ignored,

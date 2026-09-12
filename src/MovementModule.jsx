@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ApprovalPanel, approverName, canApproveRecord } from './ActivityReview.jsx';
-import { displayLanguage, translate, useT } from './i18n.js';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ApprovalPanel, approverName, canApproveRecord, formatTrailValue, labelForField, trailActionLabel } from './ActivityReview.jsx';
+import { displayLanguage, fill, translate, useT } from './i18n.js';
 import { operationName } from '../shared/businessOperations.js';
+import { DetailView, useBusy, useDialog } from './ui.jsx';
 
 // Logistics & Facilitation module.
 // Implements the "Movement_and_Facilitation_Side_Mockup" document: the
@@ -90,13 +91,13 @@ function formatDate(value) {
   if (!value) return '—';
   const [year, month, day] = String(value).slice(0, 10).split('-').map(Number);
   if (!year || !month || !day) return '—';
-  return new Date(year, month - 1, day).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  return new Date(year, month - 1, day).toLocaleDateString(displayLanguage(), { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
 function formatDateTime(value) {
   if (!value) return '—';
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString(displayLanguage(), { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 function toDateInput(value) {
@@ -143,10 +144,20 @@ function movementToForm(movement) {
   };
 }
 
-export default function MovementModule({ user, token, fetchJson, onMessage, onError }) {
+export default function MovementModule({ user, token, fetchJson, upload, openId = null, onOpen, onClose, onChanged, onMessage, onError }) {
   const t = useT();
+  const dialog = useDialog();
+  const [busy, run] = useBusy();
   const isDirector = user.role === 'super-admin';
-  const canCreate = isDirector || user.sector === 'movement';
+  // An all-operations manager covers Movements & Facilitation like any other.
+  const coversMovements = Boolean(user.coversAllSectors) || user.sector === 'movement';
+  const canCreate = isDirector || coversMovements;
+  // The open movement lives in the address (#/movements/MOV-...), so a link from
+  // the approval queue opens it directly and the back button closes it.
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  const changedRef = useRef(onChanged);
+  changedRef.current = onChanged;
 
   const [summary, setSummary] = useState(null);
   const [movements, setMovements] = useState([]);
@@ -167,40 +178,64 @@ export default function MovementModule({ user, token, fetchJson, onMessage, onEr
     return params.toString();
   }, [appliedFilters]);
 
+  // Numbered so that of two loads crossing in flight -- filters applied twice
+  // quickly -- only the newest reaches the screen.
+  const latestLoad = useRef(0);
+  const latestDetail = useRef(0);
+
   const load = useCallback(async () => {
-    setLoading(true);
+    const request = ++latestLoad.current;
     try {
       const [summaryResult, listResult, rateResult] = await Promise.all([
         fetchJson('/api/movements/summary'),
         fetchJson(`/api/movements${query ? `?${query}` : ''}`),
         fetchJson('/api/rates')
       ]);
+      if (request !== latestLoad.current) return;
       setSummary(summaryResult);
       setMovements(listResult);
       setRate(rateResult);
     } catch (loadError) {
-      onError(loadError.message);
+      if (request === latestLoad.current) onError(loadError.message);
     } finally {
-      setLoading(false);
+      if (request === latestLoad.current) setLoading(false);
     }
   }, [fetchJson, onError, query]);
 
   useEffect(() => { load(); }, [load]);
 
-  const openDetail = async (movementId) => {
+  const fetchDetail = useCallback(async (movementId) => {
+    const request = ++latestDetail.current;
     try {
-      setDetail(await fetchJson(`/api/movements/${movementId}`));
+      const result = await fetchJson(`/api/movements/${encodeURIComponent(movementId)}`);
+      if (request === latestDetail.current) setDetail(result);
     } catch (detailError) {
+      if (request !== latestDetail.current) return;
       onError(detailError.message);
+      closeRef.current?.();
     }
-  };
+  }, [fetchJson, onError]);
 
+  useEffect(() => {
+    if (!openId) {
+      latestDetail.current += 1;
+      setDetail(null);
+      return;
+    }
+    fetchDetail(openId);
+  }, [openId, fetchDetail]);
+
+  const openDetail = (movementId) => onOpen?.(movementId);
+
+  // After any change: the register, the open record if it is still the one
+  // being read, and the application's own badge and queue.
   const refreshDetail = async (movementId) => {
     await load();
-    if (movementId) await openDetail(movementId);
+    if (movementId && movementId === openId) await fetchDetail(movementId);
+    changedRef.current?.();
   };
 
-  const saveMovement = async (values, rateOverride, submitForReview) => {
+  const saveMovement = (values, rateOverride, submitForReview) => run(async () => {
     const body = {
       ...values,
       relatedArea: values.relatedArea || null,
@@ -209,8 +244,8 @@ export default function MovementModule({ user, token, fetchJson, onMessage, onEr
     };
     try {
       if (formState?.mode === 'edit') {
-        await fetchJson(`/api/movements/${formState.movement.id}`, { method: 'PUT', body: JSON.stringify(body) });
-        onMessage(`Movement ${formState.movement.ref} updated.`);
+        await fetchJson(`/api/movements/${encodeURIComponent(formState.movement.id)}`, { method: 'PUT', body: JSON.stringify(body) });
+        onMessage(fill(t('msg.movementUpdated'), { ref: formState.movement.ref }));
         setFormState(null);
         await refreshDetail(formState.movement.id);
       } else {
@@ -218,87 +253,119 @@ export default function MovementModule({ user, token, fetchJson, onMessage, onEr
           method: 'POST',
           body: JSON.stringify({ ...body, status: submitForReview ? 'Pending Approval' : 'Draft' })
         });
-        onMessage(`Movement ${created.ref} created.`);
+        onMessage(fill(t('msg.movementCreated'), { ref: created.ref }));
         setFormState(null);
-        await refreshDetail(created.id);
+        await load();
+        changedRef.current?.();
+        openDetail(created.id);
       }
     } catch (saveError) {
       onError(saveError.message);
     }
-  };
+  });
 
-  const changeStatus = async (movement, status, extra = {}) => {
+  const changeStatus = (movement, status, extra = {}) => run(async () => {
+    // Refusing or cancelling a movement stops the work, so it is confirmed.
+    if (['Rejected', 'Cancelled'].includes(status)) {
+      const confirmed = await dialog.confirm({
+        title: `${t('action.markAs')} ${t(`status.${status}`)}`,
+        message: `${movement.ref} — ${movement.purpose}`,
+        confirmLabel: `${t('action.markAs')} ${t(`status.${status}`)}`,
+        danger: true
+      });
+      if (!confirmed) return;
+    }
     try {
-      await fetchJson(`/api/movements/${movement.id}/status`, { method: 'PATCH', body: JSON.stringify({ status, ...extra }) });
-      onMessage(`${movement.ref} is now ${status}.`);
+      await fetchJson(`/api/movements/${encodeURIComponent(movement.id)}/status`, { method: 'PATCH', body: JSON.stringify({ status, ...extra }) });
+      onMessage(fill(t('msg.movementStatus'), { ref: movement.ref, status: t(`status.${status}`) }));
       await refreshDetail(movement.id);
     } catch (statusError) {
       onError(statusError.message);
     }
-  };
+  });
 
   // The decision the record is waiting on. Separate from the status buttons: it
   // goes to the route that checks the caller is the named approver.
-  const decideApproval = async (movement, body) => {
+  const decideApproval = (movement, body) => run(async () => {
     try {
-      await fetchJson(`/api/movements/${movement.id}/approval`, { method: 'PATCH', body: JSON.stringify(body) });
-      onMessage(body.action === 'approve' ? `${movement.ref} approved.` : `${movement.ref} rejected.`);
+      await fetchJson(`/api/movements/${encodeURIComponent(movement.id)}/approval`, { method: 'PATCH', body: JSON.stringify(body) });
+      onMessage(fill(body.action === 'approve' ? t('msg.movementApproved') : t('msg.movementRejected'), { ref: movement.ref }));
       await refreshDetail(movement.id);
     } catch (approvalError) {
       onError(approvalError.message);
     }
-  };
+  });
 
-  const updateFinance = async (movement, body) => {
+  const updateFinance = (movement, body) => run(async () => {
     try {
-      await fetchJson(`/api/movements/${movement.id}/finance`, { method: 'PATCH', body: JSON.stringify(body) });
-      onMessage('Facilitation figures updated.');
+      await fetchJson(`/api/movements/${encodeURIComponent(movement.id)}/finance`, { method: 'PATCH', body: JSON.stringify(body) });
+      onMessage(t('msg.figuresUpdated'));
       await refreshDetail(movement.id);
     } catch (financeError) {
       onError(financeError.message);
     }
-  };
+  });
 
-  const removeMovement = async (movement) => {
-    if (!window.confirm(`Delete movement ${movement.ref}? Its evidence and history are deleted with it.`)) return;
+  const setVisibility = (movement, externallyVisible) => run(async () => {
     try {
-      await fetchJson(`/api/movements/${movement.id}`, { method: 'DELETE' });
-      onMessage(`Movement ${movement.ref} deleted.`);
-      setDetail(null);
+      await fetchJson(`/api/movements/${encodeURIComponent(movement.id)}/visibility`, { method: 'PATCH', body: JSON.stringify({ externallyVisible }) });
+      onMessage(externallyVisible ? t('msg.movementVisible') : t('msg.movementHidden'));
+      await refreshDetail(movement.id);
+    } catch (visibilityError) {
+      onError(visibilityError.message);
+    }
+  });
+
+  const removeMovement = (movement) => run(async () => {
+    const confirmed = await dialog.confirm({
+      title: t('msg.deleteTitle'),
+      message: fill(t('msg.deleteMovementBody'), { ref: movement.ref }),
+      confirmLabel: t('action.deleteMovement'),
+      danger: true
+    });
+    if (!confirmed) return;
+    try {
+      await fetchJson(`/api/movements/${encodeURIComponent(movement.id)}`, { method: 'DELETE' });
+      onMessage(fill(t('msg.movementDeleted'), { ref: movement.ref }));
+      onClose?.();
       await load();
+      changedRef.current?.();
     } catch (deleteError) {
       onError(deleteError.message);
     }
-  };
+  });
 
-  const uploadEvidence = async (movement, formData) => {
+  // Resolves true once stored, so the upload form keeps the files on a failure.
+  const uploadEvidence = (movement, formData) => run(async () => {
     try {
-      const response = await fetch(`/api/movements/${movement.id}/evidence`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.message || 'The evidence could not be uploaded.');
-      onMessage(`${payload.length} evidence file${payload.length === 1 ? '' : 's'} attached to ${movement.ref}.`);
+      const saved = await upload(`/api/movements/${encodeURIComponent(movement.id)}/evidence`, formData);
+      onMessage(fill(t('msg.filesAttached'), { count: saved.length }));
       await refreshDetail(movement.id);
+      return true;
     } catch (uploadError) {
       onError(uploadError.message);
+      return false;
     }
-  };
+  });
 
-  const removeEvidence = async (movement, evidence) => {
-    if (!window.confirm(`Remove "${evidence.originalName}" from ${movement.ref}?`)) return;
+  const removeEvidence = (movement, evidence) => run(async () => {
+    const confirmed = await dialog.confirm({
+      title: t('msg.removeEvidenceTitle'),
+      message: fill(t('msg.removeEvidenceBody'), { name: evidence.originalName }),
+      confirmLabel: t('action.remove'),
+      danger: true
+    });
+    if (!confirmed) return;
     try {
-      await fetchJson(`/api/movements/${movement.id}/evidence/${evidence.id}`, { method: 'DELETE' });
-      onMessage('Evidence removed.');
+      await fetchJson(`/api/movements/${encodeURIComponent(movement.id)}/evidence/${evidence.id}`, { method: 'DELETE' });
+      onMessage(t('msg.evidenceRemoved'));
       await refreshDetail(movement.id);
     } catch (evidenceError) {
       onError(evidenceError.message);
     }
-  };
+  });
 
-  const runReports = async () => {
+  const runReports = () => run(async () => {
     try {
       const params = new URLSearchParams();
       if (appliedFilters.dateFrom) params.set('dateFrom', appliedFilters.dateFrom);
@@ -307,27 +374,29 @@ export default function MovementModule({ user, token, fetchJson, onMessage, onEr
     } catch (reportError) {
       onError(reportError.message);
     }
-  };
+  });
 
-  const saveRate = async (values) => {
+  const saveRate = (values) => run(async () => {
     try {
       const saved = await fetchJson('/api/rates', { method: 'PUT', body: JSON.stringify(values) });
       setRate(saved);
-      onMessage('Reference exchange rate updated. Existing records keep the rate they were saved with.');
+      onMessage(t('msg.rateUpdated'));
       await load();
+      changedRef.current?.();
     } catch (rateError) {
       onError(rateError.message);
     }
-  };
+  });
 
   const counts = summary?.counts || {};
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const filtersActive = JSON.stringify(appliedFilters) !== JSON.stringify(emptyFilters);
 
   return <div className="movement-module">
     <section className="context-strip">
       <div>
         <span className="eyebrow">{t('movement.eyebrow')}</span>
-        <h2>{isDirector ? t('role.super-admin') : user.sector === 'movement' ? t('movement.movementOfficer') : `${areaLabel(user.sector)} — ${t('movement.linkedMovements')}`}</h2>
+        <h2>{isDirector ? t('role.super-admin') : coversMovements ? t('movement.movementOfficer') : `${areaLabel(user.sector)} — ${t('movement.linkedMovements')}`}</h2>
         <p>{t('movement.blurb')}</p>
       </div>
       {canCreate && <button className="primary-btn" type="button" onClick={() => setFormState({ mode: 'create', values: emptyForm })}>
@@ -358,23 +427,33 @@ export default function MovementModule({ user, token, fetchJson, onMessage, onEr
       </div>
     </section>}
 
-    {isDirector && showRates && <RatePanel rate={rate} fetchJson={fetchJson} onSave={saveRate} onError={onError} />}
+    {isDirector && showRates && <RatePanel rate={rate} fetchJson={fetchJson} busy={busy} onSave={saveRate} onError={onError} />}
 
-    {formState && <MovementForm
-      key={formState.mode === 'edit' ? formState.movement.id : 'create'}
-      mode={formState.mode}
-      movement={formState.movement}
-      initialValues={formState.values}
-      rate={rate}
-      isDirector={isDirector}
-      onCancel={() => setFormState(null)}
-      onSave={saveMovement}
-    />}
+    {/* The form opens where the reader is looking: a sheet on a phone, and
+        scrolled into view on a wide screen, instead of far above the button. */}
+    {formState && <DetailView
+      onClose={() => setFormState(null)}
+      label={formState.mode === 'edit' ? `${t('movement.editMovementTitle')} ${formState.movement.ref}` : t('movement.newMovement')}
+    >
+      <MovementForm
+        key={formState.mode === 'edit' ? formState.movement.id : 'create'}
+        mode={formState.mode}
+        movement={formState.movement}
+        initialValues={formState.values}
+        rate={rate}
+        isDirector={isDirector}
+        busy={busy}
+        onCancel={() => setFormState(null)}
+        onSave={saveMovement}
+      />
+    </DetailView>}
 
     <MovementFilters
       filters={filters}
       setFilters={setFilters}
-      onApply={() => setAppliedFilters(filters)}
+      open={filtersOpen}
+      onToggle={() => setFiltersOpen((current) => !current)}
+      onApply={() => { setAppliedFilters(filters); setFiltersOpen(false); }}
       onClear={() => { setFilters(emptyFilters); setAppliedFilters(emptyFilters); }}
       active={filtersActive}
     />
@@ -385,30 +464,34 @@ export default function MovementModule({ user, token, fetchJson, onMessage, onEr
           <h2>{t('panel.movementRegister')}</h2>
           <span>{movements.length}</span>
         </div>
-        <button className="text-btn" type="button" onClick={load}>{t('action.refresh')}</button>
+        <button className="text-btn" type="button" onClick={() => { load(); changedRef.current?.(); }}>{t('action.refresh')}</button>
       </div>
       {loading
         ? <div className="loading-state"><span className="spinner" />{t('app.loading')}</div>
         : <MovementTable movements={movements} selectedId={detail?.movement.id} onSelect={openDetail} />}
     </section>
 
-    {detail && <MovementDetail
-      key={detail.movement.id}
-      detail={detail}
-      user={user}
-      token={token}
-      isDirector={isDirector}
-      onClose={() => setDetail(null)}
-      onEdit={(movement) => setFormState({ mode: 'edit', movement, values: movementToForm(movement) })}
-      onStatus={changeStatus}
-      onApprove={decideApproval}
-      onFinance={updateFinance}
-      onUpload={uploadEvidence}
-      onRemoveEvidence={removeEvidence}
-      onDelete={removeMovement}
-    />}
+    {detail && openId && detail.movement.id === openId && !formState && <DetailView onClose={() => onClose?.()} label={`${detail.movement.ref} — ${detail.movement.purpose}`}>
+      <MovementDetail
+        key={detail.movement.id}
+        detail={detail}
+        user={user}
+        token={token}
+        isDirector={isDirector}
+        busy={busy}
+        onClose={() => onClose?.()}
+        onEdit={(movement) => setFormState({ mode: 'edit', movement, values: movementToForm(movement) })}
+        onStatus={changeStatus}
+        onApprove={decideApproval}
+        onFinance={updateFinance}
+        onVisibility={setVisibility}
+        onUpload={uploadEvidence}
+        onRemoveEvidence={removeEvidence}
+        onDelete={removeMovement}
+      />
+    </DetailView>}
 
-    <MovementReports reports={reports} onRun={runReports} onClose={() => setReports(null)} />
+    <MovementReports reports={reports} busy={busy} onRun={runReports} onClose={() => setReports(null)} />
   </div>;
 }
 
@@ -424,13 +507,19 @@ function TotalBlock({ label, totals }) {
   </div>;
 }
 
-function MovementFilters({ filters, setFilters, onApply, onClear, active }) {
+// On a phone the nine filters fold away behind one button, so the register is
+// not pushed a whole screen down. On a wide screen they are always shown.
+function MovementFilters({ filters, setFilters, open, onToggle, onApply, onClear, active }) {
   const t = useT();
   const set = (patch) => setFilters({ ...filters, ...patch });
-  return <form className="filter-panel" onSubmit={(event) => { event.preventDefault(); onApply(); }}>
+  return <form className={`filter-panel${open ? ' filters-open' : ''}`} onSubmit={(event) => { event.preventDefault(); onApply(); }}>
     <div className="panel-header">
       <div><h2>{t('panel.filterMovements')}</h2><span>{t('filter.blurb')}</span></div>
+      <button className="secondary-btn compact filter-toggle" type="button" aria-expanded={open} aria-controls="movement-filter-body" onClick={onToggle}>
+        {open ? t('action.hideFilters') : t('action.showFilters')}{active ? ' •' : ''}
+      </button>
     </div>
+    <div className="filter-body" id="movement-filter-body">
     <div className="filter-grid">
       <label className="form-field"><span>{t('field.search')}</span><input placeholder={t('movement.searchPlaceholder')} value={filters.search} onChange={(event) => set({ search: event.target.value })} /></label>
       <label className="form-field"><span>{t('table.status')}</span><select value={filters.status} onChange={(event) => set({ status: event.target.value })}><option value="All">{t('form.allStatuses')}</option>{MOVEMENT_STATUSES.map((status) => <option key={status} value={status}>{t(`status.${status}`)}</option>)}</select></label>
@@ -446,6 +535,7 @@ function MovementFilters({ filters, setFilters, onApply, onClear, active }) {
       <button className="primary-btn" type="submit">{t('action.applyFilters')}</button>
       {active && <button className="secondary-btn" type="button" onClick={onClear}>{t('action.clear')}</button>}
     </div>
+    </div>
   </form>;
 }
 
@@ -454,36 +544,41 @@ function MovementTable({ movements, selectedId, onSelect }) {
   if (!movements.length) {
     return <div className="empty-state"><strong>{t('empty.noMovements')}</strong><span>{t('empty.noMovementsHint')}</span></div>;
   }
-  return <div className="table-wrap"><table>
+  return <div className="table-wrap"><table className="card-table">
     <thead><tr>
-      <th>{t('movement.reference')}</th><th>{t('field.type')}</th><th>{t('table.purpose')}</th><th>{t('movement.relatedArea')}</th><th>{t('movement.route')}</th>
+      <th>{t('movement.reference')}</th><th>{t('field.type')}</th><th>{t('movement.relatedArea')}</th><th>{t('movement.route')}</th>
       <th>{t('movement.departure')}</th><th>{t('movement.personTeam')}</th><th>{t('table.status')}</th>
       <th>{t('movement.estimated')}</th><th>{t('movement.released')}</th><th>{t('movement.actual')}</th><th>{t('movement.balance')}</th><th>{t('field.evidence')}</th>
     </tr></thead>
     <tbody>{movements.map((movement) => <tr
       key={movement.id}
-      className={movement.id === selectedId ? 'row-selected' : undefined}
+      className={movement.id === selectedId ? 'row-selected clickable-row' : 'clickable-row'}
+      tabIndex={0}
+      aria-label={`${movement.ref} — ${movement.purpose}`}
       onClick={() => onSelect(movement.id)}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(movement.id); }
+      }}
     >
-      <td><strong>{movement.ref}</strong><small>{formatDateTime(movement.createdAt)}</small></td>
-      <td>{movement.movementType}</td>
-      <td>{movement.purpose}</td>
-      <td>{movement.relatedArea ? <span className="area-badge">{areaLabel(movement.relatedArea)}</span> : <small>Not linked</small>}</td>
-      <td>{movement.origin || '—'} &rarr; {movement.destination}</td>
-      <td>{formatDate(movement.departureDate)}<small>Return {formatDate(movement.returnDate)}</small></td>
-      <td>{movement.personTeam || '—'}</td>
-      <td><span className={`status-badge ${statusTone(movement.status)}`}>{movement.status}</span></td>
-      <td>{formatMoney(movement.estimatedTotal, movement.currency)}</td>
-      <td>{formatMoney(movement.fundsReleased, movement.currency)}</td>
-      <td>{formatMoney(movement.actualExpense, movement.currency)}</td>
-      <td>{formatMoney(movement.balanceReturn, movement.currency)}</td>
-      <td><span className={`status-badge ${movement.evidenceStatus === 'Complete' ? 'tone-done' : 'tone-waiting'}`}>{movement.evidenceStatus}</span><small>{movement.evidenceCount ?? 0} file{(movement.evidenceCount ?? 0) === 1 ? '' : 's'}</small></td>
+      <td className="card-title-cell"><strong>{movement.ref} — {movement.purpose}</strong><small>{formatDateTime(movement.createdAt)}</small></td>
+      <td data-label={t('field.type')}>{t(`mtype.${movement.movementType}`)}</td>
+      <td data-label={t('movement.relatedArea')}>{movement.relatedArea ? <span className="area-badge">{areaLabel(movement.relatedArea)}</span> : <small>{t('filter.notLinked')}</small>}</td>
+      <td data-label={t('movement.route')}>{movement.origin || '—'} &rarr; {movement.destination}</td>
+      <td data-label={t('movement.departure')}>{formatDate(movement.departureDate)}<small>{t('movement.return')} {formatDate(movement.returnDate)}</small></td>
+      <td data-label={t('movement.personTeam')}>{movement.personTeam || '—'}</td>
+      <td data-label={t('table.status')}><span className={`status-badge ${statusTone(movement.status)}`}>{t(`status.${movement.status}`)}</span></td>
+      <td data-label={t('movement.estimated')}>{formatMoney(movement.estimatedTotal, movement.currency)}</td>
+      <td data-label={t('movement.released')}>{formatMoney(movement.fundsReleased, movement.currency)}</td>
+      <td data-label={t('movement.actual')}>{formatMoney(movement.actualExpense, movement.currency)}</td>
+      <td data-label={t('movement.balance')}>{formatMoney(movement.balanceReturn, movement.currency)}</td>
+      <td data-label={t('field.evidence')}><span className={`status-badge ${movement.evidenceStatus === 'Complete' ? 'tone-done' : 'tone-waiting'}`}>{t(`estatus.${movement.evidenceStatus}`)}</span><small>{fill(t('movement.fileCount'), { count: movement.evidenceCount ?? 0 })}</small></td>
     </tr>)}</tbody>
   </table></div>;
 }
 
 // Section 3 (request details) and section 4 (facilitation cost breakdown).
-function MovementForm({ mode, movement, initialValues, rate, isDirector, onCancel, onSave }) {
+function MovementForm({ mode, movement, initialValues, rate, isDirector, busy = false, onCancel, onSave }) {
   const t = useT();
   const [values, setValues] = useState(initialValues);
   const [useActualRate, setUseActualRate] = useState(false);
@@ -514,6 +609,10 @@ function MovementForm({ mode, movement, initialValues, rate, isDirector, onCance
 
   const submit = (event, submitForReview) => {
     event.preventDefault();
+    // "Save draft" is a plain button, so the browser's own required-field check
+    // never ran for it and an empty draft went to the server. Asked for here.
+    const form = event.currentTarget.form || event.currentTarget;
+    if (typeof form.reportValidity === 'function' && !form.reportValidity()) return;
     onSave(values, useActualRate ? { rwfPerUsd: Number(actualRate.rwfPerUsd), cdfPerUsd: Number(actualRate.cdfPerUsd) } : null, submitForReview);
   };
 
@@ -523,7 +622,7 @@ function MovementForm({ mode, movement, initialValues, rate, isDirector, onCance
         <h2>{mode === 'edit' ? `${t('movement.editMovementTitle')} ${movement.ref}` : t('movement.newMovement')}</h2>
         <span>{t('movement.formBlurb')}</span>
       </div>
-      <button className="text-btn" type="button" onClick={onCancel}>{t('action.cancel')}</button>
+      <button className="text-btn hide-on-sheet" type="button" onClick={onCancel}>{t('action.cancel')}</button>
     </div>
 
     <h3 className="form-section-title">{t('review.requestDetails')}</h3>
@@ -583,7 +682,7 @@ function MovementForm({ mode, movement, initialValues, rate, isDirector, onCance
     <div className="cost-grid">
       {COST_LINES.map(([key, labelKey]) => <label className="form-field" key={key}>
         <span>{t(labelKey)}</span>
-        <input type="number" min="0" step="0.01" placeholder="0" value={values.costs[key]} onChange={(event) => setCost(key, event.target.value)} />
+        <input type="number" inputMode="decimal" min="0" step="0.01" placeholder="0" value={values.costs[key]} onChange={(event) => setCost(key, event.target.value)} />
       </label>)}
       <div className="cost-total">
         <span>{t('field.total')}</span>
@@ -614,15 +713,16 @@ function MovementForm({ mode, movement, initialValues, rate, isDirector, onCance
       </div>}
     </div>}
 
-    <div className="button-row">
-      <button className="primary-btn" type="submit">{mode === 'edit' ? t('movement.saveChanges') : t('movement.createAndSubmit')}</button>
-      {mode === 'create' && <button className="secondary-btn" type="button" onClick={(event) => submit(event, false)}>{t('action.saveDraft')}</button>}
+    <div className="form-submit-bar">
+      <button className="secondary-btn" type="button" onClick={onCancel}>{t('action.cancel')}</button>
+      {mode === 'create' && <button className="secondary-btn" type="button" disabled={busy} onClick={(event) => submit(event, false)}>{t('action.saveDraft')}</button>}
+      <button className="primary-btn" type="submit" disabled={busy}>{mode === 'edit' ? t('movement.saveChanges') : t('movement.createAndSubmit')}</button>
     </div>
   </form>;
 }
 
 // Sections 6, 7 and 8: workflow actions, accountability figures, evidence, history.
-function MovementDetail({ detail, user, token, isDirector, onClose, onEdit, onStatus, onApprove, onFinance, onUpload, onRemoveEvidence, onDelete }) {
+function MovementDetail({ detail, user, token, isDirector, busy = false, onClose, onEdit, onStatus, onApprove, onFinance, onVisibility, onUpload, onRemoveEvidence, onDelete }) {
   const t = useT();
   const { movement, evidence, history } = detail;
   const [finance, setFinance] = useState({
@@ -637,8 +737,25 @@ function MovementDetail({ detail, user, token, isDirector, onClose, onEdit, onSt
     rejectionReason: ''
   });
 
-  const canEdit = isDirector || (user.sector === 'movement' && movement.createdBy === user.id && ['Draft', 'Pending Approval'].includes(movement.status));
-  const canAttach = isDirector || (user.sector === 'movement' && movement.createdBy === user.id);
+  // The detail stays mounted while the record is saved and re-read, so the
+  // inputs are re-seeded whenever the server's copy changes. Seeded once, they
+  // kept the figures from before "Mark as Funds Released", and the next "Record
+  // figures" wrote that stale 0 over the released amount -- and put an evidence
+  // status the upload had already moved on back to Pending. The reason typed
+  // for one status change is cleared too, so it is not sent with the next.
+  useEffect(() => {
+    setFinance({
+      fundsReleased: String(movement.fundsReleased),
+      actualExpense: String(movement.actualExpense),
+      evidenceStatus: movement.evidenceStatus
+    });
+    setApproval({ approvedBudget: String(movement.estimatedTotal), adminNote: '', rejectionReason: '' });
+    setReason('');
+  }, [movement.updatedAt, movement.fundsReleased, movement.actualExpense, movement.evidenceStatus, movement.estimatedTotal]);
+
+  const coversMovements = Boolean(user.coversAllSectors) || user.sector === 'movement';
+  const canEdit = isDirector || (coversMovements && movement.createdBy === user.id && ['Draft', 'Pending Approval'].includes(movement.status));
+  const canAttach = isDirector || (coversMovements && movement.createdBy === user.id);
   // Whether this user is the person the record is waiting on. The API checks
   // the same thing again before it writes anything.
   const iAmApprover = canApproveRecord(user, movement);
@@ -657,11 +774,11 @@ function MovementDetail({ detail, user, token, isDirector, onClose, onEdit, onSt
       <div>
         <h2>{movement.ref} — {movement.purpose}</h2>
         <span>
-          {movement.movementType} · {movement.origin || '—'} &rarr; {movement.destination} · {areaLabel(movement.relatedArea)} ·
-          {' '}created by {movement.createdByName || 'Unknown'} on {formatDateTime(movement.createdAt)}
+          {t(`mtype.${movement.movementType}`)} · {movement.origin || '—'} &rarr; {movement.destination} · {areaLabel(movement.relatedArea)} ·
+          {' '}{fill(t('movement.createdByOn'), { name: movement.createdByName || '—', date: formatDateTime(movement.createdAt) })}
         </span>
       </div>
-      <button className="text-btn" type="button" onClick={onClose}>{t('action.close')}</button>
+      <button className="text-btn hide-on-sheet" type="button" onClick={onClose}>{t('action.close')}</button>
     </div>
 
     <ApprovalPanel record={movement} sectorLabel={areaLabel} />
@@ -711,9 +828,9 @@ function MovementDetail({ detail, user, token, isDirector, onClose, onEdit, onSt
         {formatMoney(movement.estimatedTotal, movement.currency)} &rarr; {formatMoney(typedBudget, movement.currency)}
       </p>}
       <div className="button-row">
-        <button className="primary-btn" type="submit">{t('approval.approve')}</button>
+        <button className="primary-btn" type="submit" disabled={busy}>{t('approval.approve')}</button>
         <button className="danger-btn outlined" type="button"
-          disabled={!approval.rejectionReason.trim()}
+          disabled={busy || !approval.rejectionReason.trim()}
           onClick={() => onApprove(movement, { action: 'reject', rejectionReason: approval.rejectionReason.trim() })}>
           {t('approval.reject')}
         </button>
@@ -743,7 +860,7 @@ function MovementDetail({ detail, user, token, isDirector, onClose, onEdit, onSt
       <Fact label={t('movement.fundsReleased')} value={formatMoney(movement.fundsReleased, movement.currency)} />
       <Fact label={t('movement.actualExpense')} value={formatMoney(movement.actualExpense, movement.currency)} />
       <Fact label={t('movement.balanceReturn')} value={formatMoney(movement.balanceReturn, movement.currency)} />
-      <Fact label={t('movement.evidenceStatus')} value={<span className={`status-badge ${movement.evidenceStatus === 'Complete' ? 'tone-done' : 'tone-waiting'}`}>{movement.evidenceStatus}</span>} />
+      <Fact label={t('movement.evidenceStatus')} value={<span className={`status-badge ${movement.evidenceStatus === 'Complete' ? 'tone-done' : 'tone-waiting'}`}>{t(`estatus.${movement.evidenceStatus}`)}</span>} />
     </div>
 
     {isDirector && <form className="inline-form" onSubmit={(event) => {
@@ -765,15 +882,32 @@ function MovementDetail({ detail, user, token, isDirector, onClose, onEdit, onSt
           {EVIDENCE_STATUSES.map((status) => <option key={status} value={status}>{t(`estatus.${status}`)}</option>)}
         </select>
       </label>
-      <button className="secondary-btn" type="submit">{t('action.recordFigures')}</button>
+      <button className="secondary-btn" type="submit" disabled={busy}>{t('action.recordFigures')}</button>
     </form>}
 
-    {canAttach && <EvidenceUpload movement={movement} onUpload={onUpload} />}
+    {/* The Director's switch for what an external partner may see, as on an
+        activity. It publishes nothing that has not been approved. */}
+    {isDirector && onVisibility && <div className="visibility-control">
+      <div>
+        <span className="eyebrow">{t('review.externalVisibility')}</span>
+        <strong className={movement.externallyVisible ? 'tone-done' : 'tone-stopped'}>
+          {movement.externallyVisible ? t('visibility.visible') : t('visibility.hidden')}
+        </strong>
+        <small>{movement.approvalStatus === 'approved' ? t('visibility.note') : t('visibility.notApprovedYet')}</small>
+      </div>
+      <button className={movement.externallyVisible ? 'danger-btn outlined' : 'secondary-btn'} type="button" disabled={busy}
+        onClick={() => onVisibility(movement, !movement.externallyVisible)}>
+        {movement.externallyVisible ? t('visibility.hide') : t('visibility.show')}
+      </button>
+    </div>}
+
+    {canAttach && <EvidenceUpload movement={movement} busy={busy} onUpload={onUpload} />}
     <EvidenceList
       movement={movement}
       evidence={evidence}
       token={token}
       canRemove={isDirector}
+      busy={busy}
       onRemove={(item) => onRemoveEvidence(movement, item)}
     />
 
@@ -785,29 +919,30 @@ function MovementDetail({ detail, user, token, isDirector, onClose, onEdit, onSt
             key={status}
             className={['Rejected', 'Cancelled'].includes(status) ? 'danger-btn outlined' : 'secondary-btn'}
             type="button"
+            disabled={busy}
             onClick={() => onStatus(movement, status, {
               reason: reason || undefined,
               ...(status === 'Funds Released' ? { fundsReleased: Number(finance.fundsReleased) || Number(movement.estimatedTotal) } : {}),
               ...(status === 'Completed' ? { actualExpense: Number(finance.actualExpense) || 0 } : {})
             })}
           >{status === 'Pending Approval' && movement.status === 'Draft' ? t('action.submitForApproval') : `${t('action.markAs')} ${t(`status.${status}`)}`}</button>)}
-          {isDirector && <input className="reason-input" placeholder={`${t('field.reason')} (${t('field.optional')})`} value={reason} onChange={(event) => setReason(event.target.value)} />}
+          {isDirector && <input className="reason-input" aria-label={`${t('field.reason')} (${t('field.optional')})`} placeholder={`${t('field.reason')} (${t('field.optional')})`} value={reason} onChange={(event) => setReason(event.target.value)} />}
         </div>
       : <p className="detail-notes">{t('movement.noFurtherStatus')}</p>}
 
     <div className="button-row">
-      {canEdit && <button className="secondary-btn" type="button" onClick={() => onEdit(movement)}>{t('action.editMovement')}</button>}
-      {isDirector && <button className="danger-btn outlined" type="button" onClick={() => onDelete(movement)}>{t('action.deleteMovement')}</button>}
+      {canEdit && <button className="secondary-btn" type="button" disabled={busy} onClick={() => onEdit(movement)}>{t('action.editMovement')}</button>}
+      {isDirector && <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onDelete(movement)}>{t('action.deleteMovement')}</button>}
     </div>
 
     <h3 className="form-section-title">{t('movement.historyTitle')}</h3>
     {history.length
       ? <ul className="history-list">{history.map((entry) => <li key={entry.id}>
-          <strong>{entry.action}</strong>
+          <strong>{trailActionLabel(entry.action, t)}</strong>
           <span>
-            {entry.field ? `${entry.field}: ` : ''}
-            {entry.oldValue !== null && entry.oldValue !== undefined && entry.oldValue !== '' ? `${entry.oldValue} → ` : ''}
-            {entry.newValue ?? '—'}
+            {entry.field ? `${labelForField(entry.field, t)}: ` : ''}
+            {entry.oldValue !== null && entry.oldValue !== undefined && entry.oldValue !== '' ? `${formatTrailValue(entry.field, entry.oldValue, null, t)} → ` : ''}
+            {formatTrailValue(entry.field, entry.newValue, null, t)}
           </span>
           <small>{entry.actorName} · {formatDateTime(entry.createdAt)}</small>
         </li>)}</ul>
@@ -819,7 +954,7 @@ function Fact({ label, value }) {
   return <div className="fact"><span>{label}</span><strong>{value}</strong></div>;
 }
 
-function EvidenceUpload({ movement, onUpload }) {
+function EvidenceUpload({ movement, busy = false, onUpload }) {
   const t = useT();
   const [kind, setKind] = useState('Receipt');
   const [amount, setAmount] = useState('');
@@ -835,8 +970,11 @@ function EvidenceUpload({ movement, onUpload }) {
     formData.append('amount', amount || '0');
     formData.append('note', note);
     Array.from(files).forEach((file) => formData.append('files', file));
-    onUpload(movement, formData);
-    setAmount(''); setNote(''); setFiles(null); setInputKey((current) => current + 1);
+    // Cleared only once stored, so a failed upload keeps the chosen files.
+    Promise.resolve(onUpload(movement, formData)).then((stored) => {
+      if (stored === false) return;
+      setAmount(''); setNote(''); setFiles(null); setInputKey((current) => current + 1);
+    });
   };
 
   return <form className="inline-form" onSubmit={submit}>
@@ -844,7 +982,7 @@ function EvidenceUpload({ movement, onUpload }) {
       <select value={kind} onChange={(event) => setKind(event.target.value)}>{EVIDENCE_KINDS.map((option) => <option key={option} value={option}>{t(`ekind.${option}`)}</option>)}</select>
     </label>
     <label className="form-field"><span>{t('field.amount')} ({movement.currency})</span>
-      <input type="number" min="0" step="0.01" placeholder="0" value={amount} onChange={(event) => setAmount(event.target.value)} />
+      <input type="number" inputMode="decimal" min="0" step="0.01" placeholder="0" value={amount} onChange={(event) => setAmount(event.target.value)} />
     </label>
     <label className="form-field"><span>{t('field.note')}</span>
       <input placeholder={t('evidence.fuelNotePlaceholder')} value={note} onChange={(event) => setNote(event.target.value)} />
@@ -852,45 +990,45 @@ function EvidenceUpload({ movement, onUpload }) {
     <label className="form-field"><span>{t('field.files')}</span>
       <input key={inputKey} type="file" multiple accept="image/*,application/pdf" onChange={(event) => setFiles(event.target.files)} />
     </label>
-    <button className="secondary-btn" type="submit" disabled={!files?.length}>{t('action.uploadEvidence')}</button>
+    <button className="secondary-btn" type="submit" disabled={busy || !files?.length}>{t('action.uploadEvidence')}</button>
   </form>;
 }
 
-function EvidenceList({ movement, evidence, token, canRemove, onRemove }) {
+function EvidenceList({ movement, evidence, token, canRemove, busy = false, onRemove }) {
   const t = useT();
   if (!evidence.length) {
     return <div className="empty-state"><strong>{t('empty.noEvidence')}</strong><span>{t('empty.noEvidenceHint')}</span></div>;
   }
-  return <div className="table-wrap"><table>
-    <thead><tr><th>{t('field.type')}</th><th>{t('field.file')}</th><th>{t('field.amount')}</th><th>{t('field.note')}</th><th>{t('field.uploadedBy')}</th><th>{t('table.date')}</th><th>{t('table.actions')}</th></tr></thead>
+  return <div className="table-wrap"><table className="card-table">
+    <thead><tr><th>{t('field.file')}</th><th>{t('field.type')}</th><th>{t('field.amount')}</th><th>{t('field.note')}</th><th>{t('field.uploadedBy')}</th><th>{t('table.date')}</th><th>{t('table.actions')}</th></tr></thead>
     <tbody>{evidence.map((item) => <tr key={item.id}>
-      <td>{item.kind}</td>
-      <td><strong>{item.originalName}</strong><small>{(item.sizeBytes / 1024).toFixed(0)} KB · {item.mimeType}</small></td>
-      <td>{item.amount ? formatMoney(item.amount, movement.currency) : '—'}</td>
-      <td>{item.note || '—'}</td>
-      <td>{item.uploadedByName || '—'}</td>
-      <td>{formatDateTime(item.createdAt)}</td>
-      <td>
+      <td className="card-title-cell"><strong className="file-name">{item.originalName}</strong><small>{(item.sizeBytes / 1024).toFixed(0)} KB · {item.mimeType}</small></td>
+      <td data-label={t('field.type')}>{t(`ekind.${item.kind}`)}</td>
+      <td data-label={t('field.amount')}>{item.amount ? formatMoney(item.amount, movement.currency) : '—'}</td>
+      <td data-label={t('field.note')}>{item.note || '—'}</td>
+      <td data-label={t('field.uploadedBy')}>{item.uploadedByName || '—'}</td>
+      <td data-label={t('table.date')}>{formatDateTime(item.createdAt)}</td>
+      <td className="card-actions">
         <a
           className="text-btn"
-          href={`/api/movements/${movement.id}/evidence/${item.id}/file?token=${encodeURIComponent(token)}`}
+          href={`/api/movements/${encodeURIComponent(movement.id)}/evidence/${item.id}/file?token=${encodeURIComponent(token)}`}
           target="_blank"
           rel="noreferrer"
         >{t('action.view')}</a>
-        {canRemove && <button className="danger-btn" type="button" onClick={() => onRemove(item)}>{t('action.remove')}</button>}
+        {canRemove && <button className="danger-btn" type="button" disabled={busy} onClick={() => onRemove(item)}>{t('action.remove')}</button>}
       </td>
     </tr>)}</tbody>
   </table></div>;
 }
 
 // Section 9.
-function MovementReports({ reports, onRun, onClose }) {
+function MovementReports({ reports, busy = false, onRun, onClose }) {
   const t = useT();
   return <section className="report-area">
     <div className="panel-header">
       <div><h2>{t('movement.reportsTitle')}</h2></div>
       <div className="report-actions">
-        <button className="secondary-btn" type="button" onClick={onRun}>{t('action.runReport')}</button>
+        <button className="secondary-btn" type="button" disabled={busy} onClick={onRun}>{t('action.runReport')}</button>
         {reports && <button className="text-btn" type="button" onClick={onClose}>{t('action.close')}</button>}
       </div>
     </div>
@@ -922,29 +1060,29 @@ function MovementReports({ reports, onRun, onClose }) {
   </section>;
 }
 
-//  names the first column. It is passed in rather than derived from
+// `heading` names the first column. It is passed in rather than derived from
 // the title by stripping an English "By ", which only worked in English.
 function ReportTable({ title, heading, rows, label = (key) => key }) {
   const t = useT();
   if (!rows?.length) return null;
   return <div className="report-block">
     <div className="panel-header"><div><h2>{title}</h2></div></div>
-    <div className="table-wrap"><table>
+    <div className="table-wrap"><table className="card-table">
       <thead><tr><th>{heading}</th><th>{t('movement.movements')}</th><th>{t('movement.estimated')} (RWF)</th><th>{t('movement.released')} (RWF)</th><th>{t('movement.actual')} (RWF)</th><th>{t('movement.balance')} (RWF)</th><th>{t('movement.estimated')} (USD)</th></tr></thead>
       <tbody>{rows.map((row) => <tr key={row.key}>
-        <td><strong>{label(row.key)}</strong></td>
-        <td>{row.count}</td>
-        <td>{formatMoney(row.totals.estimated.rwf, 'RWF')}</td>
-        <td>{formatMoney(row.totals.released.rwf, 'RWF')}</td>
-        <td>{formatMoney(row.totals.actual.rwf, 'RWF')}</td>
-        <td>{formatMoney(row.totals.balance.rwf, 'RWF')}</td>
-        <td>{formatMoney(row.totals.estimated.usd, 'USD')}</td>
+        <td className="card-title-cell"><strong>{label(row.key)}</strong></td>
+        <td data-label={t('movement.movements')}>{row.count}</td>
+        <td data-label={`${t('movement.estimated')} (RWF)`}>{formatMoney(row.totals.estimated.rwf, 'RWF')}</td>
+        <td data-label={`${t('movement.released')} (RWF)`}>{formatMoney(row.totals.released.rwf, 'RWF')}</td>
+        <td data-label={`${t('movement.actual')} (RWF)`}>{formatMoney(row.totals.actual.rwf, 'RWF')}</td>
+        <td data-label={`${t('movement.balance')} (RWF)`}>{formatMoney(row.totals.balance.rwf, 'RWF')}</td>
+        <td data-label={`${t('movement.estimated')} (USD)`}>{formatMoney(row.totals.estimated.usd, 'USD')}</td>
       </tr>)}</tbody>
     </table></div>
   </div>;
 }
 
-function RatePanel({ rate, fetchJson, onSave, onError }) {
+function RatePanel({ rate, fetchJson, busy = false, onSave, onError }) {
   const t = useT();
   const [values, setValues] = useState({ rwfPerUsd: '', cdfPerUsd: '', note: '' });
   const [history, setHistory] = useState(null);
@@ -979,15 +1117,15 @@ function RatePanel({ rate, fetchJson, onSave, onError }) {
         <input value={values.note} onChange={(event) => setValues({ ...values, note: event.target.value })} />
       </label>
     </div>
-    <button className="primary-btn" type="submit">{t('action.saveRate')}</button>
-    {history && <div className="table-wrap"><table>
-      <thead><tr><th>RWF / USD</th><th>CDF / USD</th><th>{t('field.note')}</th><th>{t('movement.setBy')}</th><th>{t('table.date')}</th></tr></thead>
+    <button className="primary-btn" type="submit" disabled={busy}>{t('action.saveRate')}</button>
+    {history && <div className="table-wrap"><table className="card-table">
+      <thead><tr><th>{t('table.date')}</th><th>RWF / USD</th><th>CDF / USD</th><th>{t('field.note')}</th><th>{t('movement.setBy')}</th></tr></thead>
       <tbody>{history.map((entry) => <tr key={entry.id}>
-        <td>{Number(entry.rwfPerUsd).toLocaleString()}</td>
-        <td>{Number(entry.cdfPerUsd).toLocaleString()}</td>
-        <td>{entry.note || '—'}</td>
-        <td>{entry.updatedByName || '—'}</td>
-        <td>{formatDateTime(entry.updatedAt)}</td>
+        <td className="card-title-cell"><strong>{formatDateTime(entry.updatedAt)}</strong></td>
+        <td data-label="RWF / USD">{Number(entry.rwfPerUsd).toLocaleString()}</td>
+        <td data-label="CDF / USD">{Number(entry.cdfPerUsd).toLocaleString()}</td>
+        <td data-label={t('field.note')}>{entry.note || '—'}</td>
+        <td data-label={t('movement.setBy')}>{entry.updatedByName || '—'}</td>
       </tr>)}</tbody>
     </table></div>}
   </form>;

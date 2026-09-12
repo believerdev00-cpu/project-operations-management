@@ -24,8 +24,10 @@ router.put('/', asyncRoute(async (req, res) => {
     return res.status(403).json({ message: 'Only the Director can update the reference exchange rate.' });
   }
   const { rwfPerUsd, cdfPerUsd, note } = req.body || {};
-  if (!validNumber(rwfPerUsd, { minimum: 0.000001 }) || !validNumber(cdfPerUsd, { minimum: 0.000001 })) {
-    return res.status(400).json({ message: 'Both rates must be greater than zero.' });
+  // NUMERIC(18,6) holds up to 10^12; a real rate is nowhere near that, so a
+  // generous ceiling catches a slipped key before the column overflows.
+  if (!validNumber(rwfPerUsd, { minimum: 0.000001, maximum: 1e9 }) || !validNumber(cdfPerUsd, { minimum: 0.000001, maximum: 1e9 })) {
+    return res.status(400).json({ message: 'Both rates must be greater than zero and realistic.' });
   }
 
   const result = await pool.query(

@@ -16,9 +16,13 @@ const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
   throw new Error('DATABASE_URL is required. Configure PostgreSQL before starting the API.');
 }
+// Supabase requires TLS. A local Postgres used for development usually has none,
+// and says so in its URL with sslmode=disable (or DATABASE_SSL=false).
+const sslDisabled = /[?&]sslmode=disable\b/.test(connectionString) || process.env.DATABASE_SSL === 'false';
+
 export const pool = new Pool({
   connectionString,
-  ssl: {
+  ssl: sslDisabled ? false : {
     rejectUnauthorized: false
   },
   // Supabase drops idle connections, and a pooled socket that died while idle

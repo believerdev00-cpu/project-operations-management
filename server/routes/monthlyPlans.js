@@ -22,9 +22,9 @@
 
 import express from 'express';
 import { pool, safeRollback } from '../db/database.js';
-import { asyncRoute, hasFullScope, isAdmin, requiredText, sectorIds, validNumber } from '../lib/http.js';
-import { PLAN_PRIORITIES, PLAN_STATUSES, REPORT_STATUSES } from '../db/monthlySchema.js';
-import { round2 } from '../lib/rates.js';
+import { asyncRoute, hasFullScope, isAdmin, isValidDate, parseId, requiredText, sectorIds, validNumber, withinScope } from '../lib/http.js';
+import { PLAN_PRIORITIES, REPORT_STATUSES } from '../db/monthlySchema.js';
+import { getCurrentRate, round2 } from '../lib/rates.js';
 import {
   COMPLETED_STATUS, canReadPlan, cents, currentMonth, fromCents, isPlanOpen,
   monthKey, monthStart, toDateOnly
@@ -68,7 +68,12 @@ async function logPlanHistory(client, planId, user, entries) {
 // the two. Nothing can drift out of step with what it is made of.
 const PLAN_TOTALS = `
   SELECT
-    COALESCE(SUM(a.approved_budget) FILTER (WHERE a.status NOT IN ('Rejected', 'Cancelled')), 0) AS planned_budget,
+    -- An activity approved without an explicit figure was approved at what it
+    -- asked for. The spend check already reads it that way (budgetPosition in
+    -- routes/activities.js); counting it here as zero let the plan show a
+    -- negative balance for money that was, in fact, approved.
+    COALESCE(SUM(COALESCE(a.approved_budget, a.requested_budget))
+      FILTER (WHERE a.status NOT IN ('Rejected', 'Cancelled')), 0) AS planned_budget,
     COUNT(*) FILTER (WHERE a.status NOT IN ('Rejected', 'Cancelled'))::int AS activity_count,
     COUNT(*) FILTER (WHERE a.status = 'Completed')::int AS completed_count,
     COUNT(*) FILTER (WHERE a.status NOT IN ('Rejected', 'Cancelled', 'Completed'))::int AS outstanding_count,
@@ -159,7 +164,9 @@ function mapPlan(row) {
 // A plan, scoped. A manager reads their own operation's plans and no others --
 // checked in SQL, not filtered in the browser.
 async function loadPlan(id, user) {
-  const values = [id];
+  const planId = parseId(id);
+  if (!planId) throw new PlanError(404, 'Monthly plan not found.');
+  const values = [planId];
   let scope = '';
   if (!hasFullScope(user)) {
     values.push(user.sector);
@@ -249,7 +256,7 @@ router.get('/:id', asyncRoute(async (req, res) => {
   const [activities, history, report] = await Promise.all([
     pool.query(
       `SELECT a.id, a.activity, a.description, a.category, a.sector, a.status, a.priority,
-              a.approved_budget, a.deadline, a.admin_note, a.assigned_to, a.completed_at,
+              COALESCE(a.approved_budget, a.requested_budget) AS approved_budget, a.deadline, a.admin_note, a.assigned_to, a.completed_at,
               m.name AS assigned_to_name,
               COALESCE((SELECT SUM(e.amount) FROM activity_expenses e WHERE e.activity_id = a.id), 0) AS spent,
               (SELECT COUNT(*) FROM activity_expenses e WHERE e.activity_id = a.id)::int AS expense_count,
@@ -362,9 +369,15 @@ router.post('/', asyncRoute(async (req, res) => {
   // be named on a plan whose activities they cannot open.
   let manager = null;
   if (managerId) {
-    const found = await pool.query("SELECT id, name, sector FROM users WHERE id = $1 AND role = 'manager'", [Number(managerId)]);
+    const managerKey = parseId(managerId);
+    if (!managerKey) return res.status(400).json({ message: 'The selected manager is invalid.' });
+    const found = await pool.query(
+      "SELECT id, name, sector, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager' AND status = 'active'",
+      [managerKey]
+    );
     if (!found.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
-    if (found.rows[0].sector !== operation) {
+    // A manager covering every operation may run any operation's month.
+    if (!withinScope(found.rows[0], operation)) {
       return res.status(400).json({ message: 'That manager works in a different business operation.' });
     }
     manager = found.rows[0];
@@ -418,11 +431,16 @@ router.patch('/:id', asyncRoute(async (req, res) => {
 
   let managerId = existing.manager_id;
   if (Object.prototype.hasOwnProperty.call(payload, 'managerId')) {
-    managerId = payload.managerId === null || payload.managerId === '' ? null : Number(payload.managerId);
+    const clearing = payload.managerId === null || payload.managerId === '';
+    managerId = clearing ? null : parseId(payload.managerId);
+    if (!clearing && !managerId) return res.status(400).json({ message: 'The selected manager is invalid.' });
     if (managerId) {
-      const found = await pool.query("SELECT id, sector FROM users WHERE id = $1 AND role = 'manager'", [managerId]);
+      const found = await pool.query(
+        "SELECT id, sector, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager' AND status = 'active'",
+        [managerId]
+      );
       if (!found.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
-      if (found.rows[0].sector !== existing.sector) {
+      if (!withinScope(found.rows[0], existing.sector)) {
         return res.status(400).json({ message: 'That manager works in a different business operation.' });
       }
     }
@@ -473,6 +491,33 @@ router.patch('/:id', asyncRoute(async (req, res) => {
       'UPDATE monthly_plans SET manager_id = $2, notes = $3, approved_budget = $4, updated_at = NOW() WHERE id = $1',
       [existing.id, managerId, notes, approvedBudget]
     );
+    // A new manager takes over the month's live work with it. Left on the old
+    // manager, the activities could not have expenses recorded by the new one
+    // (canRecordExpense checks assigned_to), and anything still waiting on a
+    // manager's approval would keep waiting on somebody no longer responsible.
+    if (managerId && managerId !== existing.manager_id) {
+      const handed = await client.query(
+        `UPDATE activities
+         SET assigned_to = $2, assigned_at = NOW(),
+             approval_required_from = CASE
+               WHEN approval_required_role = 'manager' AND approval_status = 'pending' THEN $2::int
+               ELSE approval_required_from END,
+             updated_at = NOW()
+         WHERE monthly_plan_id = $1
+           AND status NOT IN ('Completed', 'Rejected', 'Cancelled')
+           AND assigned_to IS DISTINCT FROM $2::int
+         RETURNING id, assigned_to`,
+        [existing.id, managerId]
+      );
+      for (const row of handed.rows) {
+        await client.query(
+          `INSERT INTO activity_history (activity_id, action, field, old_value, new_value, note, actor_id, actor_name)
+           VALUES ($1, 'Manager assigned', 'assignedTo', $2, $3, $4, $5, $6)`,
+          [row.id, existing.manager_id === null ? null : String(existing.manager_id), String(managerId),
+            'The monthly plan changed manager', req.user.id, req.user.name]
+        );
+      }
+    }
     await logPlanHistory(client, existing.id, req.user, entries);
     await client.query('COMMIT');
   } catch (error) {
@@ -513,12 +558,18 @@ router.post('/:id/confirm', asyncRoute(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
+    const confirmed = await client.query(
       `UPDATE monthly_plans
        SET status = 'Confirmed', approved_budget = $2, confirmed_by = $3, confirmed_at = NOW(), updated_at = NOW()
        WHERE id = $1 AND status = 'Draft'`,
       [existing.id, allocation, req.user.id]
     );
+    // Confirmed by somebody else between the read and the write: one record of
+    // the allocation, not two.
+    if (!confirmed.rowCount) {
+      await safeRollback(client);
+      return res.status(409).json({ message: 'This plan has already been confirmed.' });
+    }
     await logPlanHistory(client, existing.id, req.user, [
       {
         action: 'Plan confirmed', field: 'approvedBudget', oldValue: null, newValue: allocation,
@@ -553,18 +604,31 @@ router.post('/:id/reopen', asyncRoute(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
-      `UPDATE monthly_plans SET status = 'Confirmed', closed_by = NULL, closed_at = NULL, updated_at = NOW()
-       WHERE id = $1 AND status = 'Closed'`,
-      [existing.id]
-    );
     // A confirmed plan reopens to Draft; a closed one reopens to Confirmed, so
     // reopening never quietly discards the allocation that was handed over.
-    if (existing.status === 'Confirmed') {
-      await client.query(
-        `UPDATE monthly_plans SET status = 'Draft', confirmed_by = NULL, confirmed_at = NULL, updated_at = NOW()
-         WHERE id = $1`,
+    const reopened = existing.status === 'Closed'
+      ? await client.query(
+        `UPDATE monthly_plans SET status = 'Confirmed', closed_by = NULL, closed_at = NULL, updated_at = NOW()
+         WHERE id = $1 AND status = 'Closed'`,
         [existing.id]
+      )
+      : await client.query(
+        `UPDATE monthly_plans SET status = 'Draft', confirmed_by = NULL, confirmed_at = NULL, updated_at = NOW()
+         WHERE id = $1 AND status = 'Confirmed'`,
+        [existing.id]
+      );
+    if (!reopened.rowCount) {
+      await safeRollback(client);
+      return res.status(409).json({ message: 'This plan changed a moment ago. Refresh and try again.' });
+    }
+    // The report that closed the month is handed back with the reason, so the
+    // manager can file a corrected one and the Director can close the month
+    // again. Left Accepted, neither of them had any way to close it a second time.
+    if (existing.status === 'Closed') {
+      await client.query(
+        `UPDATE monthly_reports SET status = 'Returned', review_note = $2, reviewed_by = $3, reviewed_at = NOW()
+         WHERE plan_id = $1`,
+        [existing.id, optionalText(req.body.reason, 2000), req.user.id]
       );
     }
     await logPlanHistory(client, existing.id, req.user, [
@@ -609,8 +673,8 @@ router.post('/:id/activities', asyncRoute(async (req, res) => {
     return res.status(400).json({ message: 'Priority must be Low, Medium or High.' });
   }
   const deadline = payload.deadline ? String(payload.deadline).slice(0, 10) : null;
-  if (deadline && !/^\d{4}-\d{2}-\d{2}$/.test(deadline)) {
-    return res.status(400).json({ message: 'The expected completion date must be a date.' });
+  if (deadline && !isValidDate(deadline)) {
+    return res.status(400).json({ message: 'The expected completion date must be a real date.' });
   }
   if (!plan.manager_id) {
     return res.status(400).json({ message: 'Name the manager responsible before adding activities.' });
@@ -619,7 +683,7 @@ router.post('/:id/activities', asyncRoute(async (req, res) => {
   // Activities belong to a project, as they always have. The operation's
   // project is used unless the Director names one.
   const projectResult = await pool.query(
-    'SELECT id FROM projects WHERE id = $1 OR sector = $2 ORDER BY (id = $1) DESC LIMIT 1',
+    'SELECT id FROM projects WHERE id = $1 OR sector = $2 ORDER BY (id = $1) DESC, updated_at DESC LIMIT 1',
     [payload.projectId || '', plan.sector]
   );
   if (!projectResult.rowCount) {
@@ -628,6 +692,9 @@ router.post('/:id/activities', asyncRoute(async (req, res) => {
 
   const budget = round2(payload.approvedBudget);
   const id = `ACT-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  // The local equivalents are priced at the Director's current reference rate,
+  // the same one the Movements module uses, rather than a figure fixed in code.
+  const rate = await getCurrentRate(pool);
 
   const client = await pool.connect();
   try {
@@ -648,7 +715,7 @@ router.post('/:id/activities', asyncRoute(async (req, res) => {
       [
         id, projectResult.rows[0].id, plan.sector, payload.category.trim().slice(0, 100),
         payload.activity.trim().slice(0, 200), optionalText(payload.description, 4000),
-        budget, round2(budget * 1450), round2(budget * 2850),
+        budget, round2(budget * rate.rwfPerUsd), round2(budget * rate.cdfPerUsd),
         priority, plan.id, deadline, optionalText(payload.adminNote, 2000),
         req.user.id, req.user.name, plan.manager_id
       ]
@@ -661,6 +728,21 @@ router.post('/:id/activities', asyncRoute(async (req, res) => {
     await logPlanHistory(client, plan.id, req.user, [
       { action: 'Activity added', field: 'activity', oldValue: null, newValue: payload.activity.trim().slice(0, 200), note: `${budget}` }
     ]);
+    // Work added to a month already confirmed is money approved on top of the
+    // allocation, exactly as attaching an off-plan activity is. Leaving the
+    // allocation where it was sent the remaining balance negative with nothing on
+    // screen to explain it.
+    if (plan.status !== 'Draft') {
+      await client.query(
+        'UPDATE monthly_plans SET approved_budget = approved_budget + $2, updated_at = NOW() WHERE id = $1',
+        [plan.id, budget]
+      );
+      await logPlanHistory(client, plan.id, req.user, [{
+        action: 'Approved allocation changed', field: 'approvedBudget',
+        oldValue: round2(Number(plan.approved_budget)), newValue: round2(Number(plan.approved_budget) + budget),
+        note: `Activity added after confirmation: ${payload.activity.trim().slice(0, 200)}`
+      }]);
+    }
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -682,31 +764,43 @@ router.post('/:id/attach/:activityId', asyncRoute(async (req, res) => {
     return res.status(400).json({ message: 'This month has been closed.' });
   }
 
-  const found = await pool.query(
-    'SELECT id, activity, sector, status, approval_status, approved_budget, monthly_plan_id FROM activities WHERE id = $1',
-    [req.params.activityId]
-  );
-  if (!found.rowCount) return res.status(404).json({ message: 'Activity not found.' });
-  const activity = found.rows[0];
-
-  if (activity.monthly_plan_id) {
-    return res.status(409).json({ message: 'That activity already belongs to a monthly plan.' });
-  }
-  if (activity.sector !== plan.sector) {
-    return res.status(400).json({ message: 'That activity belongs to a different business operation.' });
-  }
-  // Only approved work joins an approved budget.
-  if (activity.approval_status !== 'approved') {
-    return res.status(400).json({ message: 'Approve the activity before attaching it to a monthly plan.' });
-  }
-
-  const budget = round2(Number(activity.approved_budget || 0));
   const client = await pool.connect();
+  let activity;
+  let budget;
   try {
     await client.query('BEGIN');
+    // Read under a row lock, so two attaches of the same activity at once cannot
+    // both find it unattached and add its budget to two plans.
+    const found = await client.query(
+      `SELECT id, activity, sector, status, approval_status, approved_budget, requested_budget, monthly_plan_id
+       FROM activities WHERE id = $1 FOR UPDATE`,
+      [req.params.activityId]
+    );
+    if (!found.rowCount) {
+      await safeRollback(client);
+      return res.status(404).json({ message: 'Activity not found.' });
+    }
+    activity = found.rows[0];
+    let refusal = null;
+    if (activity.monthly_plan_id) refusal = [409, 'That activity already belongs to a monthly plan.'];
+    else if (activity.sector !== plan.sector) refusal = [400, 'That activity belongs to a different business operation.'];
+    // Only approved, live work joins an approved budget.
+    else if (activity.approval_status !== 'approved' || ['Rejected', 'Cancelled'].includes(activity.status)) {
+      refusal = [400, 'Approve the activity before attaching it to a monthly plan.'];
+    }
+    if (refusal) {
+      await safeRollback(client);
+      return res.status(refusal[0]).json({ message: refusal[1] });
+    }
+
+    // An activity approved without an explicit figure was approved at what it
+    // asked for; that figure is written down as it joins the plan, so the plan,
+    // the spend check and the reports all read the same number.
+    budget = round2(Number(activity.approved_budget ?? activity.requested_budget ?? 0));
     await client.query(
-      'UPDATE activities SET monthly_plan_id = $2, assigned_to = COALESCE(assigned_to, $3), updated_at = NOW() WHERE id = $1',
-      [activity.id, plan.id, plan.manager_id]
+      `UPDATE activities SET monthly_plan_id = $2, assigned_to = COALESCE(assigned_to, $3),
+         approved_budget = COALESCE(approved_budget, $4), updated_at = NOW() WHERE id = $1`,
+      [activity.id, plan.id, plan.manager_id, budget]
     );
     // The plan has grown, so the allocation grows with it -- explicitly, and on
     // the record, rather than the total quietly changing under the Director.
@@ -756,6 +850,11 @@ router.post('/:id/report', asyncRoute(async (req, res) => {
   }
   if (plan.status === 'Draft') {
     return res.status(400).json({ message: 'This plan has not been confirmed yet.' });
+  }
+  // A closed month's accepted report is the signed-off account. Submitting again
+  // used to overwrite it and mark it Submitted under a plan that stayed Closed.
+  if (plan.status === 'Closed' || plan.report_status === 'Accepted') {
+    return res.status(409).json({ message: 'This month has been closed. Ask the Director to reopen it first.' });
   }
 
   const payload = req.body || {};
@@ -855,14 +954,24 @@ router.patch('/:id/report', asyncRoute(async (req, res) => {
 
   const existing = await pool.query('SELECT id FROM monthly_reports WHERE plan_id = $1', [plan.id]);
   if (!existing.rowCount) return res.status(404).json({ message: 'No month-end report has been submitted yet.' });
+  if (plan.status === 'Closed') {
+    return res.status(409).json({ message: 'This month has already been closed.' });
+  }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
-      'UPDATE monthly_reports SET status = $2, review_note = $3, reviewed_by = $4, reviewed_at = NOW() WHERE plan_id = $1',
+    // Only a report waiting for review is decided: a returned one waits for the
+    // manager to file it again, and an accepted one already closed the month.
+    const reviewed = await client.query(
+      `UPDATE monthly_reports SET status = $2, review_note = $3, reviewed_by = $4, reviewed_at = NOW()
+       WHERE plan_id = $1 AND status = 'Submitted'`,
       [plan.id, status, note, req.user.id]
     );
+    if (!reviewed.rowCount) {
+      await safeRollback(client);
+      return res.status(409).json({ message: 'This report is not waiting for review.' });
+    }
     // Accepting the report closes the month: the plan becomes a historical
     // record and stops accepting expenses or edits.
     if (status === 'Accepted') {
@@ -885,10 +994,11 @@ router.patch('/:id/report', asyncRoute(async (req, res) => {
   res.json(mapPlan(await loadPlan(plan.id, req.user)));
 }));
 
+// Anything else goes on to the application's error handler, which turns bad
+// input the database refused into a 400 rather than a bare server error.
 router.use((error, req, res, next) => {
   if (error instanceof PlanError) return res.status(error.status).json({ message: error.message });
-  console.error(error);
-  res.status(500).json({ message: 'Server or database error.' });
+  next(error);
 });
 
 export default router;

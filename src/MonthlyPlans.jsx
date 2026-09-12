@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BUSINESS_OPERATIONS, operationName } from '../shared/businessOperations.js';
-import { useI18n } from './i18n.js';
+import { fill, useI18n } from './i18n.js';
+import { categoryLabel, trailActionLabel } from './ActivityReview.jsx';
+import { DetailView, useBusy, useDialog } from './ui.jsx';
 
 // Monthly planning, allocation and month-end review.
 //
@@ -34,6 +36,13 @@ function thisMonth() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 }
 
+// Today as the calendar sees it here. toISOString() converts to UTC first, so
+// between midnight and 02:00 in Kigali it handed back yesterday's date.
+function todayLocal() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
+
 function monthLabel(month, language) {
   const [year, index] = String(month).split('-').map(Number);
   if (!year || !index) return month;
@@ -45,136 +54,119 @@ const emptyActivity = {
   priority: 'Medium', deadline: '', adminNote: ''
 };
 
-export default function MonthlyPlans({ user, fetchJson, managers, activities: registerActivities = [], onMessage, onError }) {
+export default function MonthlyPlans({
+  user, fetchJson, managers,
+  planId = null, onOpenPlan, onClosePlan, onChanged, onMessage, onError
+}) {
   const { language, t } = useI18n();
+  const dialog = useDialog();
+  const [busy, run] = useBusy();
   const isDirector = user.role === 'super-admin';
 
   const [month, setMonth] = useState(thisMonth);
   const [review, setReview] = useState(null);
-  const [openPlanId, setOpenPlanId] = useState(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [detail, setDetail] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [newPlan, setNewPlan] = useState({ operation: 'farming', managerId: '' });
+  // Approved work in the plan's operation that no month has taken in yet --
+  // asked of the server, not picked out of the newest page of the register.
+  const [offPlan, setOffPlan] = useState([]);
+  const [newPlan, setNewPlan] = useState({ operation: '', managerId: '' });
   const [activityForm, setActivityForm] = useState(emptyActivity);
+  // Each load is numbered, and only the newest may write. Stepping through the
+  // month picker fires a request per month, and an older one answering last
+  // used to put last month's figures under this month's heading.
+  const latestLoad = useRef(0);
+  const latestOpen = useRef(0);
+  // The month a manager's plan has already been opened for, so closing it
+  // stays closed instead of the auto-open immediately bringing it back.
+  const autoOpenedFor = useRef(null);
+
+  // The open plan lives in the address (#/monthly/12), so it survives a refresh
+  // and the back button closes it.
+  const openPlanId = planId ? Number(planId) : null;
+  // Held in a ref so a parent passing a fresh function each render cannot turn
+  // the plan loader into a new function -- and its effect into a refetch loop.
+  const closePlanRef = useRef(onClosePlan);
+  closePlanRef.current = onClosePlan;
 
   const load = useCallback(async () => {
-    setLoading(true);
+    const request = ++latestLoad.current;
     try {
-      setReview(await fetchJson(`/api/monthly-plans/review?month=${month}`));
+      const result = await fetchJson(`/api/monthly-plans/review?month=${month}`);
+      if (request !== latestLoad.current) return;
+      setReview(result);
+      setLoadFailed(false);
     } catch (loadError) {
+      if (request !== latestLoad.current) return;
+      setLoadFailed(true);
       onError(loadError.message);
-    } finally {
-      setLoading(false);
     }
   }, [fetchJson, month, onError]);
 
   useEffect(() => { load(); }, [load]);
 
-  const openPlan = useCallback(async (planId) => {
+  const loadPlan = useCallback(async (id) => {
+    const request = ++latestOpen.current;
     try {
-      setDetail(await fetchJson(`/api/monthly-plans/${planId}`));
-      setOpenPlanId(planId);
-    } catch (openError) { onError(openError.message); }
-  }, [fetchJson, onError]);
+      const result = await fetchJson(`/api/monthly-plans/${id}`);
+      if (request !== latestOpen.current) return;
+      setDetail(result);
+      if (isDirector && result.plan.status !== 'Closed') {
+        fetchJson(`/api/activities?unplanned=1&sector=${encodeURIComponent(result.plan.operation)}&limit=200`)
+          .then((items) => { if (request === latestOpen.current) setOffPlan(items); })
+          .catch(() => { if (request === latestOpen.current) setOffPlan([]); });
+      } else {
+        setOffPlan([]);
+      }
+      // A link to a plan in another month moves the page to that month, so the
+      // review above the plan is the one it belongs to.
+      if (result.plan.month) {
+        setMonth((current) => {
+          if (current === result.plan.month) return current;
+          autoOpenedFor.current = result.plan.month;
+          return result.plan.month;
+        });
+      }
+    } catch (openError) {
+      if (request !== latestOpen.current) return;
+      onError(openError.message);
+      closePlanRef.current?.();
+    }
+  }, [fetchJson, onError, isDirector]);
+
+  useEffect(() => {
+    if (!openPlanId) {
+      latestOpen.current += 1;
+      setDetail(null);
+      return;
+    }
+    loadPlan(openPlanId);
+  }, [openPlanId, loadPlan]);
 
   // A manager works one operation, so their month opens straight away rather
-  // than making them pick their own plan out of a list of one.
+  // than making them pick their own plan out of a list of one -- once per
+  // month, and only for the month the review actually belongs to.
   useEffect(() => {
-    if (isDirector || !review?.operations?.length || openPlanId) return;
-    openPlan(review.operations[0].id);
-  }, [isDirector, review, openPlanId, openPlan]);
+    if (isDirector || openPlanId || !review?.operations?.length || review.month !== month) return;
+    if (autoOpenedFor.current === month) return;
+    autoOpenedFor.current = month;
+    onOpenPlan?.(review.operations[0].id);
+  }, [isDirector, review, month, openPlanId, onOpenPlan]);
+
+  const changeMonth = (next) => {
+    if (!next) return;
+    setMonth(next);
+    // Everything on screen belonged to the old month; none of it may linger
+    // under the new heading while the new month loads.
+    setReview(null);
+    setLoadFailed(false);
+    if (openPlanId) onClosePlan?.();
+  };
 
   const refresh = async () => {
     await load();
-    if (openPlanId) await openPlan(openPlanId);
-  };
-
-  const createPlan = async (event) => {
-    event.preventDefault();
-    try {
-      const plan = await fetchJson('/api/monthly-plans', {
-        method: 'POST',
-        body: JSON.stringify({ ...newPlan, month, managerId: newPlan.managerId || null })
-      });
-      onMessage(`${operationName(plan.operation, language)} — ${monthLabel(month, language)}: ${t('monthly.createPlan')}.`);
-      setNewPlan({ operation: 'farming', managerId: '' });
-      await load();
-      await openPlan(plan.id);
-    } catch (createError) { onError(createError.message); }
-  };
-
-  const addActivity = async (event) => {
-    event.preventDefault();
-    try {
-      await fetchJson(`/api/monthly-plans/${openPlanId}/activities`, {
-        method: 'POST',
-        body: JSON.stringify({ ...activityForm, approvedBudget: Number(activityForm.approvedBudget || 0) })
-      });
-      setActivityForm(emptyActivity);
-      onMessage(t('monthly.addActivity'));
-      await refresh();
-    } catch (addError) { onError(addError.message); }
-  };
-
-  const confirmPlan = async (plan) => {
-    if (!window.confirm(
-      `${t('monthly.confirmHint')}\n\n${t('monthly.totalToGive')}: ${formatUsd(plan.plannedBudget)}`
-    )) return;
-    try {
-      const saved = await fetchJson(`/api/monthly-plans/${plan.id}/confirm`, { method: 'POST' });
-      onMessage(`${t('monthly.approvedAllocation')}: ${formatUsd(saved.approvedBudget)}. ${t('monthly.noMoneyNotice')}`);
-      await refresh();
-    } catch (confirmError) { onError(confirmError.message); }
-  };
-
-  const reopenPlan = async (plan) => {
-    const reason = window.prompt(t('monthly.reopen'), '');
-    if (reason === null) return;
-    if (!reason.trim()) return onError(t('approval.reason'));
-    try {
-      await fetchJson(`/api/monthly-plans/${plan.id}/reopen`, {
-        method: 'POST', body: JSON.stringify({ reason: reason.trim() })
-      });
-      onMessage(t('monthly.reopen'));
-      await refresh();
-    } catch (reopenError) { onError(reopenError.message); }
-  };
-
-  const decideReport = async (plan, status) => {
-    const note = window.prompt(t('monthend.reviewNote'), '');
-    if (note === null) return;
-    if (status === 'Returned' && !note.trim()) return onError(t('monthend.reviewNote'));
-    try {
-      await fetchJson(`/api/monthly-plans/${plan.id}/report`, {
-        method: 'PATCH', body: JSON.stringify({ status, reviewNote: note.trim() })
-      });
-      onMessage(status === 'Accepted' ? t('monthend.accept') : t('monthend.return'));
-      await refresh();
-    } catch (decideError) { onError(decideError.message); }
-  };
-
-  // Section 4: an activity a manager raised is not part of the month's budget
-  // until the Director deliberately attaches it here.
-  const attachActivity = async (plan, activityId) => {
-    const reason = window.prompt(t('monthly.attachActivity'), '');
-    if (reason === null) return;
-    try {
-      const saved = await fetchJson(`/api/monthly-plans/${plan.id}/attach/${activityId}`, {
-        method: 'POST', body: JSON.stringify({ reason: reason.trim() })
-      });
-      onMessage(`${t('monthly.approvedAllocation')}: ${formatUsd(saved.approvedBudget)}`);
-      await refresh();
-    } catch (attachError) { onError(attachError.message); }
-  };
-
-  const submitReport = async (plan, explanations) => {
-    try {
-      await fetchJson(`/api/monthly-plans/${plan.id}/report`, {
-        method: 'POST', body: JSON.stringify(explanations)
-      });
-      onMessage(t('monthend.submit'));
-      await refresh();
-    } catch (submitError) { onError(submitError.message); }
+    if (openPlanId) await loadPlan(openPlanId);
+    onChanged?.();
   };
 
   // Operations that have no plan for this month yet, so the Director is offered
@@ -184,12 +176,152 @@ export default function MonthlyPlans({ user, fetchJson, managers, activities: re
     return BUSINESS_OPERATIONS.filter((operation) => !planned.has(operation.id));
   }, [review]);
 
+  // The select can only show operations still to plan. When the chosen one is
+  // no longer among them -- it was just planned, or the month changed -- the
+  // choice follows what is actually on screen, or the form would display one
+  // operation while submitting another.
+  const chosenOperation = unplanned.some((operation) => operation.id === newPlan.operation)
+    ? newPlan.operation
+    : (unplanned[0]?.id || '');
   const managerOptions = useMemo(
-    () => managers.filter((manager) => manager.coversAllSectors || manager.sector === newPlan.operation),
-    [managers, newPlan.operation]
+    () => managers.filter((manager) => manager.coversAllSectors || manager.sector === chosenOperation),
+    [managers, chosenOperation]
   );
 
-  if (loading) return <div className="loading-state"><span className="spinner" />{t('app.loading')}</div>;
+  // ---- actions, one at a time ------------------------------------------------
+
+  const createPlan = (event) => {
+    event.preventDefault();
+    run(async () => {
+      try {
+        const plan = await fetchJson('/api/monthly-plans', {
+          method: 'POST',
+          body: JSON.stringify({ operation: chosenOperation, month, managerId: newPlan.managerId || null })
+        });
+        onMessage(fill(t('msg.planCreated'), { operation: operationName(plan.operation, language), month: monthLabel(month, language) }));
+        setNewPlan({ operation: '', managerId: '' });
+        await load();
+        onChanged?.();
+        onOpenPlan?.(plan.id);
+      } catch (createError) { onError(createError.message); }
+    });
+  };
+
+  const addActivity = (event) => {
+    event.preventDefault();
+    const name = activityForm.activity;
+    run(async () => {
+      try {
+        await fetchJson(`/api/monthly-plans/${openPlanId}/activities`, {
+          method: 'POST',
+          body: JSON.stringify({ ...activityForm, approvedBudget: Number(activityForm.approvedBudget || 0) })
+        });
+        setActivityForm(emptyActivity);
+        onMessage(fill(t('msg.plannedActivityAdded'), { name }));
+        await refresh();
+      } catch (addError) { onError(addError.message); }
+    });
+  };
+
+  const confirmPlan = (plan) => run(async () => {
+    const confirmed = await dialog.confirm({
+      title: t('monthly.confirmPlan'),
+      message: `${t('monthly.confirmHint')} ${t('monthly.totalToGive')}: ${formatUsd(plan.plannedBudget)}`,
+      confirmLabel: t('monthly.confirmPlan')
+    });
+    if (!confirmed) return;
+    try {
+      const saved = await fetchJson(`/api/monthly-plans/${plan.id}/confirm`, { method: 'POST' });
+      onMessage(`${t('monthly.approvedAllocation')}: ${formatUsd(saved.approvedBudget)}. ${t('monthly.noMoneyNotice')}`);
+      await refresh();
+    } catch (confirmError) { onError(confirmError.message); }
+  });
+
+  const reopenPlan = (plan) => run(async () => {
+    const reason = await dialog.prompt({
+      title: t('monthly.reopen'),
+      label: t('field.reason'),
+      required: true,
+      multiline: true,
+      confirmLabel: t('monthly.reopen')
+    });
+    if (reason === null) return;
+    try {
+      await fetchJson(`/api/monthly-plans/${plan.id}/reopen`, { method: 'POST', body: JSON.stringify({ reason }) });
+      onMessage(t('msg.monthReopened'));
+      await refresh();
+    } catch (reopenError) { onError(reopenError.message); }
+  });
+
+  const decideReport = (plan, status) => run(async () => {
+    const returning = status === 'Returned';
+    const note = await dialog.prompt({
+      title: returning ? t('monthend.return') : t('monthend.accept'),
+      label: t('monthend.reviewNote'),
+      required: returning,
+      multiline: true,
+      danger: returning,
+      confirmLabel: returning ? t('monthend.return') : t('monthend.accept')
+    });
+    if (note === null) return;
+    try {
+      await fetchJson(`/api/monthly-plans/${plan.id}/report`, { method: 'PATCH', body: JSON.stringify({ status, reviewNote: note }) });
+      onMessage(returning ? t('msg.reportReturned') : t('msg.reportAccepted'));
+      await refresh();
+    } catch (decideError) { onError(decideError.message); }
+  });
+
+  // Section 4: an activity a manager raised is not part of the month's budget
+  // until the Director deliberately attaches it here.
+  const attachActivity = (plan, item) => run(async () => {
+    const reason = await dialog.prompt({
+      title: t('monthly.attachActivity'),
+      message: item.activity,
+      label: t('field.reason'),
+      multiline: true,
+      confirmLabel: t('monthly.attachActivity')
+    });
+    if (reason === null) return;
+    try {
+      const saved = await fetchJson(`/api/monthly-plans/${plan.id}/attach/${encodeURIComponent(item.id)}`, {
+        method: 'POST', body: JSON.stringify({ reason })
+      });
+      onMessage(`${t('monthly.approvedAllocation')}: ${formatUsd(saved.approvedBudget)}`);
+      await refresh();
+    } catch (attachError) { onError(attachError.message); }
+  });
+
+  // Resolves true once filed, so the explanations typed survive a refusal.
+  const submitReport = (plan, explanations) => run(async () => {
+    try {
+      await fetchJson(`/api/monthly-plans/${plan.id}/report`, { method: 'POST', body: JSON.stringify(explanations) });
+      onMessage(t('msg.reportSubmitted'));
+      await refresh();
+      return true;
+    } catch (submitError) {
+      onError(submitError.message);
+      return false;
+    }
+  });
+
+  // Section 10: the Director changes who runs the month, or its notes. The API
+  // hands the month's live activities to the new manager with it.
+  const updatePlan = (plan, changes) => run(async () => {
+    try {
+      await fetchJson(`/api/monthly-plans/${plan.id}`, { method: 'PATCH', body: JSON.stringify(changes) });
+      onMessage(t('msg.planUpdated'));
+      await refresh();
+    } catch (updateError) { onError(updateError.message); }
+  });
+
+  if (!review) {
+    return loadFailed
+      ? <div className="empty-state load-issue">
+          <strong>{t('app.loadFailed')}</strong>
+          <button className="secondary-btn" type="button" onClick={load}>{t('action.retry')}</button>
+        </div>
+      : <div className="loading-state"><span className="spinner" />{t('app.loading')}</div>;
+  }
 
   return <>
     <section className="context-strip">
@@ -198,8 +330,8 @@ export default function MonthlyPlans({ user, fetchJson, managers, activities: re
         <h2>{isDirector ? t('monthly.title') : t('monthly.myActivities')}</h2>
         <p>{t('monthly.blurb')}</p>
       </div>
-      <label className="form-field"><span>{t('monthly.month')}</span>
-        <input type="month" value={month} onChange={(event) => { setMonth(event.target.value); setOpenPlanId(null); setDetail(null); }} />
+      <label className="form-field month-picker"><span>{t('monthly.month')}</span>
+        <input type="month" value={month} onChange={(event) => changeMonth(event.target.value)} />
       </label>
     </section>
 
@@ -222,7 +354,7 @@ export default function MonthlyPlans({ user, fetchJson, managers, activities: re
           <h2>{t('review.monthly')}</h2>
           <span>{monthLabel(month, language)}</span>
         </div></div>
-        {review.operations.length ? <div className="table-wrap"><table>
+        {review.operations.length ? <div className="table-wrap"><table className="card-table">
           <thead><tr>
             <th>{t('app.businessOperation')}</th><th>{t('field.manager')}</th>
             <th>{t('monthly.approvedAllocation')}</th><th>{t('monthly.totalSpent')}</th>
@@ -231,21 +363,21 @@ export default function MonthlyPlans({ user, fetchJson, managers, activities: re
             <th>{t('review.missingEvidence')}</th><th>{t('table.status')}</th><th>{t('table.actions')}</th>
           </tr></thead>
           <tbody>{review.operations.map((plan) => <tr key={plan.id} className={plan.id === openPlanId ? 'row-selected' : undefined}>
-            <td><strong>{operationName(plan.operation, language)}</strong></td>
-            <td>{plan.managerName || <span className="muted-cell">{t('table.unassigned')}</span>}</td>
-            <td>{formatUsd(plan.approvedBudget)}</td>
-            <td>{formatUsd(plan.totalSpent)}</td>
-            <td className={plan.remainingBalance < 0 ? 'over-budget' : undefined}>{formatUsd(plan.remainingBalance)}</td>
-            <td>{plan.completedCount}/{plan.activityCount}</td>
-            <td>{plan.outstandingCount}</td>
-            <td className={plan.expensesWithoutEvidence ? 'over-budget' : undefined}>
+            <td className="card-title-cell"><strong>{operationName(plan.operation, language)}</strong></td>
+            <td data-label={t('field.manager')}>{plan.managerName || <span className="muted-cell">{t('table.unassigned')}</span>}</td>
+            <td data-label={t('monthly.approvedAllocation')}>{formatUsd(plan.approvedBudget)}</td>
+            <td data-label={t('monthly.totalSpent')}>{formatUsd(plan.totalSpent)}</td>
+            <td data-label={t('monthly.remainingBalance')} className={plan.remainingBalance < 0 ? 'over-budget' : undefined}>{formatUsd(plan.remainingBalance)}</td>
+            <td data-label={t('review.completedActivities')}>{plan.completedCount}/{plan.activityCount}</td>
+            <td data-label={t('review.pendingActivities')}>{plan.outstandingCount}</td>
+            <td data-label={t('review.expensesWithoutEvidence')} className={plan.expensesWithoutEvidence ? 'over-budget' : undefined}>
               {plan.expenseCount - plan.expensesWithoutEvidence}/{plan.expenseCount} {t('review.documented')}
             </td>
-            <td className={plan.completedWithoutEvidence ? 'over-budget' : undefined}>
+            <td data-label={t('review.missingEvidence')} className={plan.completedWithoutEvidence ? 'over-budget' : undefined}>
               {plan.completedCount - plan.completedWithoutEvidence}/{plan.completedCount} {t('review.documented')}
             </td>
-            <td><span className={`status-badge ${planTone(plan.status)}`}>{t(`monthly.planStatus.${plan.status}`)}</span></td>
-            <td><button className="text-btn" type="button" onClick={() => openPlan(plan.id)}>{t('monthly.openPlan')}</button></td>
+            <td data-label={t('table.status')}><span className={`status-badge ${planTone(plan.status)}`}>{t(`monthly.planStatus.${plan.status}`)}</span></td>
+            <td className="card-actions"><button className="text-btn" type="button" onClick={() => onOpenPlan?.(plan.id)}>{t('monthly.openPlan')}</button></td>
           </tr>)}</tbody>
         </table></div> : <div className="empty-state"><strong>{t('monthly.noPlans')}</strong><span>{t('table.noData')}</span></div>}
       </section>
@@ -257,47 +389,64 @@ export default function MonthlyPlans({ user, fetchJson, managers, activities: re
         </div></div>
         <div className="form-grid">
           <label className="form-field"><span>{t('app.businessOperation')}</span>
-            <select value={newPlan.operation} onChange={(event) => setNewPlan({ operation: event.target.value, managerId: '' })}>
+            <select value={chosenOperation} onChange={(event) => setNewPlan({ operation: event.target.value, managerId: '' })}>
               {unplanned.map((operation) => <option key={operation.id} value={operation.id}>
                 {operationName(operation.id, language)}
               </option>)}
             </select>
           </label>
           <label className="form-field"><span>{t('monthly.responsibleManager')}</span>
-            <select required value={newPlan.managerId} onChange={(event) => setNewPlan({ ...newPlan, managerId: event.target.value })}>
+            <select required value={newPlan.managerId} onChange={(event) => setNewPlan({ operation: chosenOperation, managerId: event.target.value })}>
               <option value="">{t('form.selectManager')}</option>
               {managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}
             </select>
           </label>
         </div>
         {!managerOptions.length && <p className="decision-hint">{t('form.noManagerCovers')}</p>}
-        <button className="primary-btn" type="submit" disabled={!managerOptions.length}>{t('monthly.createPlan')}</button>
+        <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy || !managerOptions.length}>{t('monthly.createPlan')}</button></div>
       </form>}
     </>}
 
-    {detail && <PlanDetail
-      key={detail.plan.id}
-      detail={detail}
-      user={user}
-      isDirector={isDirector}
-      language={language}
-      t={t}
-      activityForm={activityForm}
-      setActivityForm={setActivityForm}
-      onAddActivity={addActivity}
-      onConfirm={confirmPlan}
-      onReopen={reopenPlan}
-      onSubmitReport={submitReport}
-      onAttach={attachActivity}
-      offPlanActivities={registerActivities.filter((item) => item.monthlyPlanId === null
-        && item.approvalStatus === 'approved'
-        && item.sector === detail.plan.operation
-        && !['Rejected', 'Cancelled'].includes(item.status))}
-      onDecideReport={decideReport}
-      onClose={() => { setDetail(null); setOpenPlanId(null); }}
-      onOpenActivity={null}
-    />}
+    {!isDirector && !review.operations.length && <div className="empty-state"><strong>{t('monthly.noPlans')}</strong><span>{t('table.noData')}</span></div>}
+
+    {detail && openPlanId && detail.plan.id === openPlanId && <DetailView
+      onClose={() => onClosePlan?.()}
+      label={`${operationName(detail.plan.operation, language)} · ${monthLabel(detail.plan.month, language)}`}
+    >
+      <PlanDetail
+        key={detail.plan.id}
+        detail={detail}
+        user={user}
+        isDirector={isDirector}
+        language={language}
+        t={t}
+        busy={busy}
+        managers={managers}
+        activityForm={activityForm}
+        setActivityForm={setActivityForm}
+        onAddActivity={addActivity}
+        onConfirm={confirmPlan}
+        onReopen={reopenPlan}
+        onSubmitReport={submitReport}
+        onAttach={attachActivity}
+        onUpdatePlan={updatePlan}
+        offPlanActivities={offPlan}
+        onDecideReport={decideReport}
+        onClose={() => onClosePlan?.()}
+      />
+    </DetailView>}
   </>;
+}
+
+// Plan statuses in the plan's own trail read in the viewer's language.
+function planTrailValue(field, value, t) {
+  if (value === null || value === undefined || value === '') return '—';
+  if (field === 'status') {
+    const key = `monthly.planStatus.${value}`;
+    const label = t(key);
+    return label === key ? value : label;
+  }
+  return value;
 }
 
 function planTone(status) {
@@ -307,16 +456,27 @@ function planTone(status) {
 }
 
 function PlanDetail({
-  detail, user, isDirector, language, t, activityForm, setActivityForm,
-  onAddActivity, onConfirm, onReopen, onSubmitReport, onDecideReport, onClose, onAttach, offPlanActivities = []
+  detail, user, isDirector, language, t, busy, managers = [], activityForm, setActivityForm,
+  onAddActivity, onConfirm, onReopen, onSubmitReport, onDecideReport, onClose, onAttach, onUpdatePlan, offPlanActivities = []
 }) {
   const { plan, activities, history, report } = detail;
   const [explanations, setExplanations] = useState({
     unusedBalanceExplanation: '', budgetDifferenceExplanation: ''
   });
+  const [settings, setSettings] = useState({ managerId: plan.managerId ? String(plan.managerId) : '', notes: plan.notes || '' });
+
+  // Re-read after a save, so the form shows what was actually stored.
+  useEffect(() => {
+    setSettings({ managerId: plan.managerId ? String(plan.managerId) : '', notes: plan.notes || '' });
+  }, [plan.managerId, plan.notes]);
 
   const isPlanManager = !isDirector && plan.managerId === user.id;
   const open = plan.status !== 'Closed';
+  const operationManagers = managers.filter((manager) => manager.coversAllSectors || manager.sector === plan.operation || manager.id === plan.managerId);
+  const settingsChanges = {};
+  if ((settings.managerId || '') !== (plan.managerId ? String(plan.managerId) : '')) settingsChanges.managerId = settings.managerId ? Number(settings.managerId) : null;
+  if (settings.notes.trim() !== (plan.notes || '')) settingsChanges.notes = settings.notes.trim();
+  const hasSettingsChanges = Object.keys(settingsChanges).length > 0;
 
   return <section className="panel detail-panel">
     <div className="panel-header">
@@ -328,7 +488,7 @@ function PlanDetail({
           {plan.confirmedByName ? ` · ${t('monthly.planStatus.Confirmed')}: ${plan.confirmedByName}` : ''}
         </span>
       </div>
-      <button className="text-btn" type="button" onClick={onClose}>{t('action.close')}</button>
+      <button className="text-btn hide-on-sheet" type="button" onClick={onClose}>{t('action.close')}</button>
     </div>
 
     {/* Section 2 and 3: the total, and what it is made of. */}
@@ -342,43 +502,44 @@ function PlanDetail({
       <Fact label={t('review.completedActivities')} value={`${plan.completedCount}/${plan.activityCount}`} />
       <Fact label={t('review.expensesWithoutEvidence')} value={plan.expensesWithoutEvidence} />
     </div>
+    {plan.notes && <p className="detail-notes">{plan.notes}</p>}
 
     <h3 className="form-section-title">
       {isDirector ? t('nav.activities') : t('monthly.myActivities')}
     </h3>
-    {activities.length ? <div className="table-wrap"><table>
+    {activities.length ? <div className="table-wrap"><table className="card-table">
       <thead><tr>
         <th>{t('table.activity')}</th><th>{t('field.priority')}</th>
         <th>{t('monthly.approvedAllocation')}</th><th>{t('monthly.totalSpent')}</th>
         <th>{t('expense.remainingOnActivity')}</th><th>{t('monthly.expectedCompletion')}</th>
-        <th>{t('table.status')}</th><th>{t('evidence.payment')}</th><th>{t('evidence.activity')}</th>
+        <th>{t('table.status')}</th><th>{t('evidence.payment')}</th><th>{t('evidence.activity')}</th><th>{t('table.actions')}</th>
       </tr></thead>
       <tbody>{activities.map((item) => <tr key={item.id}>
-        <td><strong>{item.activity}</strong><small>{item.description || item.category}</small></td>
-        <td>{t(`form.priority${item.priority}`)}</td>
-        <td>{formatUsd(item.approvedBudget)}</td>
-        <td>{formatUsd(item.spent)}</td>
-        <td className={item.remaining < 0 ? 'over-budget' : undefined}>{formatUsd(item.remaining)}</td>
-        <td>{formatDate(item.deadline, language)}</td>
-        <td><span className={`status-badge ${item.status === 'Completed' ? 'tone-done' : 'tone-waiting'}`}>
+        <td className="card-title-cell"><strong>{item.activity}</strong><small>{item.description || categoryLabel(item.category, t)}</small></td>
+        <td data-label={t('field.priority')}>{t(`form.priority${item.priority}`)}</td>
+        <td data-label={t('monthly.approvedAllocation')}>{formatUsd(item.approvedBudget)}</td>
+        <td data-label={t('monthly.totalSpent')}>{formatUsd(item.spent)}</td>
+        <td data-label={t('expense.remainingOnActivity')} className={item.remaining < 0 ? 'over-budget' : undefined}>{formatUsd(item.remaining)}</td>
+        <td data-label={t('monthly.expectedCompletion')}>{formatDate(item.deadline, language)}</td>
+        <td data-label={t('table.status')}><span className={`status-badge ${item.status === 'Completed' ? 'tone-done' : 'tone-waiting'}`}>
           {t(`status.${item.status}`)}
         </span></td>
-        <td className={item.expensesWithoutEvidence ? 'over-budget' : undefined}>
+        <td data-label={t('evidence.payment')} className={item.expensesWithoutEvidence ? 'over-budget' : undefined}>
           {item.expenseCount - item.expensesWithoutEvidence}/{item.expenseCount}
         </td>
-        <td className={item.status === 'Completed' && !item.activityEvidenceCount ? 'over-budget' : undefined}>
+        <td data-label={t('evidence.activity')} className={item.status === 'Completed' && !item.activityEvidenceCount ? 'over-budget' : undefined}>
           {item.activityEvidenceCount}
         </td>
+        {/* Expenses and evidence are recorded on the activity itself. */}
+        <td className="card-actions"><a className="text-btn" href={`#/activities/${encodeURIComponent(item.id)}`}>{t('action.open')}</a></td>
       </tr>)}</tbody>
-      <tfoot><tr className="total-row">
-        <td colSpan="2"><strong>{plan.status === 'Draft' ? t('monthly.totalToGive') : t('monthly.totalApprovedBudget')}</strong></td>
-        <td><strong>{formatUsd(plan.status === 'Draft' ? plan.plannedBudget : plan.approvedBudget)}</strong></td>
-        <td><strong>{formatUsd(plan.totalSpent)}</strong></td>
-        <td><strong>{formatUsd(plan.remainingBalance)}</strong></td>
-        <td colSpan="4" />
-      </tr></tfoot>
     </table></div> : <div className="empty-state">
       <strong>{t('monthly.noActivitiesInPlan')}</strong><span>{t('table.noData')}</span>
+    </div>}
+    {activities.length > 0 && <div className="totals-line">
+      <span>{plan.status === 'Draft' ? t('monthly.totalToGive') : t('monthly.totalApprovedBudget')}: <strong>{formatUsd(plan.status === 'Draft' ? plan.plannedBudget : plan.approvedBudget)}</strong></span>
+      <span>{t('monthly.totalSpent')}: <strong>{formatUsd(plan.totalSpent)}</strong></span>
+      <span>{t('monthly.remainingBalance')}: <strong className={plan.remainingBalance < 0 ? 'over-budget' : undefined}>{formatUsd(plan.remainingBalance)}</strong></span>
     </div>}
 
     {/* Section 2: the Director confirms the plan, which records the allocation
@@ -389,25 +550,46 @@ function PlanDetail({
         <strong>{formatUsd(plan.plannedBudget)}</strong>
         <small>{t('monthly.confirmHint')}</small>
       </div>
-      <button className="primary-btn" type="button" disabled={!activities.length || !plan.managerId}
+      <button className="primary-btn" type="button" disabled={busy || !activities.length || !plan.managerId}
         onClick={() => onConfirm(plan)}>{t('monthly.confirmPlan')}</button>
     </div>}
     {isDirector && plan.status !== 'Draft' && <div className="button-row">
-      <button className="secondary-btn" type="button" onClick={() => onReopen(plan)}>{t('monthly.reopen')}</button>
+      <button className="secondary-btn" type="button" disabled={busy} onClick={() => onReopen(plan)}>{t('monthly.reopen')}</button>
     </div>}
+
+    {/* Section 10: who runs the month, and what the Director noted about it. */}
+    {isDirector && open && <form className="decision-form" onSubmit={(event) => {
+      event.preventDefault();
+      if (hasSettingsChanges) onUpdatePlan(plan, settingsChanges);
+    }}>
+      <h3 className="form-section-title">{t('monthly.planSettings')}</h3>
+      <div className="form-grid">
+        <label className="form-field"><span>{t('monthly.responsibleManager')}</span>
+          <select value={settings.managerId} onChange={(event) => setSettings({ ...settings, managerId: event.target.value })}>
+            <option value="">{t('form.selectManager')}</option>
+            {operationManagers.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}
+          </select>
+        </label>
+        <label className="form-field form-field-wide"><span>{t('field.notes')}</span>
+          <textarea rows="2" value={settings.notes} onChange={(event) => setSettings({ ...settings, notes: event.target.value })} />
+        </label>
+      </div>
+      {settingsChanges.managerId !== undefined && <p className="decision-hint">{t('monthly.managerChangeHint')}</p>}
+      <div className="form-submit-bar"><button className="secondary-btn" type="submit" disabled={busy || !hasSettingsChanges}>{t('movement.saveChanges')}</button></div>
+    </form>}
 
     {/* Section 1: the Director builds the month's activities. */}
     {isDirector && open && <form className="decision-form" onSubmit={onAddActivity}>
       <h3 className="form-section-title">{t('monthly.addActivity')}</h3>
       <div className="form-grid">
         <label className="form-field"><span>{t('field.activity')}</span>
-          <input required value={activityForm.activity} onChange={(event) => setActivityForm({ ...activityForm, activity: event.target.value })} />
+          <input required maxLength="200" value={activityForm.activity} onChange={(event) => setActivityForm({ ...activityForm, activity: event.target.value })} />
         </label>
         <label className="form-field"><span>{t('field.category')}</span>
-          <input required value={activityForm.category} onChange={(event) => setActivityForm({ ...activityForm, category: event.target.value })} />
+          <input required maxLength="100" value={activityForm.category} onChange={(event) => setActivityForm({ ...activityForm, category: event.target.value })} />
         </label>
         <label className="form-field"><span>{t('monthly.approvedAllocation')} (USD)</span>
-          <input required type="number" min="0" step="0.01" value={activityForm.approvedBudget}
+          <input required type="number" inputMode="decimal" min="0" step="0.01" value={activityForm.approvedBudget}
             onChange={(event) => setActivityForm({ ...activityForm, approvedBudget: event.target.value })} />
         </label>
         <label className="form-field"><span>{t('field.priority')}</span>
@@ -425,23 +607,23 @@ function PlanDetail({
           <input value={activityForm.adminNote} onChange={(event) => setActivityForm({ ...activityForm, adminNote: event.target.value })} />
         </label>
       </div>
-      <button className="primary-btn" type="submit">{t('monthly.addActivity')}</button>
+      <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('monthly.addActivity')}</button></div>
     </form>}
 
     {/* Section 4: approved work the Director may fold into this month. */}
     {isDirector && open && offPlanActivities.length > 0 && <>
       <h3 className="form-section-title">{t('monthly.attachActivity')}</h3>
       <p className="detail-notes muted-cell">{t('monthly.offPlanHint')}</p>
-      <div className="table-wrap"><table>
+      <div className="table-wrap"><table className="card-table">
         <thead><tr>
           <th>{t('table.activity')}</th><th>{t('table.createdBy')}</th>
           <th>{t('monthly.approvedAllocation')}</th><th>{t('table.actions')}</th>
         </tr></thead>
         <tbody>{offPlanActivities.map((item) => <tr key={item.id}>
-          <td><strong>{item.activity}</strong><small>{item.category}</small></td>
-          <td>{item.createdByName || '—'}</td>
-          <td>{formatUsd(item.approvedBudget ?? item.requestedBudget)}</td>
-          <td><button className="secondary-btn compact" type="button" onClick={() => onAttach(plan, item.id)}>
+          <td className="card-title-cell"><strong>{item.activity}</strong><small>{categoryLabel(item.category, t)}</small></td>
+          <td data-label={t('table.createdBy')}>{item.createdByName || '—'}</td>
+          <td data-label={t('monthly.approvedAllocation')}>{formatUsd(item.approvedBudget ?? item.requestedBudget)}</td>
+          <td className="card-actions"><button className="secondary-btn compact" type="button" disabled={busy} onClick={() => onAttach(plan, item)}>
             {t('monthly.attachActivity')}
           </button></td>
         </tr>)}</tbody>
@@ -470,15 +652,20 @@ function PlanDetail({
         <strong>{t('monthend.budgetDifference')}:</strong> {report.budgetDifferenceExplanation}
       </p>}
       {report.reviewNote && <p className="detail-notes admin-note">&ldquo;{report.reviewNote}&rdquo;</p>}
-      {isDirector && report.status === 'Submitted' && <div className="button-row">
-        <button className="primary-btn" type="button" onClick={() => onDecideReport(plan, 'Accepted')}>{t('monthend.accept')}</button>
-        <button className="danger-btn outlined" type="button" onClick={() => onDecideReport(plan, 'Returned')}>{t('monthend.return')}</button>
+      {isDirector && report.status === 'Submitted' && plan.status !== 'Closed' && <div className="button-row">
+        <button className="primary-btn" type="button" disabled={busy} onClick={() => onDecideReport(plan, 'Accepted')}>{t('monthend.accept')}</button>
+        <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onDecideReport(plan, 'Returned')}>{t('monthend.return')}</button>
       </div>}
     </> : <p className="detail-notes muted-cell">{t('monthend.notSubmitted')}</p>}
 
     {isPlanManager && plan.status === 'Confirmed' && (!report || report.status === 'Returned') && <form
       className="decision-form"
-      onSubmit={(event) => { event.preventDefault(); onSubmitReport(plan, explanations); }}
+      onSubmit={(event) => {
+        event.preventDefault();
+        Promise.resolve(onSubmitReport(plan, explanations)).then((filed) => {
+          if (filed) setExplanations({ unusedBalanceExplanation: '', budgetDifferenceExplanation: '' });
+        });
+      }}
     >
       <div className="form-grid">
         <label className="form-field form-field-wide"><span>{t('monthend.unusedBalance')}</span>
@@ -490,13 +677,13 @@ function PlanDetail({
             onChange={(event) => setExplanations({ ...explanations, budgetDifferenceExplanation: event.target.value })} />
         </label>
       </div>
-      <button className="primary-btn" type="submit">{t('monthend.submit')}</button>
+      <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('monthend.submit')}</button></div>
     </form>}
 
     <h3 className="form-section-title">{t('monthly.planHistory')}</h3>
     {history.length ? <ul className="history-list">{history.map((entry) => <li key={entry.id}>
-      <strong>{entry.action}</strong>
-      {entry.field && <span> {entry.oldValue ?? '—'} &rarr; {entry.newValue ?? '—'}</span>}
+      <strong>{trailActionLabel(entry.action, t)}</strong>
+      {entry.field && <span> {planTrailValue(entry.field, entry.oldValue, t)} &rarr; {planTrailValue(entry.field, entry.newValue, t)}</span>}
       <small>{entry.actorName} · {new Date(entry.createdAt).toLocaleString(language)}</small>
       {entry.note && <small className="justification">{entry.note}</small>}
     </li>)}</ul> : <div className="empty-state"><strong>{t('empty.noHistory')}</strong><span>{t('empty.noHistoryHint')}</span></div>}
@@ -516,45 +703,48 @@ function Fact({ label, value }) {
 // Section 5, 6 and 8, as it appears on the activity review screen. The remaining
 // balance is shown before the manager types, and the block is explained in the
 // same words the API uses when it refuses.
-export function ExpensePanel({ activity, expenses, summary, canRecord, onRecord, onRemoveExpense, canRemove }) {
+export function ExpensePanel({ expenses, summary, canRecord, onRecord, onRemoveExpense, canRemove, busy = false }) {
   const { language, t } = useI18n();
   const [form, setForm] = useState({
-    amount: '', spentOn: new Date().toISOString().slice(0, 10),
+    amount: '', spentOn: todayLocal(),
     paymentMethod: 'Cash', description: ''
   });
 
+  // A failed summary is not a zero balance: without one nothing is presumed
+  // over budget, and the API remains the judge of the spend.
+  const known = summary !== null && summary !== undefined;
   const remaining = summary?.remaining ?? 0;
   const typed = Number(form.amount || 0);
   // Warned before submitting, refused by the API regardless.
-  const overBudget = typed > 0 && Math.round(typed * 100) > Math.round(remaining * 100);
+  const overBudget = known && typed > 0 && Math.round(typed * 100) > Math.round(remaining * 100);
 
   return <>
     <h3 className="form-section-title">{t('expense.title')}</h3>
     <div className="detail-facts">
-      <Fact label={t('monthly.approvedAllocation')} value={formatUsd(summary?.approvedBudget ?? 0)} />
-      <Fact label={t('monthly.totalSpent')} value={formatUsd(summary?.totalSpent ?? 0)} />
+      <Fact label={t('monthly.approvedAllocation')} value={known ? formatUsd(summary.approvedBudget) : '—'} />
+      <Fact label={t('monthly.totalSpent')} value={known ? formatUsd(summary.totalSpent) : '—'} />
       <Fact label={t('expense.remainingOnActivity')}
-        value={<span className={remaining < 0 ? 'over-budget' : undefined}>{formatUsd(remaining)}</span>} />
+        value={known ? <span className={remaining < 0 ? 'over-budget' : undefined}>{formatUsd(remaining)}</span> : '—'} />
     </div>
 
-    {expenses.length ? <div className="table-wrap"><table>
+    {expenses.length ? <div className="table-wrap"><table className="card-table">
       <thead><tr>
-        <th>{t('expense.dateSpent')}</th><th>{t('field.description')}</th>
+        <th>{t('field.description')}</th><th>{t('expense.dateSpent')}</th>
         <th>{t('expense.paymentMethod')}</th><th>{t('expense.amountSpent')}</th>
         <th>{t('evidence.payment')}</th><th>{t('expense.recordedBy')}</th>
         {canRemove && <th>{t('table.actions')}</th>}
       </tr></thead>
       <tbody>{expenses.map((expense) => <tr key={expense.id}>
-        <td>{formatDate(expense.spentOn, language)}</td>
-        <td>{expense.description}</td>
-        <td>{t(`pmethod.${expense.paymentMethod}`)}</td>
-        <td>{formatUsd(expense.amount)}</td>
-        <td className={expense.evidenceCount ? undefined : 'over-budget'}>
+        <td className="card-title-cell"><strong>{expense.description}</strong></td>
+        <td data-label={t('expense.dateSpent')}>{formatDate(expense.spentOn, language)}</td>
+        <td data-label={t('expense.paymentMethod')}>{t(`pmethod.${expense.paymentMethod}`)}</td>
+        <td data-label={t('expense.amountSpent')}>{formatUsd(expense.amount)}</td>
+        <td data-label={t('evidence.payment')} className={expense.evidenceCount ? undefined : 'over-budget'}>
           {expense.evidenceCount || t('expense.noEvidence')}
         </td>
-        <td>{expense.recordedByName || '—'}</td>
-        {canRemove && <td>
-          <button className="danger-btn" type="button" onClick={() => onRemoveExpense(expense)}>{t('action.remove')}</button>
+        <td data-label={t('expense.recordedBy')}>{expense.recordedByName || '—'}</td>
+        {canRemove && <td className="card-actions">
+          <button className="danger-btn" type="button" disabled={busy} onClick={() => onRemoveExpense(expense)}>{t('action.remove')}</button>
         </td>}
       </tr>)}</tbody>
     </table></div> : <div className="empty-state">
@@ -563,16 +753,16 @@ export function ExpensePanel({ activity, expenses, summary, canRecord, onRecord,
 
     {canRecord && <form className="decision-form" onSubmit={(event) => {
       event.preventDefault();
-      onRecord({ ...form, amount: Number(form.amount || 0) }, () => setForm({ ...form, amount: '', description: '' }));
+      onRecord({ ...form, amount: Number(form.amount || 0) }, () => setForm((current) => ({ ...current, amount: '', description: '' })));
     }}>
       <h3 className="form-section-title">{t('expense.record')}</h3>
       <div className="form-grid">
         <label className="form-field"><span>{t('expense.amountSpent')} (USD)</span>
-          <input required type="number" min="0.01" step="0.01" value={form.amount}
+          <input required type="number" inputMode="decimal" min="0.01" step="0.01" value={form.amount}
             onChange={(event) => setForm({ ...form, amount: event.target.value })} />
         </label>
         <label className="form-field"><span>{t('expense.dateSpent')}</span>
-          <input required type="date" value={form.spentOn} onChange={(event) => setForm({ ...form, spentOn: event.target.value })} />
+          <input required type="date" max={todayLocal()} value={form.spentOn} onChange={(event) => setForm({ ...form, spentOn: event.target.value })} />
         </label>
         <label className="form-field"><span>{t('expense.paymentMethod')}</span>
           <select value={form.paymentMethod} onChange={(event) => setForm({ ...form, paymentMethod: event.target.value })}>
@@ -583,8 +773,8 @@ export function ExpensePanel({ activity, expenses, summary, canRecord, onRecord,
           <input required value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
         </label>
       </div>
-      {overBudget && <p className="decision-hint over-budget">{t('expense.overBudget')}</p>}
-      <button className="primary-btn" type="submit" disabled={overBudget}>{t('expense.record')}</button>
+      {overBudget && <p className="decision-hint over-budget">{t('expense.overBudget')} <a href="#budget-requests" onClick={(event) => { event.preventDefault(); document.getElementById('budget-requests')?.scrollIntoView({ behavior: 'smooth' }); }}>{t('budget.request')}</a></p>}
+      <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy || overBudget}>{t('expense.record')}</button></div>
     </form>}
   </>;
 }

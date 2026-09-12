@@ -21,9 +21,51 @@ export function requiredText(value) {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-export function validNumber(value, { minimum = 0, maximum } = {}) {
+// Money columns are NUMERIC(18,2), which tops out just under 10^16. Anything
+// larger overflows in the database and used to come back as a 500, so the
+// ceiling is enforced here, where it can be answered with a 400.
+const LARGEST_AMOUNT = 1e15;
+
+export function validNumber(value, { minimum = 0, maximum = LARGEST_AMOUNT } = {}) {
   const number = Number(value);
-  return Number.isFinite(number) && number >= minimum && (maximum === undefined || number <= maximum);
+  return Number.isFinite(number) && number >= minimum && number <= maximum;
+}
+
+// A serial id from a URL or a body. Anything that is not a positive integer
+// Postgres can hold is refused here rather than cast in SQL, where "abc" or
+// "1.5" surfaced to the user as "Server or database error".
+export function parseId(value) {
+  const number = typeof value === 'number' ? value : Number(String(value ?? '').trim());
+  return Number.isInteger(number) && number > 0 && number <= 2147483647 ? number : null;
+}
+
+// A calendar date as 'YYYY-MM-DD', and a real one. The shape alone lets
+// 2024-02-30 through, which Postgres then refuses; Date.parse quietly rolls it
+// over to 1 March instead. Building the date and reading its parts back is the
+// only check that catches both.
+export function isValidDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+// The Content-Disposition header for a stored file. The original name is
+// whatever the uploader's device called it, and Node refuses a header carrying
+// characters outside Latin-1 -- a receipt named in Kinyarwanda or with an emoji
+// could never be opened. The plain filename is an ASCII fallback; filename*
+// carries the real name, percent-encoded as RFC 5987 requires.
+export function contentDisposition(originalName, disposition = 'inline') {
+  const name = String(originalName || 'file');
+  const fallback = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '') || 'file';
+  let encoded;
+  try {
+    encoded = encodeURIComponent(name).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  } catch {
+    // A lone surrogate cannot be encoded; the fallback alone is still a name.
+    return `${disposition}; filename="${fallback}"`;
+  }
+  return `${disposition}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 
 export function isAdmin(user) {

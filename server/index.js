@@ -8,8 +8,10 @@ import { pathToFileURL } from 'node:url';
 import { initDatabase, pool } from './db/database.js';
 import { sectors } from './data/seedData.js';
 import { authMiddleware, jwtSecret } from './lib/auth.js';
-import { asyncRoute, hasFullScope, isAdmin, managerScope, requiredText, sectorIds, validNumber, validateSector, withinScope } from './lib/http.js';
+import { asyncRoute, hasFullScope, isAdmin, managerScope, parseId, requiredText, validNumber, validateSector, withinScope } from './lib/http.js';
 import { pendingForMeSql } from './lib/approvals.js';
+import { getCurrentRate } from './lib/rates.js';
+import { deleteFile } from './lib/storage.js';
 import movementRouter, { mapMovement } from './routes/movements.js';
 import rateRouter from './routes/rates.js';
 import userRouter from './routes/users.js';
@@ -65,6 +67,12 @@ function mapApproval(row) {
   };
 }
 
+// Vercel (and any reverse proxy) puts the client address in X-Forwarded-For.
+// Without trusting the first hop, every request appears to come from the proxy,
+// so the login limiter counted the whole organisation as one caller and ten
+// mistyped passwords anywhere locked everybody out.
+app.set('trust proxy', 1);
+
 app.use(helmet());
 app.use(cors({ origin: allowedOrigins, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
@@ -77,7 +85,7 @@ const loginLimiter = rateLimit({
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   skipSuccessfulRequests: true,
-  message: { message: 'Too many login attempts. Try again in a few minutes.' }
+  message: { code: 'TOO_MANY_ATTEMPTS', message: 'Too many login attempts. Try again in a few minutes.' }
 });
 
 app.get('/api/health', asyncRoute(async (req, res) => {
@@ -117,36 +125,30 @@ app.get('/api/managers', authMiddleware, asyncRoute(async (req, res) => {
 // leave the database, so a password is reset, never read back.
 app.use('/api/users', authMiddleware, userRouter);
 
-app.post('/api/managers', authMiddleware, asyncRoute(async (req, res) => {
-  if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the administrator can add managers.' });
-  const { username, name, password, sector } = req.body || {};
-  if (!requiredText(username) || !requiredText(name) || !requiredText(password) || password.length < 6 || !sectorIds.has(sector)) {
-    return res.status(400).json({ message: 'Manager username, name, password, and sector are required.' });
-  }
-
-  const result = await pool.query(
-    'INSERT INTO users (username, password_hash, name, role, sector) VALUES ($1, $2, $3, $4, $5) RETURNING id, username, name, role, sector',
-    [username.trim(), bcrypt.hashSync(password, 10), name.trim(), 'manager', sector]
-  );
-  res.status(201).json(result.rows[0]);
-}));
-
 app.post('/api/auth/login', loginLimiter, asyncRoute(async (req, res) => {
   const { username, password } = req.body || {};
   const result = await pool.query(
     'SELECT id, username, password_hash, name, role, sector, status, access_level, covers_all_sectors FROM users WHERE username = $1',
-    [username]
+    [typeof username === 'string' ? username.trim() : '']
   );
   const user = result.rows[0];
 
-  if (!user || !bcrypt.compareSync(password || '', user.password_hash)) {
-    return res.status(401).json({ message: 'Invalid username or password.' });
+  // Accounts have been created with the password trimmed, so a password typed
+  // with a stray trailing space was hashed without it. Checking the exact text
+  // first and the trimmed text second lets both sign in.
+  const typed = typeof password === 'string' ? password : '';
+  const matches = Boolean(user) && (bcrypt.compareSync(typed, user.password_hash)
+    || (typed.trim() !== typed && bcrypt.compareSync(typed.trim(), user.password_hash)));
+  if (!matches) {
+    return res.status(401).json({ code: 'BAD_CREDENTIALS', message: 'Invalid username or password.' });
   }
   // A suspended or revoked account is refused at the door, so no token is ever
   // minted for one. authMiddleware checks the same thing again on every
   // request, which is what makes a suspension bite on an already-issued token.
   if ((user.status || 'active') !== 'active') {
     return res.status(403).json({
+      code: 'ACCOUNT_INACTIVE',
+      status: user.status,
       message: user.status === 'suspended'
         ? 'This account is suspended. Contact the administrator.'
         : 'Access to this account has been revoked.'
@@ -188,10 +190,26 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
   const whereSector = scoped ? ' WHERE sector = $1' : '';
   const andSector = scoped ? ' AND sector = $1' : '';
 
+  // Movement spend is reported in RWF, so every movement is converted from its
+  // own currency at the rate frozen onto it (the current reference rate when it
+  // has none). Summing the raw column added USD and CDF amounts to RWF ones.
+  // Scope follows the Movements module: a Logistics manager sees every movement,
+  // anyone else the movements that supported their own operation -- every row's
+  // sector is 'movement', so filtering on it showed other managers nothing.
+  const rate = await getCurrentRate(pool);
+  const movementValues = [rate.rwfPerUsd, rate.cdfPerUsd];
+  const movementScope = scoped && req.user.sector !== 'movement'
+    ? (movementValues.push(req.user.sector), ` WHERE m.related_area = $${movementValues.length}`)
+    : '';
+  const movementRwf = `CASE m.currency
+      WHEN 'USD' THEN m.cost * COALESCE(NULLIF(m.fx_rwf_per_usd, 0), $1)
+      WHEN 'CDF' THEN m.cost / COALESCE(NULLIF(m.fx_cdf_per_usd, 0), $2) * COALESCE(NULLIF(m.fx_rwf_per_usd, 0), $1)
+      ELSE m.cost END`;
+
   const [projectStats, approvalStats, movementStats, activityStats, operationsStats] = await Promise.all([
     pool.query(`SELECT COUNT(*)::int AS total_projects, COALESCE(SUM(budget), 0) AS total_budget, COALESCE(SUM(spent), 0) AS total_spent, COALESCE(AVG(progress), 0) AS completion_rate FROM projects${whereSector}`, scopeValues),
     pool.query(`SELECT COUNT(*)::int AS pending_approvals FROM approvals WHERE status = 'Pending'${andSector}`, scopeValues),
-    pool.query(`SELECT COALESCE(SUM(cost), 0) AS movement_spend FROM movements${whereSector}`, scopeValues),
+    pool.query(`SELECT COALESCE(SUM(${movementRwf}), 0) AS movement_spend FROM movements m${movementScope}`, movementValues),
     pool.query(`SELECT COUNT(*)::int AS total_activities,
       COUNT(*) FILTER (WHERE status = 'Completed')::int AS completed_activities,
       COUNT(*) FILTER (WHERE approved = TRUE)::int AS approved_activities,
@@ -248,7 +266,10 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
       COUNT(*) FILTER (WHERE status = 'Completed')::int AS completed_activities
       FROM activities${whereSector} GROUP BY sector`, scopeValues),
     pool.query(`SELECT sector, COUNT(*)::int AS approvals_pending FROM approvals WHERE status = 'Pending'${andSector} GROUP BY sector`, scopeValues),
-    pool.query(`SELECT sector, COALESCE(SUM(cost), 0) AS movement_spend FROM movements${whereSector} GROUP BY sector`, scopeValues)
+    // Per operation, a movement counts towards the operation it supported, and
+    // a standalone one towards Movements & Facilitation itself.
+    pool.query(`SELECT COALESCE(m.related_area, 'movement') AS sector, COALESCE(SUM(${movementRwf}), 0) AS movement_spend
+      FROM movements m${movementScope} GROUP BY COALESCE(m.related_area, 'movement')`, movementValues)
   ]);
 
   const byId = (result) => new Map(result.rows.map((row) => [row.sector, row]));
@@ -403,88 +424,161 @@ app.get('/api/projects', authMiddleware, asyncRoute(async (req, res) => {
   res.json(result.rows.map(mapProject));
 }));
 
-app.post('/api/projects', authMiddleware, asyncRoute(async (req, res) => {
-  if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the super-admin can create projects.' });
-  const payload = req.body || {};
-  const sector = validateSector(payload.sector, 'agriculture');
-  if (!sector || !requiredText(payload.name) || !requiredText(payload.location) || !requiredText(payload.owner)) {
-    return res.status(400).json({ message: 'Project name, sector, location, and owner are required.' });
-  }
-  const managerId = payload.managerId ? Number(payload.managerId) : null;
-  if (managerId && !(await pool.query("SELECT id FROM users WHERE id = $1 AND role = 'manager'", [managerId])).rowCount) {
-    return res.status(400).json({ message: 'Selected manager is invalid.' });
-  }
-  if (!validNumber(payload.progress, { minimum: 0, maximum: 100 }) || !validNumber(payload.budget) || !validNumber(payload.spent)) {
-    return res.status(400).json({ message: 'Progress must be 0-100, and budget/spent must be valid non-negative numbers.' });
-  }
+const PROJECT_STATUSES = ['On Track', 'In Review', 'Delayed', 'Healthy'];
 
-  const id = payload.id || `PRJ-${Date.now()}`;
+// One reading of a project body for create and edit, so the two cannot drift.
+// Every value the table is strict about -- the NOT NULL text, INTEGER progress,
+// NUMERIC money -- is checked here and answered with a 400, rather than being
+// discovered by Postgres and reported as a server error. Money that failed
+// Number() used to be stored as NaN and turned the dashboard into "RWF NaNM".
+function readProjectPayload(payload, current = null) {
+  const pick = (field, fallback) => (payload[field] === undefined ? fallback : payload[field]);
+  const project = {
+    name: pick('name', current?.name),
+    sector: validateSector(payload.sector, current?.sector || 'agriculture'),
+    location: pick('location', current?.location),
+    owner: pick('owner', current?.owner),
+    status: pick('status', current?.status || 'On Track'),
+    progress: pick('progress', current?.progress ?? 0),
+    budget: pick('budget', current?.budget ?? 0),
+    spent: pick('spent', current?.spent ?? 0),
+    category: pick('category', current?.category || 'General')
+  };
+  if (!project.sector) return { error: 'A valid business operation is required.' };
+  if (!requiredText(project.name) || !requiredText(project.location) || !requiredText(project.owner)) {
+    return { error: 'Project name, business operation, location, and owner are required.' };
+  }
+  if (project.name.trim().length > 200 || project.location.trim().length > 200 || project.owner.trim().length > 200) {
+    return { error: 'Project name, location and owner can be at most 200 characters.' };
+  }
+  if (!PROJECT_STATUSES.includes(project.status)) return { error: 'Project status is invalid.' };
+  const progress = Number(project.progress === '' ? 0 : project.progress);
+  if (!Number.isInteger(progress) || progress < 0 || progress > 100) {
+    return { error: 'Progress must be a whole number from 0 to 100.' };
+  }
+  if (!validNumber(project.budget === '' ? 0 : project.budget) || !validNumber(project.spent === '' ? 0 : project.spent)) {
+    return { error: 'Budget and spent must be valid non-negative numbers.' };
+  }
+  return {
+    project: {
+      name: project.name.trim(),
+      sector: project.sector,
+      location: project.location.trim(),
+      owner: project.owner.trim(),
+      status: project.status,
+      progress,
+      budget: Number(project.budget || 0),
+      spent: Number(project.spent || 0),
+      category: (typeof project.category === 'string' && project.category.trim()) ? project.category.trim().slice(0, 100) : 'General'
+    }
+  };
+}
+
+// A project's manager has to work the project's own operation; named on a
+// project they cannot see, they would be responsible for work they cannot open.
+async function checkProjectManager(rawManagerId, sector) {
+  if (rawManagerId === null || rawManagerId === undefined || rawManagerId === '') return { managerId: null };
+  const managerId = parseId(rawManagerId);
+  if (!managerId) return { error: 'Selected manager is invalid.' };
+  const found = await pool.query(
+    "SELECT id, sector, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager' AND status = 'active'",
+    [managerId]
+  );
+  if (!found.rowCount) return { error: 'Selected manager is invalid.' };
+  // A manager covering every operation may manage a project in any of them.
+  if (!withinScope(found.rows[0], sector)) return { error: 'That manager works in a different business operation.' };
+  return { managerId };
+}
+
+app.post('/api/projects', authMiddleware, asyncRoute(async (req, res) => {
+  if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the Director can create projects.' });
+  const payload = req.body || {};
+  const { project, error } = readProjectPayload(payload);
+  if (error) return res.status(400).json({ message: error });
+  const manager = await checkProjectManager(payload.managerId, project.sector);
+  if (manager.error) return res.status(400).json({ message: manager.error });
+
+  const id = `PRJ-${Date.now()}`;
   const result = await pool.query(
     `INSERT INTO projects (id, name, sector, manager_id, location, owner, status, progress, budget, spent, category)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
      RETURNING *`,
-    [id, payload.name, sector, managerId, payload.location, payload.owner, payload.status || 'On Track', Number(payload.progress || 0), Number(payload.budget || 0), Number(payload.spent || 0), payload.category || 'General']
+    [id, project.name, project.sector, manager.managerId, project.location, project.owner, project.status, project.progress, project.budget, project.spent, project.category]
   );
   res.status(201).json(mapProject(result.rows[0]));
 }));
 
 app.put('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
   const payload = req.body || {};
-  const sector = validateSector(payload.sector, 'agriculture');
-  if (!sector) {
-    return res.status(400).json({ message: 'A valid sector is required.' });
-  }
-  const existingProject = await pool.query('SELECT sector FROM projects WHERE id = $1', [req.params.id]);
+  const existingProject = await pool.query('SELECT * FROM projects WHERE id = $1', [req.params.id]);
   if (!existingProject.rowCount) return res.status(404).json({ message: 'Project not found.' });
+  const current = existingProject.rows[0];
 
   // Authorize against the sector the project is in now, not the one the caller
   // sent, and refuse to let a manager move a project out of their own sector.
-  if (!withinScope(req.user, existingProject.rows[0].sector)) {
+  if (!isAdmin(req.user) && (req.user.role !== 'manager' || !withinScope(req.user, current.sector))) {
     return res.status(403).json({ message: 'Managers can only update projects in their assigned sector.' });
   }
-  if (!withinScope(req.user, sector)) {
+  // Anything left out of the body keeps its current value. Defaulting a missing
+  // sector to 'agriculture' silently moved projects the Director edited.
+  const { project, error } = readProjectPayload(payload, current);
+  if (error) return res.status(400).json({ message: error });
+  if (!withinScope(req.user, project.sector)) {
     return res.status(403).json({ message: 'Managers cannot move a project to another sector.' });
   }
 
-  const managerId = payload.managerId ? Number(payload.managerId) : null;
-  if (managerId && !(await pool.query("SELECT id FROM users WHERE id = $1 AND role = 'manager'", [managerId])).rowCount) {
-    return res.status(400).json({ message: 'Selected manager is invalid.' });
+  // Who manages a project is the Director's call, exactly as on PATCH /manager.
+  let managerId = current.manager_id;
+  if (Object.prototype.hasOwnProperty.call(payload, 'managerId')) {
+    const manager = await checkProjectManager(payload.managerId, project.sector);
+    if (manager.error) return res.status(400).json({ message: manager.error });
+    if (manager.managerId !== current.manager_id && !isAdmin(req.user)) {
+      return res.status(403).json({ message: 'Only the Director can assign a project manager.' });
+    }
+    managerId = manager.managerId;
+  } else if (project.sector !== current.sector) {
+    managerId = null;
   }
+
   const result = await pool.query(
     `UPDATE projects
      SET name = $2, sector = $3, manager_id = $4, location = $5, owner = $6, status = $7, progress = $8,
        budget = $9, spent = $10, category = $11, updated_at = NOW()
-     WHERE id = $1${hasFullScope(req.user) ? '' : ' AND sector = $12'}
+     WHERE id = $1
      RETURNING *`,
-    hasFullScope(req.user)
-      ? [req.params.id, payload.name, sector, managerId, payload.location, payload.owner, payload.status, Number(payload.progress || 0), Number(payload.budget || 0), Number(payload.spent || 0), payload.category || 'General']
-      : [req.params.id, payload.name, sector, managerId, payload.location, payload.owner, payload.status, Number(payload.progress || 0), Number(payload.budget || 0), Number(payload.spent || 0), payload.category || 'General', req.user.sector]
+    [current.id, project.name, project.sector, managerId, project.location, project.owner, project.status, project.progress, project.budget, project.spent, project.category]
   );
-
-  if (!result.rowCount) return res.status(404).json({ message: 'Project not found.' });
   res.json(mapProject(result.rows[0]));
 }));
 
 app.patch('/api/projects/:id/manager', authMiddleware, asyncRoute(async (req, res) => {
-  if (req.user.role !== 'super-admin') return res.status(403).json({ message: 'Only the administrator can assign managers.' });
-  const managerId = req.body?.managerId ? Number(req.body.managerId) : null;
-  if (managerId && !(await pool.query("SELECT id FROM users WHERE id = $1 AND role = 'manager'", [managerId])).rowCount) {
-    return res.status(400).json({ message: 'Selected manager is invalid.' });
-  }
+  if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the Director can assign managers.' });
+  const existing = await pool.query('SELECT sector FROM projects WHERE id = $1', [req.params.id]);
+  if (!existing.rowCount) return res.status(404).json({ message: 'Project not found.' });
+  const manager = await checkProjectManager(req.body?.managerId, existing.rows[0].sector);
+  if (manager.error) return res.status(400).json({ message: manager.error });
 
   const result = await pool.query(
     `UPDATE projects SET manager_id = $2, updated_at = NOW() WHERE id = $1
      RETURNING *, (SELECT name FROM users WHERE id = manager_id) AS manager_name`,
-    [req.params.id, managerId]
+    [req.params.id, manager.managerId]
   );
   if (!result.rowCount) return res.status(404).json({ message: 'Project not found.' });
   res.json(mapProject(result.rows[0]));
 }));
 
 app.delete('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
-  if (req.user.role !== 'super-admin') return res.status(403).json({ message: 'Only the administrator can delete projects.' });
-  const result = await pool.query(`DELETE FROM projects WHERE id = $1${isAdmin(req.user) ? '' : ' AND sector = $2'} RETURNING *`, isAdmin(req.user) ? [req.params.id] : [req.params.id, req.user.sector]);
+  if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the Director can delete projects.' });
+  // Deleting a project cascades to its activities and their evidence rows. The
+  // stored files are read first so they are removed too, instead of being left
+  // in storage with nothing pointing at them.
+  const files = await pool.query(
+    `SELECT e.stored_name FROM activity_evidence e JOIN activities a ON a.id = e.activity_id WHERE a.project_id = $1`,
+    [req.params.id]
+  );
+  const result = await pool.query('DELETE FROM projects WHERE id = $1 RETURNING *', [req.params.id]);
   if (!result.rowCount) return res.status(404).json({ message: 'Project not found.' });
+  await Promise.all(files.rows.map((file) => deleteFile('activities', file.stored_name)));
   res.json({ message: 'Project deleted successfully.', deletedProject: mapProject(result.rows[0]) });
 }));
 
@@ -520,8 +614,14 @@ app.get('/api/approvals', authMiddleware, asyncRoute(async (req, res) => {
 
 app.post('/api/approvals', authMiddleware, asyncRoute(async (req, res) => {
   const payload = req.body || {};
-  const sector = validateSector(payload.sector, 'agriculture');
-  if (!withinScope(req.user, sector)) return res.status(403).json({ message: 'Managers can only submit approvals in their assigned sector.' });
+  // A request is raised by a sector manager and decided by the Director. A team
+  // member works under a manager and goes through them; the Director has nobody
+  // above them to decide their own request, since self-decisions are refused.
+  if (req.user.role !== 'manager') {
+    return res.status(403).json({ message: 'Only a sector manager can raise a request for approval.' });
+  }
+  const sector = validateSector(payload.sector, req.user.sector);
+  if (sector && !withinScope(req.user, sector)) return res.status(403).json({ message: 'Managers can only submit approvals in their assigned sector.' });
   if (!sector || !requiredText(payload.title) || !requiredText(payload.owner)) {
     return res.status(400).json({ message: 'Approval title, sector, and owner are required.' });
   }
@@ -552,7 +652,32 @@ app.patch('/api/approvals/:id', authMiddleware, asyncRoute(async (req, res) => {
   if (!['Pending', 'Approved', 'Rejected'].includes(nextStatus)) {
     return res.status(400).json({ message: 'Approval status is invalid.' });
   }
+  if (payload.amount !== undefined && !validNumber(payload.amount)) {
+    return res.status(400).json({ message: 'Approval amount must be a valid non-negative number.' });
+  }
+  if (payload.priority !== undefined && !['Low', 'Medium', 'High'].includes(payload.priority)) {
+    return res.status(400).json({ message: 'Approval priority is invalid.' });
+  }
   const decides = nextStatus !== current.status && nextStatus !== 'Pending';
+  const reopens = nextStatus === 'Pending' && current.status !== 'Pending';
+  // Outside the Director's office, a request is its requester's to edit, and
+  // only while it is still undecided. Without this a manager could leave the
+  // status untouched and rewrite the amount under an approval the Director had
+  // already given, or reopen a decided request and wipe who decided it.
+  if (!isAdmin(req.user)) {
+    if (reopens) {
+      return res.status(403).json({ message: 'Only the Director can reopen a decided request.' });
+    }
+    if (current.status !== 'Pending') {
+      return res.status(403).json({ message: 'A decided request can no longer be changed.' });
+    }
+    if (current.requested_by_id !== req.user.id) {
+      return res.status(403).json({ message: 'Only the person who raised this request can change it.' });
+    }
+    if (payload.decisionNote !== undefined) {
+      return res.status(403).json({ message: 'Only the Director can write the decision note.' });
+    }
+  }
   // The Director alone approves or declines. A manager raises the request and
   // watches the outcome; without this a sector manager could clear a colleague's
   // request, since the self-approval guard below only stops the requester.
@@ -570,7 +695,7 @@ app.patch('/api/approvals/:id', authMiddleware, asyncRoute(async (req, res) => {
 
   // Reopening a request to Pending clears the previous decision, so a stale
   // decider and timestamp cannot linger against an undecided request.
-  const reopened = nextStatus === 'Pending' && current.status !== 'Pending';
+  const reopened = reopens;
   const result = await pool.query(
     `UPDATE approvals
      SET title = $2, sector = $3, amount = $4, owner = $5, priority = $6, status = $7, requested_by = $8,
@@ -597,8 +722,15 @@ app.patch('/api/approvals/:id', authMiddleware, asyncRoute(async (req, res) => {
 }));
 
 app.delete('/api/approvals/:id', authMiddleware, asyncRoute(async (req, res) => {
-  const result = await pool.query(`DELETE FROM approvals WHERE id = $1${hasFullScope(req.user) ? '' : ' AND sector = $2'} RETURNING *`, hasFullScope(req.user) ? [req.params.id] : [req.params.id, req.user.sector]);
-  if (!result.rowCount) return res.status(404).json({ message: 'Approval not found.' });
+  // The Director may remove any request. Anyone else may only withdraw their
+  // own, and only before it is decided: a decision is a record, not a draft.
+  const result = isAdmin(req.user)
+    ? await pool.query('DELETE FROM approvals WHERE id = $1 RETURNING *', [req.params.id])
+    : await pool.query(
+      `DELETE FROM approvals WHERE id = $1 AND requested_by_id = $2 AND status = 'Pending' RETURNING *`,
+      [req.params.id, req.user.id]
+    );
+  if (!result.rowCount) return res.status(404).json({ message: 'Approval not found, or it can no longer be withdrawn.' });
   res.json({ message: 'Approval deleted successfully.', deletedApproval: mapApproval(result.rows[0]) });
 }));
 
@@ -638,7 +770,38 @@ app.use('/api/partners', authMiddleware, partnersRouter);
 app.use('/api/monthly-plans', authMiddleware, monthlyPlanRouter);
 
 
+// What the caller did wrong is told to the caller; only what went wrong on this
+// side is a 500. Malformed JSON, an oversized body, and values the database
+// refused (a non-numeric id, an impossible date, a duplicate, text too long for
+// its column) all used to surface as "Server or database error".
+const DATABASE_INPUT_ERRORS = {
+  '22P02': [400, 'One of the values sent is not in the expected format.'],
+  '22007': [400, 'One of the dates sent is not a valid date.'],
+  '22008': [400, 'One of the dates sent is out of range.'],
+  '22003': [400, 'One of the numbers sent is too large.'],
+  '22001': [400, 'One of the values sent is too long.'],
+  '23505': [409, 'A record with those details already exists.'],
+  '23503': [409, 'This record is linked to something that no longer exists, or is still in use elsewhere.'],
+  '23514': [400, 'One of the values sent is not allowed.']
+};
+
 app.use((error, req, res, next) => {
+  if (res.headersSent) return next(error);
+  if (error?.type === 'entity.parse.failed') {
+    return res.status(400).json({ message: 'The request body is not valid JSON.' });
+  }
+  if (error?.type === 'entity.too.large') {
+    return res.status(413).json({ message: 'The request is too large.' });
+  }
+  const known = DATABASE_INPUT_ERRORS[error?.code];
+  if (known) {
+    return res.status(known[0]).json({ message: known[1] });
+  }
+  // A RAISE EXCEPTION from a trigger -- the three-managers-per-sector rule -- is
+  // a business rule speaking, and its message is written for people.
+  if (error?.code === 'P0001') {
+    return res.status(400).json({ message: error.message });
+  }
   console.error(error);
   res.status(500).json({ message: 'Server or database error.' });
 });

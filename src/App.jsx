@@ -1,14 +1,18 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import MovementModule from './MovementModule.jsx';
 import PartnerPortal from './PartnerPortal.jsx';
 import ExternalPartners from './ExternalPartners.jsx';
 import MonthlyPlans from './MonthlyPlans.jsx';
-import { LANGUAGES, LanguageContext, displayLanguage, setDisplayLanguage, useLanguage, useT } from './i18n.js';
+import { LANGUAGES, LanguageContext, displayLanguage, fill, setDisplayLanguage, useI18n, useLanguage, useT } from './i18n.js';
 import { BUSINESS_OPERATIONS, operationName } from '../shared/businessOperations.js';
 import ActivityReview, {
-  ACTIVITY_STATUSES, APPROVAL_STATUS_LABELS, approvalTone, approverName,
+  ACTIVITY_STATUSES, approvalTone, approverName, categoryLabel,
   deadlineNote, formatDate, formatUsd, statusTone
 } from './ActivityReview.jsx';
+import {
+  DetailView, DialogProvider, ErrorBoundary, PHONE_QUERY, buildHash, trapFocus, useBusy, useDialog,
+  useHashRoute, useMediaQuery, useScrollLock
+} from './ui.jsx';
 
 // The category presets offered per business operation. Keep in step with
 // CATEGORIES in server/data/seedData.js, which is what the API validates
@@ -49,6 +53,7 @@ const OTHER_CATEGORY = 'Other (specify)';
 // not an operation id -- the API translates it into "no single area, covers all"
 // on the account row -- so it must never be looked up in `sectors`.
 const ALL_OPERATIONS = 'all';
+const PROJECT_STATUSES = ['On Track', 'In Review', 'Delayed', 'Healthy'];
 
 function categoriesForSector(sectorId) {
   return sectors.find((sector) => sector.id === sectorId)?.categories || [];
@@ -69,24 +74,34 @@ const emptyActivity = { projectId: '', sector: 'agriculture', categoryChoice: ''
 // The statuses that mean assigned work is still on the manager's desk. Closed
 // and refused records drop out of their queue.
 const OPEN_ASSIGNMENT_STATUSES = ['Pending Approval', 'Approved', 'Budget Adjusted', 'In Progress', 'Needs Correction'];
-const emptyApproval = { title: '', sector: 'agriculture', amount: '', owner: '', priority: 'Medium', status: 'Pending', requestedBy: '', justification: '' };
+const emptyApproval = { title: '', sector: 'agriculture', amount: '', owner: '', priority: 'Medium', requestedBy: '', justification: '' };
 const emptyAccount = { username: '', name: '', password: '', role: 'manager', sector: '', managerId: '' };
 const emptyRegister = { total: 0, roleCounts: {}, unassigned: 0, users: [] };
-const exchangeRates = { rwfPerUsd: 1450, cdfPerUsd: 2850 };
+const emptyQueue = { activities: [], movements: [], total: 0 };
+const emptyPartnerRegister = { total: 0, active: 0, byOperation: {}, partners: [] };
+// Used only until the Director's reference rate has loaded, so an equivalent is
+// never shown as zero while the page is still arriving.
+const fallbackRate = { rwfPerUsd: 1450, cdfPerUsd: 2850 };
 
 // Roles are stored as slugs; these are the words the Director reads.
-const roleLabels = { 'super-admin': 'Director', manager: 'Sector manager', staff: 'Team member' };
-
-function roleName(role) {
-  return roleLabels[role] || role;
+function roleName(role, t) {
+  return t(`role.${role}`);
 }
 
 function formatNumber(value) {
-  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(Number(value || 0));
+  return new Intl.NumberFormat(displayLanguage(), { maximumFractionDigits: 2 }).format(Number(value || 0));
 }
 
 function formatRwf(value) {
-  return `RWF ${new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(Number(value || 0))}`;
+  return `RWF ${new Intl.NumberFormat(displayLanguage(), { maximumFractionDigits: 0 }).format(Number(value || 0))}`;
+}
+
+function formatShortDate(value) {
+  return value ? new Date(value).toLocaleDateString(displayLanguage()) : '—';
+}
+
+function round2(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
 }
 
 // Report pickers deal in calendar days, so the local date is assembled by hand.
@@ -98,15 +113,137 @@ function todayIso() {
 }
 
 // A custom period opens on the month so far, which is the range most often
-// wanted, and is the one starting point that is never an empty report.
-const defaultReportRange = {
-  week: todayIso(),
-  month: todayIso().slice(0, 7),
-  start: `${todayIso().slice(0, 7)}-01`,
-  end: todayIso()
-};
+// wanted, and is the one starting point that is never an empty report. Built
+// when the section first needs it, not when the file loads -- a tab left open
+// overnight would otherwise keep offering yesterday.
+function defaultReportRange() {
+  const today = todayIso();
+  return { week: today, month: today.slice(0, 7), start: `${today.slice(0, 7)}-01`, end: today };
+}
 
 const REPORT_MODES = [['weekly', 'report.weekly'], ['monthly', 'report.monthly'], ['custom', 'report.custom']];
+
+// The register is read a page at a time, filtered on the server, so an older
+// activity is never silently missing because it fell outside the newest 100.
+const REGISTER_PAGE = 50;
+const emptyRegisterPage = { items: [], hasMore: false, loading: true, failed: false };
+
+// ---- browser storage ---------------------------------------------------------
+
+// Storage can be blocked (private windows, strict settings) or hold something
+// unreadable. Either used to throw during the first render and leave a blank
+// page; now it just means nobody is remembered.
+function readStorage(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function writeStorage(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* not remembered, still works */ }
+}
+
+function removeStorage(key) {
+  try { localStorage.removeItem(key); } catch { /* nothing to remove */ }
+}
+
+function readStoredUser() {
+  try {
+    const parsed = JSON.parse(readStorage('ops-user') || 'null');
+    return parsed && typeof parsed === 'object' && parsed.id ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---- talking to the API -------------------------------------------------------
+
+// Why the API turned a session or a sign-in away, in the reader's language. The
+// server's own sentence is the fallback for anything without a known code.
+function authRefusal(payload, t) {
+  switch (payload?.code) {
+    case 'AUTH_REQUIRED':
+    case 'TOKEN_INVALID':
+    case 'ACCOUNT_GONE': return t('auth.sessionExpired');
+    case 'PASSWORD_CHANGED': return t('auth.passwordChanged');
+    case 'ACCOUNT_INACTIVE': return payload.status === 'suspended' ? t('auth.accountSuspended') : t('auth.accountRevoked');
+    case 'BAD_CREDENTIALS': return t('auth.badCredentials');
+    case 'TOO_MANY_ATTEMPTS': return t('auth.tooManyAttempts');
+    default: return payload?.message || t('auth.sessionExpired');
+  }
+}
+
+// The one way every screen reaches the API. It carries the session, turns a
+// dead session into a sign-out, and reports failures in words a reader can act
+// on -- the method, status and URL go to the console for whoever is debugging,
+// not onto the screen.
+function useApi(token, onExpired) {
+  const t = useT();
+  const translator = useRef(t);
+  translator.current = t;
+  const expired = useRef(onExpired);
+  expired.current = onExpired;
+  const [online, setOnline] = useState(true);
+
+  const request = useCallback(async (url, options = {}, { json = true } = {}) => {
+    let response;
+    try {
+      response = await fetch(url, {
+        ...options,
+        headers: {
+          ...(json ? { 'Content-Type': 'application/json' } : {}),
+          Authorization: `Bearer ${token}`,
+          ...(options.headers || {})
+        }
+      });
+    } catch (networkError) {
+      setOnline(false);
+      console.warn(`${options.method || 'GET'} ${url} could not reach the server:`, networkError);
+      throw new Error(translator.current('app.offline'));
+    }
+    setOnline(true);
+    if (response.ok) return response;
+
+    const payload = await response.json().catch(() => ({}));
+    console.warn(`${options.method || 'GET'} ${url} -> ${response.status}`, payload);
+    // A token that no longer works, or an account that may no longer sign in,
+    // ends the session instead of leaving every screen failing with 401s.
+    if (response.status === 401 || payload.code === 'ACCOUNT_INACTIVE') {
+      const reason = authRefusal(payload, translator.current);
+      expired.current(reason);
+      throw new Error(reason);
+    }
+    throw new Error(payload.message || translator.current('app.requestFailed'));
+  }, [token]);
+
+  const fetchJson = useCallback(async (url, options = {}) => {
+    const response = await request(url, options);
+    return response.json().catch(() => ({}));
+  }, [request]);
+
+  // Multipart uploads set their own content type, boundary included.
+  const upload = useCallback(async (url, formData) => {
+    const response = await request(url, { method: 'POST', body: formData }, { json: false });
+    return response.json().catch(() => []);
+  }, [request]);
+
+  const download = useCallback(async (url, filename) => {
+    const response = await request(url, {}, { json: false });
+    const blob = await response.blob();
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = href;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    // Revoked after the browser has had a moment to start the download; some
+    // mobile browsers cancel it when the object URL disappears immediately.
+    setTimeout(() => URL.revokeObjectURL(href), 1000);
+  }, [request]);
+
+  return { fetchJson, upload, download, online };
+}
+
+// ---- the application ------------------------------------------------------------
 
 function App() {
   const { language, setLanguage, t } = useLanguage();
@@ -118,19 +255,359 @@ function App() {
   // forms and detail panels that need it sit several levels below this one.
   const i18n = useMemo(() => ({ language, setLanguage, t }), [language, setLanguage, t]);
 
-  const [token, setToken] = useState(localStorage.getItem('ops-token') || '');
-  const [user, setUser] = useState(() => JSON.parse(localStorage.getItem('ops-user') || 'null'));
-  const [loginForm, setLoginForm] = useState({ username: '', password: '' });
-  const [activeView, setActiveView] = useState('dashboard');
+  const [token, setToken] = useState(() => readStorage('ops-token') || '');
+  const [user, setUser] = useState(readStoredUser);
+  // Why the reader is looking at the sign-in screen, when it was not their
+  // choice: an expired session, a suspended account, a changed password.
+  const [notice, setNotice] = useState('');
+
+  const endSession = useCallback((reason = '') => {
+    removeStorage('ops-token');
+    removeStorage('ops-user');
+    setToken('');
+    setUser(null);
+    setNotice(reason);
+  }, []);
+
+  // Signing out on purpose also forgets the page: whoever signs in next starts
+  // on their own dashboard, not on the record the last person had open. An
+  // expired session keeps it, so signing back in returns to the same place.
+  const signOut = useCallback(() => {
+    window.history.replaceState(null, '', '#/');
+    endSession('');
+  }, [endSession]);
+
+  const startSession = useCallback((nextToken, nextUser) => {
+    writeStorage('ops-token', nextToken);
+    writeStorage('ops-user', JSON.stringify(nextUser));
+    setNotice('');
+    setToken(nextToken);
+    setUser(nextUser);
+  }, []);
+
+  // The stored account is a snapshot. It is confirmed against the API on every
+  // start, and replaced with what the API says -- a manager moved to another
+  // area gets the new area now, not at the next sign-in. Only a real refusal
+  // signs the reader out: a network blip or a cold server start leaves them
+  // signed in, where they will simply see the connection error.
+  useEffect(() => {
+    if (!token) return undefined;
+    let cancelled = false;
+    fetch('/api/auth/session', { headers: { Authorization: `Bearer ${token}` } })
+      .then(async (response) => {
+        if (cancelled) return;
+        const payload = await response.json().catch(() => ({}));
+        if (response.status === 401 || response.status === 403) {
+          endSession(authRefusal(payload, t));
+          return;
+        }
+        if (response.ok && payload.user) {
+          writeStorage('ops-user', JSON.stringify(payload.user));
+          setUser((current) => (JSON.stringify(current) === JSON.stringify(payload.user) ? current : payload.user));
+        } else if (response.ok) {
+          endSession(t('auth.sessionExpired'));
+        }
+      })
+      .catch(() => {
+        // Offline or the API is starting: keep the session.
+        if (!cancelled && !readStoredUser()) setNotice(t('app.offline'));
+      });
+    return () => { cancelled = true; };
+    // Checked once per token; a language change must not re-validate.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, endSession]);
+
+  let screen;
+  if (!token || !user) {
+    screen = <LoginScreen notice={notice} onSignedIn={startSession} />;
+  } else if (user.role === 'partner') {
+    screen = <PartnerWorkspace key={`${user.id}:${token}`} token={token} user={user} onLogout={signOut} onExpired={endSession} />;
+  } else {
+    screen = <InternalWorkspace key={`${user.id}:${token}`} token={token} user={user} onLogout={signOut} onExpired={endSession} />;
+  }
+
+  return <LanguageContext.Provider value={i18n}>
+    <DialogProvider>{screen}</DialogProvider>
+  </LanguageContext.Provider>;
+}
+
+// The sign-in form keeps its own state, so it is thrown away the moment someone
+// signs in. It used to live on App, and signing out left the previous person's
+// username and password filled in for whoever sat down next.
+function LoginScreen({ notice, onSignedIn }) {
+  const { language, setLanguage, t } = useI18n();
+  const [form, setForm] = useState({ username: '', password: '' });
+  const [error, setError] = useState('');
+  const [busy, run] = useBusy();
+
+  const submit = (event) => {
+    event.preventDefault();
+    run(async () => {
+      setError('');
+      try {
+        const response = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(form)
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.code ? authRefusal(payload, t) : (payload.message || t('app.requestFailed')));
+        onSignedIn(payload.token, payload.user);
+      } catch (loginError) {
+        setError(loginError.message === 'Failed to fetch' || loginError.name === 'TypeError' ? t('app.offline') : loginError.message);
+      }
+    });
+  };
+
+  return <div className="login-shell"><form className="login-card" onSubmit={submit}>
+    <img className="login-logo" src="/logo.png" srcSet="/logo.png 1x, /logo@2x.png 2x" alt={t('app.name')} />
+    <LanguagePicker language={language} setLanguage={setLanguage} label={t('app.language')} />
+    <h1>{t('auth.signIn')}</h1>
+    <p>{t('auth.signInBlurb')}</p>
+    {notice && <div className="notice-banner" role="status">{notice}</div>}
+    <label>{t('auth.username')}<input required autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck="false" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></label>
+    <label>{t('auth.password')}<input required type="password" autoComplete="current-password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label>
+    <button className="primary-btn full-width" type="submit" disabled={busy}>{busy ? t('auth.signingIn') : t('auth.signIn')}</button>
+    {error && <div className="error-state" role="alert">{error}</div>}
+  </form></div>;
+}
+
+// ---- the shell: sidebar on a wide screen, drawer on a phone ---------------------
+
+// One small line icon per page, so the pages can be told apart at a glance in
+// the sidebar and the drawer. Drawn inline: no icon font or extra request.
+const NAV_ICON_PATHS = {
+  dashboard: 'M4 13h7V4H4v9Zm0 7h7v-5H4v5Zm9 0h7v-9h-7v9Zm0-16v5h7V4h-7Z',
+  'approval-queue': 'M9 12l2 2 4-4M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3Z',
+  projects: 'M3 7h6l2 2h10v10H3V7Z',
+  activities: 'M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01',
+  monthly: 'M7 3v3M17 3v3M4 8h16M5 5h14v15H5V5Zm4 7h2m2 0h2m-6 4h2',
+  approvals: 'M5 12l4 4L19 6',
+  movements: 'M3 16V7h11v9M14 10h4l3 3v3h-7M7 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm10 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z',
+  users: 'M16 19v-1a4 4 0 0 0-8 0v1M12 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7 8v-1a3 3 0 0 0-2-2.8M17 5.2a3 3 0 0 1 0 5.6',
+  partners: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm-9 9h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9Z'
+};
+
+function NavIcon({ id }) {
+  const path = NAV_ICON_PATHS[id];
+  return <span className="nav-icon" aria-hidden="true">
+    {path && <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={path} /></svg>}
+  </span>;
+}
+
+function AppShell({
+  user, subtitle, navLabel, nav = [], activeId, onNavigate, sidebarContent, eyebrow, title,
+  badge = 0, onBadge, online, refreshing, onRefresh, onLogout, accountLines = [], children
+}) {
+  const { language, setLanguage, t } = useI18n();
+  const phone = useMediaQuery(PHONE_QUERY);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const sidebar = useRef(null);
+  const menuButton = useRef(null);
+  const drawerActive = phone && drawerOpen;
+  useScrollLock(drawerActive);
+
+  const closeDrawer = useCallback(() => {
+    setDrawerOpen(false);
+    menuButton.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (drawerActive) sidebar.current?.querySelector('.drawer-close')?.focus();
+  }, [drawerActive]);
+
+  // Leaving a phone-sized window with the drawer open must not leave it open
+  // behind the desktop layout.
+  useEffect(() => { if (!phone) setDrawerOpen(false); }, [phone]);
+  // Every page change closes it: the reader chose where to go.
+  useEffect(() => { setDrawerOpen(false); }, [activeId]);
+
+  const go = (id) => {
+    setDrawerOpen(false);
+    onNavigate(id);
+  };
+
+  return <div className={`application-shell${drawerActive ? ' drawer-open' : ''}`}>
+    <header className="mobile-bar">
+      <button
+        ref={menuButton}
+        className="icon-btn menu-btn"
+        type="button"
+        aria-label={t('app.menu')}
+        aria-expanded={drawerActive}
+        aria-controls="app-sidebar"
+        onClick={() => setDrawerOpen(true)}
+      ><span className="burger" aria-hidden="true"><span /><span /><span /></span></button>
+      <span className="mobile-title">{title}</span>
+      {badge > 0 && <button className="mobile-badge" type="button" onClick={onBadge}
+        aria-label={fill(t('app.waitingOnYou'), { count: badge })}>{badge}</button>}
+      {onRefresh && <button className="icon-btn" type="button" onClick={onRefresh} disabled={refreshing} aria-label={t('action.refresh')}>
+        <span className={refreshing ? 'refresh-glyph spinning' : 'refresh-glyph'} aria-hidden="true">&#8635;</span>
+      </button>}
+    </header>
+    <div className="drawer-backdrop" aria-hidden="true" onClick={closeDrawer} />
+
+    <aside
+      id="app-sidebar"
+      ref={sidebar}
+      className="sidebar"
+      aria-label={navLabel}
+      aria-hidden={phone && !drawerOpen ? 'true' : undefined}
+      onKeyDown={drawerActive ? (event) => trapFocus(event, sidebar.current, closeDrawer) : undefined}
+    >
+      <div className="sidebar-top">
+        <div className="brand-lockup"><img className="brand-logo" src="/logo-mark.png" alt="" /><div><strong>{t('app.name')}</strong><span>{subtitle}</span></div></div>
+        <button className="icon-btn drawer-close" type="button" onClick={closeDrawer} aria-label={t('app.closeMenu')}>&times;</button>
+      </div>
+      {nav.length > 0 && <>
+        <div className="sidebar-label">{t('app.workspace')}</div>
+        <nav aria-label={navLabel}>{nav.map(([id, label, count]) => <button
+          key={id}
+          className={activeId === id ? 'nav-item active' : 'nav-item'}
+          aria-current={activeId === id ? 'page' : undefined}
+          onClick={() => go(id)}
+          type="button"
+        >
+          <NavIcon id={id} />
+          <span className="nav-label">{label}</span>
+          {count > 0 && <span className="nav-badge" aria-label={fill(t('app.waitingOnYou'), { count })}>{count}</span>}
+        </button>)}</nav>
+      </>}
+      {sidebarContent}
+      <div className="sidebar-bottom">
+        <LanguagePicker language={language} setLanguage={setLanguage} label={t('app.language')} />
+        <div className="sidebar-label">{t('app.signedInAs')}</div>
+        <strong>{user.name}</strong>
+        {accountLines.map((line) => <span key={line}>{line}</span>)}
+        <button className="logout-btn" onClick={onLogout} type="button">{t('app.signOut')}</button>
+      </div>
+    </aside>
+
+    <div className="main-area">
+      <header className="top-header">
+        <div><span className="eyebrow">{eyebrow}</span><h1 id="page-title" tabIndex={-1}>{title}</h1></div>
+        <div className="header-meta">
+          <span className={online ? 'connection-dot' : 'connection-dot offline'} aria-hidden="true" />
+          <span role="status">{online ? (refreshing ? t('app.refreshing') : t('app.online')) : t('app.offlineShort')}</span>
+          {onRefresh && <button className="text-btn" type="button" onClick={onRefresh} disabled={refreshing}>{t('action.refresh')}</button>}
+        </div>
+      </header>
+      <main id="main-content" className="main-content">{children}</main>
+    </div>
+  </div>;
+}
+
+// Success fades on its own; an error stays until it is read and dismissed, or
+// the reader moves on.
+function Banners({ message, error, onDismissMessage, onDismissError }) {
+  const t = useT();
+  useEffect(() => {
+    if (!message) return undefined;
+    const timer = setTimeout(onDismissMessage, 6000);
+    return () => clearTimeout(timer);
+  }, [message, onDismissMessage]);
+
+  return <div className="banner-stack">
+    {message && <div className="success-banner" role="status"><span>{message}</span><button type="button" onClick={onDismissMessage}>{t('app.dismiss')}</button></div>}
+    {error && <div className="error-banner" role="alert"><span>{error}</span><button type="button" onClick={onDismissError}>{t('app.dismiss')}</button></div>}
+  </div>;
+}
+
+// ---- the external partner's application ---------------------------------------
+
+const PARTNER_TABS = ['overview', 'activities', 'movements', 'reports', 'updates'];
+
+function PartnerWorkspace({ token, user, onLogout, onExpired }) {
+  const { language, t } = useI18n();
+  const [route, navigate] = useHashRoute();
+  const { fetchJson, online } = useApi(token, onExpired);
+  const [error, setError] = useState('');
+  const [reloadKey, setReloadKey] = useState(0);
+  const tab = PARTNER_TABS.includes(route.view) ? route.view : 'overview';
+
+  useEffect(() => {
+    if (route.view !== tab) navigate(buildHash(tab), { replace: true });
+  }, [route.view, tab, navigate]);
+
+  const clearError = useCallback(() => setError(''), []);
+
+  // An external business partner gets a different application, not a trimmed
+  // version of the internal one: a read-only window onto the single business
+  // operation their account carries. The internal registers, approvals and
+  // administration are never constructed for them, and the API would refuse
+  // them anyway.
+  return <AppShell
+    user={user}
+    subtitle={t('portal.title')}
+    navLabel={t('app.mainNavigation')}
+    activeId={tab}
+    onNavigate={(id) => navigate(buildHash(id))}
+    sidebarContent={<>
+      <div className="sidebar-label">{t('app.businessOperation')}</div>
+      <div className="partner-operation">{operationName(user.sector, language)}</div>
+    </>}
+    eyebrow={t('portal.title')}
+    title={operationName(user.sector, language)}
+    online={online}
+    onRefresh={() => setReloadKey((key) => key + 1)}
+    onLogout={onLogout}
+    accountLines={[t('role.partner'), t('partners.viewOnly')]}
+  >
+    <Banners error={error} onDismissError={clearError} onDismissMessage={() => {}} />
+    <ErrorBoundary resetKey={tab}>
+      <PartnerPortal
+        key={reloadKey}
+        user={user}
+        fetchJson={fetchJson}
+        language={language}
+        t={t}
+        tab={tab}
+        onTab={(id) => navigate(buildHash(id))}
+        onError={setError}
+      />
+    </ErrorBoundary>
+  </AppShell>;
+}
+
+// ---- the internal application -----------------------------------------------
+
+function InternalWorkspace({ token, user, onLogout, onExpired }) {
+  const { language, t } = useI18n();
+  const dialog = useDialog();
+  const [route, navigate] = useHashRoute();
+  const { fetchJson, upload, download, online } = useApi(token, onExpired);
+  const isDirector = user.role === 'super-admin';
+  const isManager = user.role === 'manager';
+
+  // ---- data ------------------------------------------------------------------
+  // 'loading' only until the first successful load. After that every refresh
+  // happens behind the page: an action no longer swaps the whole view for a
+  // spinner, which threw away scroll position and half-typed inputs.
+  const [loadState, setLoadState] = useState('loading');
+  const [refreshing, setRefreshing] = useState(false);
   const [summary, setSummary] = useState({ summary: {}, sectors });
   const [projects, setProjects] = useState([]);
   const [activities, setActivities] = useState([]);
   const [approvals, setApprovals] = useState([]);
   const [managers, setManagers] = useState([]);
   const [register, setRegister] = useState(emptyRegister);
-  const [loading, setLoading] = useState(false);
+  const [approvalQueue, setApprovalQueue] = useState(emptyQueue);
+  const [partnerRegister, setPartnerRegister] = useState(emptyPartnerRegister);
+  const [rate, setRate] = useState(fallbackRate);
+  // Secondary lists that failed to load. A failure is shown as a failure with a
+  // retry, never as an empty list that looks like "nothing to do".
+  const [issues, setIssues] = useState({});
+
+  // ---- feedback --------------------------------------------------------------
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [actionBusy, runAction] = useBusy();
+  const notify = useCallback((text) => { setError(''); setMessage(text); }, []);
+  const fail = useCallback((text) => { setMessage(''); setError(text); }, []);
+  const clearMessage = useCallback(() => setMessage(''), []);
+  const clearError = useCallback(() => setError(''), []);
+
+  // ---- page state ------------------------------------------------------------
   const [selectedProjectId, setSelectedProjectId] = useState('');
   const [sectorFilter, setSectorFilter] = useState('All');
   const [projectSearch, setProjectSearch] = useState('');
@@ -141,209 +618,336 @@ function App() {
   const [userSearch, setUserSearch] = useState('');
   const [userRoleFilter, setUserRoleFilter] = useState('All');
   const [activityStatusFilter, setActivityStatusFilter] = useState('All');
+  const [activitySearch, setActivitySearch] = useState('');
+  const [registerPage, setRegisterPage] = useState(emptyRegisterPage);
   const [activityDetail, setActivityDetail] = useState(null);
-  // "What I Need to Approve": everything waiting on this account, activities
-  // and movements together, fetched from the queue the API builds from the
-  // signed-in user rather than filtered out of the register on the client.
-  const [approvalQueue, setApprovalQueue] = useState({ activities: [], movements: [], total: 0 });
-  // External business partners, and the one business operation each may follow.
-  const [partnerRegister, setPartnerRegister] = useState({ total: 0, active: 0, byOperation: {}, partners: [] });
   const [report, setReport] = useState(null);
+  // The exact query the report on screen was generated from, so an export can
+  // never be of a different period than the one being read.
+  const [reportQueryUsed, setReportQueryUsed] = useState('');
   const [reportMode, setReportMode] = useState('weekly');
   const [reportRange, setReportRange] = useState(defaultReportRange);
   const [reportBusy, setReportBusy] = useState(false);
 
-  const fetchJson = useCallback(async (url, options = {}) => {
-    let response;
-    try {
-      response = await fetch(url, {
-        ...options,
-        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options.headers || {}) }
-      });
-    } catch (requestError) {
-      throw new Error('The API cannot be reached. Start the Node server and check the database connection.');
-    }
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(`${payload.message || 'Request failed.'} (${response.status} ${url})`);
-    return payload;
-  }, [token]);
-
-  const loadData = async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const results = await Promise.allSettled([
-        fetchJson('/api/summary'), fetchJson('/api/projects'), fetchJson('/api/activities?limit=100'),
-        fetchJson('/api/approvals'), fetchJson('/api/managers'), fetchJson('/api/users'),
-        fetchJson('/api/approval-queue'), fetchJson('/api/partners')
-      ]);
-      const [summaryResult, projectResult, activityResult, approvalResult, managerResult, userResult, queueResult, partnerResult] = results;
-      const criticalResults = [summaryResult, projectResult, activityResult, approvalResult];
-      const criticalFailure = criticalResults.find((result) => result.status === 'rejected');
-      if (criticalFailure) throw criticalFailure.reason;
-
-      setSummary(summaryResult.value);
-      setProjects(projectResult.value);
-      setActivities(activityResult.value);
-      setApprovals(approvalResult.value);
-      setManagers(managerResult.status === 'fulfilled' ? managerResult.value : []);
-      // An empty queue and an unreachable queue must not look the same, but
-      // neither should a failure here take the whole dashboard down.
-      setApprovalQueue(queueResult.status === 'fulfilled'
-        ? queueResult.value
-        : { activities: [], movements: [], total: 0 });
-      // Only the Director may read the partner register; anyone else's 403 is
-      // expected and is not an error worth showing.
-      setPartnerRegister(partnerResult.status === 'fulfilled'
-        ? partnerResult.value
-        : { total: 0, active: 0, byOperation: {}, partners: [] });
-      // Only the Director may read the account register; a manager's 403 is expected.
-      setRegister(userResult.status === 'fulfilled' ? userResult.value : emptyRegister);
-      if (managerResult.status === 'rejected') {
-        setMessage('Manager list is unavailable; other records loaded successfully.');
-      }
-      // A project can disappear between loads -- deleted, or moved to a sector
-      // this user does not cover. The id stayed selected, and because a <select>
-      // whose value matches no option falls back to displaying its first entry,
-      // the page showed "Select project" while still posting the vanished id.
-      // That is what came back as "Select an existing project" on a form that
-      // plainly had one chosen, so the selection is reconciled on every load.
-      const visibleProjects = projectResult.value;
-      const stillVisible = visibleProjects.find((project) => project.id === selectedProjectId);
-      const chosenProject = stillVisible || visibleProjects[0] || null;
-      if ((chosenProject?.id || '') !== selectedProjectId) {
-        setSelectedProjectId(chosenProject?.id || '');
-        setActivityForm((current) => ({
-          ...current,
-          projectId: chosenProject?.id || '',
-          sector: chosenProject?.sector || current.sector,
-          // The preset category list is per sector, and so is the set of
-          // managers who may be handed the work, so a change clears both.
-          ...(chosenProject && chosenProject.sector !== current.sector ? { categoryChoice: '', category: '', assignedTo: '' } : {})
-        }));
-      }
-    } catch (loadError) {
-      setError(loadError.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+  // ---- navigation -------------------------------------------------------------
+  // The badge is the number of records personally held up by this account. It
+  // comes from the API's own count of the same predicate the queue runs, so the
+  // two can never drift apart.
+  const approvalCount = summary.summary?.approvalsAwaitingMe ?? approvalQueue.total ?? 0;
+  const navItems = [
+    ['dashboard', t('nav.dashboard')],
+    ['approval-queue', t('nav.approvalQueue'), approvalCount],
+    ['projects', t('nav.projects')], ['activities', t('nav.activities')],
+    ['monthly', t('nav.monthlyPlans')],
+    ['approvals', t('nav.approvals')], ['movements', operationName('movement', language)],
+    ...(isDirector ? [['users', t('nav.users')], ['partners', t('nav.partners')]] : [])
+  ];
+  // An address naming a page this account does not have -- a manager following
+  // a Director's link to #/users -- lands on the dashboard instead of a blank page.
+  const view = navItems.some(([id]) => id === route.view) ? route.view : 'dashboard';
+  const routeId = route.id;
+  const activeRouteActivity = view === 'activities' ? routeId : null;
+  const currentActivityRoute = useRef(activeRouteActivity);
+  currentActivityRoute.current = activeRouteActivity;
 
   useEffect(() => {
-    if (!token) return;
-    localStorage.setItem('ops-token', token);
-    fetchJson('/api/auth/session')
-      .then((session) => {
-        setUser(session.user);
-        localStorage.setItem('ops-user', JSON.stringify(session.user));
-        // An external partner has no access to any of the internal registers --
-        // the API refuses every one of them -- so loading them would be seven
-        // guaranteed 403s. Their portal fetches its own data instead.
-        if (session.user?.role !== 'partner') loadData();
-        else setLoading(false);
-      })
-      .catch(() => {
-        setToken('');
-        localStorage.removeItem('ops-token');
-        localStorage.removeItem('ops-user');
-      });
-  }, [token]);
+    if (route.view !== view) navigate(buildHash(view), { replace: true });
+  }, [route.view, view, navigate]);
+
+  // ---- loading ----------------------------------------------------------------
+  // Each load is numbered and only the newest may write, so two refreshes that
+  // cross in flight cannot leave the older data on screen.
+  const latestLoad = useRef(0);
+  const lastLoadedAt = useRef(0);
+
+  const loadData = useCallback(async () => {
+    const requestNumber = ++latestLoad.current;
+    setRefreshing(true);
+    const results = await Promise.allSettled([
+      fetchJson('/api/summary'), fetchJson('/api/projects'), fetchJson('/api/activities?limit=200'),
+      fetchJson('/api/approvals'), fetchJson('/api/managers'), fetchJson('/api/approval-queue'),
+      // Only the Director may read these two registers; nobody else is asked
+      // for them, rather than being refused and the refusal ignored.
+      isDirector ? fetchJson('/api/users') : Promise.resolve(emptyRegister),
+      isDirector ? fetchJson('/api/partners') : Promise.resolve(emptyPartnerRegister),
+      fetchJson('/api/rates')
+    ]);
+    if (requestNumber !== latestLoad.current) return;
+    setRefreshing(false);
+
+    const [summaryResult, projectResult, activityResult, approvalResult, managerResult, queueResult, userResult, partnerResult, rateResult] = results;
+    const criticalFailure = [summaryResult, projectResult, activityResult, approvalResult].find((result) => result.status === 'rejected');
+    if (criticalFailure) {
+      setLoadState((current) => (current === 'ready' ? 'ready' : 'failed'));
+      fail(criticalFailure.reason.message);
+      return;
+    }
+
+    lastLoadedAt.current = Date.now();
+    setSummary(summaryResult.value);
+    setProjects(projectResult.value);
+    setActivities(activityResult.value);
+    setApprovals(approvalResult.value);
+    setManagers(managerResult.status === 'fulfilled' ? managerResult.value : []);
+    setApprovalQueue(queueResult.status === 'fulfilled' ? queueResult.value : emptyQueue);
+    setRegister(userResult.status === 'fulfilled' ? userResult.value : emptyRegister);
+    setPartnerRegister(partnerResult.status === 'fulfilled' ? partnerResult.value : emptyPartnerRegister);
+    if (rateResult.status === 'fulfilled') setRate(rateResult.value);
+    setIssues({
+      managers: managerResult.status === 'rejected',
+      queue: queueResult.status === 'rejected',
+      users: userResult.status === 'rejected',
+      partners: partnerResult.status === 'rejected'
+    });
+    setLoadState('ready');
+
+    // A project can disappear between loads -- deleted, or moved to a sector
+    // this user does not cover. The register filter and the form's project are
+    // reconciled separately: an empty filter means "All projects", a choice and
+    // not a vanished id, and treating it as vanished locked the register to the
+    // first project on every refresh.
+    const visibleProjects = projectResult.value;
+    const isVisible = (projectId) => visibleProjects.some((project) => project.id === projectId);
+    setSelectedProjectId((current) => (current && !isVisible(current) ? '' : current));
+    setActivityForm((current) => {
+      if (current.projectId && isVisible(current.projectId)) return current;
+      const fallback = visibleProjects[0] || null;
+      return {
+        ...current,
+        projectId: fallback?.id || '',
+        sector: fallback?.sector || current.sector,
+        // The preset category list is per sector, and so is the set of managers
+        // who may be handed the work, so a change clears both.
+        ...(fallback && fallback.sector !== current.sector ? { categoryChoice: '', category: '', assignedTo: '' } : {})
+      };
+    });
+  }, [fetchJson, isDirector, fail]);
+
+  useEffect(() => { loadData(); }, [loadData]);
+
+  // ---- the activity register, page by page ---------------------------------------
+  const latestRegister = useRef(0);
+  const registerItems = useRef(0);
+  registerItems.current = registerPage.items.length;
+  const registerQuery = useMemo(() => {
+    const params = new URLSearchParams({ paged: '1' });
+    if (activityStatusFilter === 'Awaiting review') params.set('awaiting', 'review');
+    else if (activityStatusFilter === 'Assigned to me') params.set('assignedTo', 'me');
+    else if (activityStatusFilter !== 'All') params.set('status', activityStatusFilter);
+    if (selectedProjectId) params.set('projectId', selectedProjectId);
+    if (activitySearch.trim()) params.set('search', activitySearch.trim());
+    return params.toString();
+  }, [activityStatusFilter, selectedProjectId, activitySearch]);
+
+  // mode 'reset' starts again from the first page (filters changed); 'more'
+  // appends the next page; 'refresh' re-reads everything already shown, so a
+  // change made on page three does not throw the reader back to page one.
+  const loadRegister = useCallback(async (mode = 'reset') => {
+    const requestNumber = ++latestRegister.current;
+    const offset = mode === 'more' ? registerItems.current : 0;
+    const limit = mode === 'refresh' ? Math.min(200, Math.max(REGISTER_PAGE, registerItems.current)) : REGISTER_PAGE;
+    setRegisterPage((current) => ({ ...current, loading: true, failed: false, ...(mode === 'reset' ? { items: [] } : {}) }));
+    try {
+      const page = await fetchJson(`/api/activities?${registerQuery}&limit=${limit}&offset=${offset}`);
+      if (requestNumber !== latestRegister.current) return;
+      setRegisterPage((current) => ({
+        items: mode === 'more' ? [...current.items, ...page.items] : page.items,
+        hasMore: page.hasMore,
+        loading: false,
+        failed: false
+      }));
+    } catch (registerError) {
+      if (requestNumber !== latestRegister.current) return;
+      setRegisterPage((current) => ({ ...current, loading: false, failed: true }));
+      console.warn('The activity register could not be loaded:', registerError.message);
+    }
+  }, [fetchJson, registerQuery]);
+
+  // Typing in the search box waits for a pause before asking the server.
+  useEffect(() => {
+    if (view !== 'activities') return undefined;
+    const timer = setTimeout(() => loadRegister('reset'), activitySearch ? 300 : 0);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, registerQuery]);
+
+  // Every refresh of the application's data refreshes the register too while
+  // it is on screen, so a change made from its detail shows in its row.
+  const registerVisible = useRef(false);
+  registerVisible.current = view === 'activities';
+  const refreshRegister = useRef(loadRegister);
+  refreshRegister.current = loadRegister;
+  useEffect(() => {
+    if (registerVisible.current && lastLoadedAt.current) refreshRegister.current('refresh');
+  }, [activities]);
+
+  // Moving to another page starts it clean -- at the top, with the old page's
+  // banners gone -- and refreshes what the badge and the lists show, unless
+  // they were loaded moments ago.
+  const firstView = useRef(true);
+  useEffect(() => {
+    if (firstView.current) { firstView.current = false; return; }
+    setMessage('');
+    setError('');
+    window.scrollTo({ top: 0 });
+    document.getElementById('page-title')?.focus({ preventScroll: true });
+    if (Date.now() - lastLoadedAt.current > 15000) loadData();
+  }, [view, loadData]);
 
   // The requester is whoever is signed in, and a manager's request belongs to
   // their own sector, so neither is left for the user to type.
   useEffect(() => {
-    if (!user) return;
     setApprovalForm((current) => ({
       ...current,
       requestedBy: user.name,
-      sector: user.role !== 'super-admin' && user.sector ? user.sector : current.sector
+      sector: !isDirector && user.sector ? user.sector : current.sector
     }));
-  }, [user]);
+  }, [user, isDirector]);
 
-  const login = async (event) => {
-    event.preventDefault();
-    setError('');
+  // ---- the open activity --------------------------------------------------------
+
+  // The review screen wants the record, its evidence, its trail and what has
+  // actually been spent against it. Both requests travel together so the
+  // remaining balance on screen always matches the expenses listed beside it.
+  const loadActivityDetail = useCallback(async (activityId) => {
+    const [detail, spending] = await Promise.all([
+      fetchJson(`/api/activities/${encodeURIComponent(activityId)}`),
+      // A user who may read the activity may read its expenses; if that ever
+      // fails, the screen still opens without the money section.
+      fetchJson(`/api/activities/${encodeURIComponent(activityId)}/expenses`).catch(() => null)
+    ]);
+    return {
+      ...detail,
+      expenses: spending?.expenses || [],
+      expenseSummary: spending
+        ? { approvedBudget: spending.approvedBudget, totalSpent: spending.totalSpent, remaining: spending.remaining }
+        : null
+    };
+  }, [fetchJson]);
+
+  // Clicking A and then B quickly must end on B, whichever answer lands last.
+  const latestDetail = useRef(0);
+  const showActivity = useCallback(async (activityId) => {
+    const requestNumber = ++latestDetail.current;
     try {
-      const result = await fetchJson('/api/auth/login', { method: 'POST', body: JSON.stringify(loginForm) });
-      setToken(result.token);
-      setUser(result.user);
-      localStorage.setItem('ops-user', JSON.stringify(result.user));
-    } catch (loginError) {
-      setError(loginError.message);
+      const detail = await loadActivityDetail(activityId);
+      if (requestNumber === latestDetail.current && currentActivityRoute.current === activityId) setActivityDetail(detail);
+    } catch (openError) {
+      if (requestNumber !== latestDetail.current) return;
+      fail(openError.message);
+      navigate(buildHash('activities'), { replace: true });
     }
-  };
+  }, [loadActivityDetail, fail, navigate]);
 
-  const resetPassword = async (account) => {
-    const next = window.prompt(`New password for ${account.name} (${account.username}).
-Minimum 6 characters.`, '');
-    if (next === null) return;
-    if (next.trim().length < 6) {
-      setError('The new password must be at least 6 characters.');
+  // The open activity is the one in the address. Back closes it; a shared link
+  // opens it.
+  useEffect(() => {
+    if (!activeRouteActivity) {
+      latestDetail.current += 1;
+      setActivityDetail(null);
       return;
     }
+    showActivity(activeRouteActivity);
+  }, [activeRouteActivity, showActivity]);
+
+  const openActivity = (activityId) => navigate(buildHash('activities', activityId));
+  const closeActivity = () => navigate(buildHash('activities'));
+
+  // After a change: the lists always, the detail only if it is still the one
+  // being read -- approving from the dashboard must not quietly open a review
+  // that then appears the next time the Activities page is visited.
+  const refreshActivity = async (activityId) => {
+    await Promise.all([
+      currentActivityRoute.current === activityId ? showActivity(activityId) : null,
+      loadData()
+    ]);
+  };
+
+  // Arriving from "Assign activity" on the dashboard goes straight to the form.
+  useEffect(() => {
+    if (view !== 'activities' || !route.query.get('new')) return;
+    navigate(buildHash('activities'), { replace: true });
+    requestAnimationFrame(() => document.getElementById('activity-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  }, [view, route.query, navigate]);
+
+  // ---- actions ------------------------------------------------------------------
+  // Every change goes through runAction, so a second click while the first is
+  // still with the server is ignored instead of sent twice.
+  const act = (task) => (...args) => runAction(() => task(...args));
+
+  const resetPassword = act(async (account) => {
+    const next = await dialog.password({
+      title: t('action.changePassword'),
+      message: fill(t('msg.passwordFor'), { name: account.name, username: account.username }),
+      confirmLabel: t('action.changePassword')
+    });
+    if (next === null) return;
     setError('');
     try {
-      await fetchJson(`/api/users/${account.id}/password`, { method: 'PATCH', body: JSON.stringify({ password: next.trim() }) });
-      await loadData();
-      setMessage(`Password updated for ${account.name}. They must sign in again.`);
-    } catch (resetError) {
-      setError(resetError.message);
-    }
-  };
+      await fetchJson(`/api/users/${account.id}/password`, { method: 'PATCH', body: JSON.stringify({ password: next }) });
+      notify(fill(t('msg.passwordUpdated'), { name: account.name }));
+      loadData();
+    } catch (resetError) { fail(resetError.message); }
+  });
 
   // One route carries both the manager and the working area, because the two
   // have to agree: a user under a manager who covers another area would be on a
   // team whose records they cannot open.
-  const updateAssignment = async (account, changes) => {
+  const saveAssignment = async (account, changes) => {
     setError('');
     try {
       const result = await fetchJson(`/api/users/${account.id}/assignment`, { method: 'PATCH', body: JSON.stringify(changes) });
-      await loadData();
-      setMessage(`${account.name}: ${result.message || 'Assignment updated.'}`);
+      notify(`${account.name}: ${result.message || t('msg.saved')}`);
     } catch (assignmentError) {
-      // The dropdown has already moved on screen, so reload before reporting:
-      // it puts the cell back to what was actually saved. The refresh clears
-      // the error banner, which is why the message is set after it, not before.
-      await loadData().catch(() => {});
-      setError(assignmentError.message);
+      fail(assignmentError.message);
     }
+    // Reloaded either way: on a refusal it puts the cell back to what was saved.
+    await loadData();
   };
 
-  const changeUserManager = (account, managerId) => updateAssignment(account, { managerId: managerId || null });
+  const changeUserManager = act((account, managerId) => saveAssignment(account, { managerId: managerId || null }));
 
   // Moving a user to another area drops a manager who does not work there,
-  // rather than leaving the pair inconsistent and the save refused.
-  const changeUserSector = (account, sector) => {
+  // rather than leaving the pair inconsistent and the save refused -- so it is
+  // confirmed first.
+  const changeUserSector = act(async (account, sector) => {
+    const confirmed = await dialog.confirm({
+      title: t('msg.moveUserTitle'),
+      message: fill(t('msg.moveUserBody'), { name: account.name, area: sector === ALL_OPERATIONS ? t('user.allOperations') : sectorName(sector) }),
+      confirmLabel: t('dialog.confirm')
+    });
+    if (!confirmed) return;
     const manager = managers.find((candidate) => candidate.id === account.managerId);
     // An all-operations manager works in the new area too, so the link survives
     // the move; one confined to the area being left does not.
     const keepsManager = manager && (manager.coversAllSectors || manager.sector === sector);
-    return updateAssignment(account, { sector, managerId: keepsManager ? manager.id : null });
-  };
+    await saveAssignment(account, { sector, managerId: keepsManager ? manager.id : null });
+  });
 
-  const decideApproval = async (approval, status) => {
+  const decideApproval = act(async (approval, status) => {
     // A decline without a reason leaves the manager with no idea what to fix,
-    // so the note is required to reject and optional to approve.
-    const prompt = status === 'Rejected' ? 'Reason for declining this request:' : 'Note for the requester (optional):';
-    const note = window.prompt(`${prompt}\n\n${approval.title}`, '');
+    // so the note is required to decline and optional to approve.
+    const declining = status === 'Rejected';
+    const note = await dialog.prompt({
+      title: declining ? t('msg.declineTitle') : t('msg.approveTitle'),
+      message: approval.title,
+      label: declining ? t('msg.declineReason') : t('msg.noteForRequester'),
+      required: declining,
+      multiline: true,
+      danger: declining,
+      confirmLabel: declining ? t('action.decline') : t('approval.approve')
+    });
     if (note === null) return;
-    if (status === 'Rejected' && !note.trim()) {
-      setError('A reason is required when declining a request.');
-      return;
-    }
     setError('');
     try {
-      await fetchJson(`/api/approvals/${approval.id}`, { method: 'PATCH', body: JSON.stringify({ status, decisionNote: note.trim() }) });
+      await fetchJson(`/api/approvals/${encodeURIComponent(approval.id)}`, { method: 'PATCH', body: JSON.stringify({ status, decisionNote: note }) });
+      notify(declining ? t('msg.requestDeclined') : t('msg.requestApproved'));
       await loadData();
-      setMessage(status === 'Approved' ? 'Request approved.' : 'Request declined.');
-    } catch (decisionError) {
-      setError(decisionError.message);
-    }
-  };
+    } catch (decisionError) { fail(decisionError.message); }
+  });
 
-  const chooseProject = (projectId) => {
+  const chooseFormProject = (projectId) => {
     const project = projects.find((item) => item.id === projectId);
-    setSelectedProjectId(projectId);
     setActivityForm((current) => {
       const sector = project?.sector || current.sector;
       // The preset category list is sector specific, and a manager only works
@@ -359,307 +963,369 @@ Minimum 6 characters.`, '');
     });
   };
 
-  const submit = async (event, url, body, success, reset, onCreated) => {
+  const showProjectActivities = (projectId) => {
+    setSelectedProjectId(projectId);
+    navigate(buildHash('activities'));
+  };
+
+  const submit = (event, url, body, success, reset, onCreated) => {
     event.preventDefault();
-    setError('');
-    try {
-      const result = await fetchJson(url, { method: 'POST', body: JSON.stringify(body) });
-      reset(result);
-      onCreated?.(result);
-      setMessage(success);
+    return runAction(async () => {
+      setError('');
+      let result;
       try {
-        await loadData();
-      } catch (refreshError) {
-        setError(`Saved successfully, but the list could not refresh: ${refreshError.message}`);
+        result = await fetchJson(url, { method: 'POST', body: JSON.stringify(body) });
+      } catch (submitError) {
+        fail(submitError.message);
+        return;
       }
-    } catch (submitError) {
-      setError(submitError.message);
-    }
-  };
-
-  // ---- activity review workflow -------------------------------------------
-
-  // The review screen wants the record, its evidence, its trail and what has
-  // actually been spent against it. Both requests travel together so the
-  // remaining balance on screen always matches the expenses listed beside it.
-  const loadActivityDetail = async (activityId) => {
-    const [detail, spending] = await Promise.all([
-      fetchJson(`/api/activities/${activityId}`),
-      // A user who may read the activity may read its expenses; if that ever
-      // fails, the screen still opens without the money section.
-      fetchJson(`/api/activities/${activityId}/expenses`).catch(() => null)
-    ]);
-    return {
-      ...detail,
-      expenses: spending?.expenses || [],
-      expenseSummary: spending
-        ? { approvedBudget: spending.approvedBudget, totalSpent: spending.totalSpent, remaining: spending.remaining }
-        : null
-    };
-  };
-
-  const openActivity = async (activityId) => {
-    setError('');
-    try {
-      setActivityDetail(await loadActivityDetail(activityId));
-    } catch (openError) { setError(openError.message); }
-  };
-
-  const refreshActivity = async (activityId) => {
-    try {
-      setActivityDetail(await loadActivityDetail(activityId));
+      reset(result);
+      notify(success);
+      onCreated?.(result);
       await loadData();
-    } catch (refreshError) { setError(refreshError.message); }
+    });
   };
 
-  // ---- actual expenses -----------------------------------------------------
+  // ---- expenses -----------------------------------------------------------------
 
   // Section 5: the manager records what was really spent. The API checks it
   // against the remaining approved budget and refuses anything over it, so an
   // over-budget attempt comes back as the message the workflow specifies.
-  const recordExpense = async (activity, expense, reset) => {
+  const recordExpense = act(async (activity, expense, reset) => {
     setError('');
     try {
-      const result = await fetchJson(`/api/activities/${activity.id}/expenses`, {
+      const result = await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/expenses`, {
         method: 'POST', body: JSON.stringify(expense)
       });
       reset?.();
+      notify(fill(t('msg.expenseRecorded'), { amount: formatUsd(result.expense.amount), remaining: formatUsd(result.remaining) }));
       await refreshActivity(activity.id);
-      setMessage(`${formatUsd(result.expense.amount)} recorded. ${formatUsd(result.remaining)} left on this activity.`);
-    } catch (expenseError) { setError(expenseError.message); }
-  };
+    } catch (expenseError) { fail(expenseError.message); }
+  });
 
   // Section 13: only the Director removes a financial record, and the API
   // refuses anyone else regardless of what is on screen.
-  const removeExpense = async (activity, expense) => {
-    if (!window.confirm(`Remove ${formatUsd(expense.amount)} spent on ${expense.spentOn}? The activity budget is restored by that amount.`)) return;
+  const removeExpense = act(async (activity, expense) => {
+    const confirmed = await dialog.confirm({
+      title: t('msg.removeExpenseTitle'),
+      message: fill(t('msg.removeExpenseBody'), { amount: formatUsd(expense.amount), date: formatDate(expense.spentOn) }),
+      confirmLabel: t('action.remove'),
+      danger: true
+    });
+    if (!confirmed) return;
     setError('');
     try {
-      const result = await fetchJson(`/api/activities/${activity.id}/expenses/${expense.id}`, { method: 'DELETE' });
+      const result = await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/expenses/${expense.id}`, { method: 'DELETE' });
+      notify(result.message || t('msg.saved'));
       await refreshActivity(activity.id);
-      setMessage(result.message);
-    } catch (removeError) { setError(removeError.message); }
-  };
+    } catch (removeError) { fail(removeError.message); }
+  });
 
-  const saveDecision = async (activity, decision) => {
+  // ---- the review and approval decisions ----------------------------------------
+
+  const saveDecision = act(async (activity, decision) => {
     setError('');
     try {
-      const result = await fetchJson(`/api/activities/${activity.id}/decision`, { method: 'PATCH', body: JSON.stringify(decision) });
+      const result = await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/decision`, { method: 'PATCH', body: JSON.stringify(decision) });
+      notify(result.budgetAdjustment
+        ? fill(t('msg.decisionSavedBudget'), { requested: formatUsd(result.requestedBudget), approved: formatUsd(result.approvedBudget) })
+        : t('msg.decisionSaved'));
       await refreshActivity(activity.id);
-      setMessage(result.budgetAdjustment
-        ? `Decision saved. ${formatUsd(result.requestedBudget)} requested, ${formatUsd(result.approvedBudget)} approved.`
-        : 'Decision saved.');
-    } catch (decisionError) { setError(decisionError.message); }
-  };
-
-  // ---- the approval decision ----------------------------------------------
+    } catch (decisionError) { fail(decisionError.message); }
+  });
 
   // Approve or reject, taken by the person the record names. The API checks the
   // caller is that person; this only carries the decision there.
-  const decideActivityApproval = async (activity, body) => {
+  const sendActivityApproval = async (activity, body) => {
     setError('');
     try {
-      const result = await fetchJson(`/api/activities/${activity.id}/approval`, { method: 'PATCH', body: JSON.stringify(body) });
+      const result = await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/approval`, { method: 'PATCH', body: JSON.stringify(body) });
+      if (body.action === 'approve') {
+        notify(result.approvedBudget !== null && result.approvedBudget !== result.requestedBudget
+          ? fill(t('msg.approvedBudget'), { requested: formatUsd(result.requestedBudget), approved: formatUsd(result.approvedBudget) })
+          : t('msg.approvedStart'));
+      } else {
+        notify(t('msg.rejected'));
+      }
       await refreshActivity(activity.id);
-      setMessage(body.action === 'approve'
-        ? `Approved. ${result.approvedBudget !== null && result.approvedBudget !== result.requestedBudget
-          ? `${formatUsd(result.requestedBudget)} requested, ${formatUsd(result.approvedBudget)} approved.`
-          : 'The work can now start.'}`
-        : 'Rejected. The record has left your approval queue.');
-    } catch (approvalError) { setError(approvalError.message); }
+    } catch (approvalError) { fail(approvalError.message); }
   };
+  const decideActivityApproval = act(sendActivityApproval);
 
-  const decideMovementApproval = async (movement, body) => {
+  const sendMovementApproval = async (movement, body) => {
     setError('');
     try {
-      await fetchJson(`/api/movements/${movement.id}/approval`, { method: 'PATCH', body: JSON.stringify(body) });
+      await fetchJson(`/api/movements/${encodeURIComponent(movement.id)}/approval`, { method: 'PATCH', body: JSON.stringify(body) });
+      notify(fill(body.action === 'approve' ? t('msg.movementApproved') : t('msg.movementRejected'), { ref: movement.ref }));
       await loadData();
-      setMessage(body.action === 'approve' ? `${movement.ref} approved.` : `${movement.ref} rejected.`);
-    } catch (approvalError) { setError(approvalError.message); }
+    } catch (approvalError) { fail(approvalError.message); }
   };
 
   // Approve or reject straight from the queue, without opening the record. A
-  // rejection still has to say why, and a prompt is the shortest honest way to
-  // ask for it from a table row.
-  const decideFromQueue = async (item, action) => {
+  // rejection still has to say why.
+  const decideFromQueue = act(async (item, action) => {
     const isMovement = Boolean(item.ref);
     const label = isMovement ? `${item.ref} — ${item.purpose}` : item.activity;
-    if (action === 'reject') {
-      const reason = window.prompt(`Reason for rejecting this:\n\n${label}`, '');
-      if (reason === null) return;
-      if (!reason.trim()) {
-        setError('A reason is required when rejecting.');
-        return;
-      }
-      const body = { action: 'reject', rejectionReason: reason.trim() };
-      return isMovement ? decideMovementApproval(item, body) : decideActivityApproval(item, body);
-    }
-    const note = window.prompt(`Note for the record (optional):\n\n${label}`, '');
-    if (note === null) return;
-    const body = { action: 'approve', adminNote: note.trim() };
-    return isMovement ? decideMovementApproval(item, body) : decideActivityApproval(item, body);
-  };
+    const rejecting = action === 'reject';
+    const text = await dialog.prompt({
+      title: rejecting ? t('approval.reject') : t('approval.approve'),
+      message: label,
+      label: rejecting ? t('msg.rejectReason') : t('msg.approveNote'),
+      required: rejecting,
+      multiline: true,
+      danger: rejecting,
+      confirmLabel: rejecting ? t('approval.reject') : t('approval.approve')
+    });
+    if (text === null) return;
+    const body = rejecting ? { action: 'reject', rejectionReason: text } : { action: 'approve', adminNote: text };
+    await (isMovement ? sendMovementApproval(item, body) : sendActivityApproval(item, body));
+  });
 
-  const changeActivityStatus = async (activity, status) => {
+  const changeActivityStatus = act(async (activity, status) => {
     setError('');
     try {
-      await fetchJson(`/api/activities/${activity.id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
+      await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
+      notify(fill(t('msg.statusMoved'), { status: t(`status.${status}`) }));
       await refreshActivity(activity.id);
-      setMessage(`Activity moved to ${status}.`);
-    } catch (actionError) { setError(actionError.message); }
-  };
+    } catch (actionError) { fail(actionError.message); }
+  });
 
-  const submitCompletion = async (activity, note) => {
+  const submitCompletion = act(async (activity, note) => {
     setError('');
     try {
-      await fetchJson(`/api/activities/${activity.id}/completion`, { method: 'POST', body: JSON.stringify({ note }) });
+      await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/completion`, { method: 'POST', body: JSON.stringify({ note }) });
+      notify(t('msg.completionSubmitted'));
       await refreshActivity(activity.id);
-      setMessage('Submitted for review. The Director will check the evidence and close the activity.');
-    } catch (completionError) { setError(completionError.message); }
-  };
+    } catch (completionError) { fail(completionError.message); }
+  });
 
   // Handing the work to a different manager, or moving the deadline. Only the
   // fields that actually changed travel: the API refuses a save that asks for
   // nothing, and an unchanged field would still stamp the trail.
-  const saveActivityAssignment = async (activity, changes) => {
+  const saveActivityAssignment = act(async (activity, changes) => {
     setError('');
     try {
-      const result = await fetchJson(`/api/activities/${activity.id}/assignment`, { method: 'PATCH', body: JSON.stringify(changes) });
+      const result = await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/assignment`, { method: 'PATCH', body: JSON.stringify(changes) });
+      notify(result.assignedToName
+        ? fill(result.deadline ? t('msg.assignmentSavedBy') : t('msg.assignmentSaved'), { name: result.assignedToName, date: formatDate(result.deadline) })
+        : t('msg.assignmentNobody'));
       await refreshActivity(activity.id);
-      setMessage(result.assignedToName
-        ? `Assignment saved. ${result.assignedToName} carries this out${result.deadline ? ` by ${formatDate(result.deadline)}` : ''}.`
-        : 'Assignment saved. Nobody is carrying this out yet.');
-    } catch (assignError) { setError(assignError.message); }
-  };
+    } catch (assignError) { fail(assignError.message); }
+  });
 
-  // Multipart, so it goes through fetch directly rather than the JSON helper.
-  const uploadActivityEvidence = async (activity, formData) => {
+  // Resolves true only once the files are stored, so the upload form keeps the
+  // chosen files when it fails and the reader does not have to pick them again.
+  const uploadActivityEvidence = (activity, formData) => runAction(async () => {
     setError('');
     try {
-      const response = await fetch(`/api/activities/${activity.id}/evidence`, {
-        method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: formData
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.message || 'The evidence could not be uploaded.');
+      const saved = await upload(`/api/activities/${encodeURIComponent(activity.id)}/evidence`, formData);
+      notify(fill(t('msg.filesAttached'), { count: saved.length }));
       await refreshActivity(activity.id);
-      setMessage(`${payload.length} file${payload.length === 1 ? '' : 's'} attached.`);
-    } catch (uploadError) { setError(uploadError.message); }
-  };
+      return true;
+    } catch (uploadError) {
+      fail(uploadError.message);
+      return false;
+    }
+  });
 
-  const removeActivityEvidence = async (activity, evidence) => {
-    if (!window.confirm(`Remove "${evidence.originalName}" from this activity?`)) return;
+  const removeActivityEvidence = act(async (activity, evidence) => {
+    const confirmed = await dialog.confirm({
+      title: t('msg.removeEvidenceTitle'),
+      message: fill(t('msg.removeEvidenceBody'), { name: evidence.originalName }),
+      confirmLabel: t('action.remove'),
+      danger: true
+    });
+    if (!confirmed) return;
+    setError('');
     try {
-      await fetchJson(`/api/activities/${activity.id}/evidence/${evidence.id}`, { method: 'DELETE' });
+      await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/evidence/${evidence.id}`, { method: 'DELETE' });
+      notify(t('msg.evidenceRemoved'));
       await refreshActivity(activity.id);
-      setMessage('Evidence removed.');
-    } catch (evidenceError) { setError(evidenceError.message); }
-  };
+    } catch (evidenceError) { fail(evidenceError.message); }
+  });
 
-  const deleteRecord = async (url, label) => {
-    if (!window.confirm(`Delete this ${label}? This action cannot be undone.`)) return;
+  const deleteProject = act(async (project) => {
+    const confirmed = await dialog.confirm({
+      title: t('msg.deleteTitle'),
+      message: `${project.name}. ${t('msg.deleteProjectBody')}`,
+      confirmLabel: t('action.delete'),
+      danger: true
+    });
+    if (!confirmed) return;
+    setError('');
     try {
-      await fetchJson(url, { method: 'DELETE' });
-      setMessage(`${label} deleted.`);
+      await fetchJson(`/api/projects/${encodeURIComponent(project.id)}`, { method: 'DELETE' });
+      notify(t('msg.projectDeleted'));
       await loadData();
-    } catch (deleteError) { setError(deleteError.message); }
-  };
+    } catch (deleteError) { fail(deleteError.message); }
+  });
 
-  const assignManager = async (projectId, managerId) => {
+  // The review stays open until the deletion is confirmed and done; cancelling
+  // leaves the reader exactly where they were.
+  const deleteActivity = act(async (activity) => {
+    const confirmed = await dialog.confirm({
+      title: t('msg.deleteTitle'),
+      message: `${activity.activity}. ${t('msg.deleteActivityBody')}`,
+      confirmLabel: t('action.delete'),
+      danger: true
+    });
+    if (!confirmed) return;
+    setError('');
     try {
-      await fetchJson(`/api/projects/${projectId}/manager`, { method: 'PATCH', body: JSON.stringify({ managerId: managerId || null }) });
-      setMessage('Project manager assignment updated.');
+      await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}`, { method: 'DELETE' });
+      notify(t('msg.activityDeleted'));
+      if (currentActivityRoute.current === activity.id) closeActivity();
       await loadData();
-    } catch (assignmentError) { setError(assignmentError.message); }
-  };
+    } catch (deleteError) { fail(deleteError.message); }
+  });
+
+  const assignManager = act(async (projectId, managerId) => {
+    setError('');
+    try {
+      await fetchJson(`/api/projects/${encodeURIComponent(projectId)}/manager`, { method: 'PATCH', body: JSON.stringify({ managerId: managerId || null }) });
+      notify(t('msg.projectManagerUpdated'));
+    } catch (assignmentError) { fail(assignmentError.message); }
+    await loadData();
+  });
 
   // ---- external business partner access ------------------------------------
 
   // Invite someone outside the organisation and give them exactly one business
-  // operation to follow, view only.
-  const invitePartner = async (form, reset) => {
+  // operation to follow, view only. Resolves true once saved, so the form only
+  // clears on success.
+  const invitePartner = (form) => runAction(async () => {
     setError('');
     try {
       const result = await fetchJson('/api/partners', { method: 'POST', body: JSON.stringify(form) });
-      reset();
+      notify(fill(t('msg.partnerInvited'), { name: result.name, operation: operationName(result.operation, language) }));
       await loadData();
-      setMessage(`${result.name} can now follow ${result.operationName}. View only.`);
-    } catch (inviteError) { setError(inviteError.message); }
-  };
-
-  // Moving the operation moves everything they can read, on their next request.
-  const changePartnerOperation = async (partner, operation) => {
-    setError('');
-    try {
-      const result = await fetchJson(`/api/partners/${partner.id}/operation`, {
-        method: 'PATCH', body: JSON.stringify({ operation })
-      });
-      await loadData();
-      setMessage(result.message);
-    } catch (changeError) {
-      await loadData().catch(() => {});
-      setError(changeError.message);
+      return true;
+    } catch (inviteError) {
+      fail(inviteError.message);
+      return false;
     }
-  };
+  });
 
-  const changePartnerStatus = async (partner, status) => {
-    const wording = { suspended: 'Suspend', revoked: 'Revoke', active: 'Restore' }[status];
-    if (status !== 'active' && !window.confirm(`${wording} access for ${partner.name}? They lose it on their next request.`)) return;
+  // Moving the operation moves everything they can read, on their next request,
+  // so it is confirmed rather than applied the instant the select changes.
+  const changePartnerOperation = act(async (partner, operation) => {
+    const confirmed = await dialog.confirm({
+      title: t('msg.partnerOperationTitle'),
+      message: fill(t('msg.partnerOperationBody'), { name: partner.name, operation: operationName(operation, language) }),
+      confirmLabel: t('dialog.confirm')
+    });
+    if (!confirmed) return;
     setError('');
     try {
-      const result = await fetchJson(`/api/partners/${partner.id}/status`, {
-        method: 'PATCH', body: JSON.stringify({ status })
-      });
-      await loadData();
-      setMessage(result.message);
-    } catch (statusError) { setError(statusError.message); }
-  };
+      const result = await fetchJson(`/api/partners/${partner.id}/operation`, { method: 'PATCH', body: JSON.stringify({ operation }) });
+      notify(result.message);
+    } catch (changeError) { fail(changeError.message); }
+    await loadData();
+  });
 
-  const resetPartnerPassword = async (partner) => {
-    const next = window.prompt(`New password for ${partner.name} (${partner.username}).\nMinimum 6 characters.`, '');
+  const changePartnerStatus = act(async (partner, status) => {
+    if (status !== 'active') {
+      const confirmed = await dialog.confirm({
+        title: status === 'suspended' ? t('msg.suspendTitle') : t('msg.revokeTitle'),
+        message: fill(t('msg.partnerStatusBody'), { name: partner.name }),
+        confirmLabel: status === 'suspended' ? t('partners.suspend') : t('partners.revoke'),
+        danger: true
+      });
+      if (!confirmed) return;
+    }
+    setError('');
+    try {
+      const result = await fetchJson(`/api/partners/${partner.id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
+      notify(result.message);
+      await loadData();
+    } catch (statusError) { fail(statusError.message); }
+  });
+
+  const resetPartnerPassword = act(async (partner) => {
+    const next = await dialog.password({
+      title: t('partners.resetPassword'),
+      message: fill(t('msg.passwordFor'), { name: partner.name, username: partner.username }),
+      confirmLabel: t('action.changePassword')
+    });
     if (next === null) return;
-    if (next.trim().length < 6) {
-      setError('The new password must be at least 6 characters.');
-      return;
-    }
     setError('');
     try {
-      const result = await fetchJson(`/api/partners/${partner.id}/password`, {
-        method: 'PATCH', body: JSON.stringify({ password: next.trim() })
-      });
-      setMessage(result.message);
-    } catch (resetError) { setError(resetError.message); }
-  };
+      const result = await fetchJson(`/api/partners/${partner.id}/password`, { method: 'PATCH', body: JSON.stringify({ password: next }) });
+      notify(result.message);
+    } catch (resetError) { fail(resetError.message); }
+  });
 
-  const removePartner = async (partner) => {
-    if (!window.confirm(`Remove ${partner.name} entirely? Revoking instead keeps the record of who had access.`)) return;
+  const removePartner = act(async (partner) => {
+    const confirmed = await dialog.confirm({
+      title: t('msg.removePartnerTitle'),
+      message: `${partner.name}. ${t('msg.removePartnerBody')}`,
+      confirmLabel: t('partners.remove'),
+      danger: true
+    });
+    if (!confirmed) return;
     setError('');
     try {
       const result = await fetchJson(`/api/partners/${partner.id}`, { method: 'DELETE' });
+      notify(result.message);
       await loadData();
-      setMessage(result.message);
-    } catch (removeError) { setError(removeError.message); }
-  };
+    } catch (removeError) { fail(removeError.message); }
+  });
 
   // The Director's control over what leaves the organisation. An approved
   // record in an operation is visible to that operation's partners unless it is
   // switched off here.
-  const setActivityVisibility = async (activity, externallyVisible) => {
+  const setActivityVisibility = act(async (activity, externallyVisible) => {
     setError('');
     try {
-      await fetchJson(`/api/activities/${activity.id}/visibility`, {
+      await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/visibility`, {
         method: 'PATCH', body: JSON.stringify({ externallyVisible })
       });
+      notify(externallyVisible ? t('msg.visibleToPartners') : t('msg.hiddenFromPartners'));
       await refreshActivity(activity.id);
-      setMessage(externallyVisible
-        ? 'External partners in this business operation can now see this activity.'
-        : 'This activity is now hidden from external partners.');
-    } catch (visibilityError) { setError(visibilityError.message); }
-  };
+    } catch (visibilityError) { fail(visibilityError.message); }
+  });
+
+  // ---- budget change requests ----------------------------------------------
+
+  // A manager cannot move a budget the Director set; they ask, with a reason.
+  // Resolves true once sent, so the form keeps what was typed on a refusal.
+  const requestBudgetChange = (activity, body) => runAction(async () => {
+    setError('');
+    try {
+      await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/budget-requests`, { method: 'POST', body: JSON.stringify(body) });
+      notify(t('msg.budgetRequestSent'));
+      await refreshActivity(activity.id);
+      return true;
+    } catch (requestError) {
+      fail(requestError.message);
+      return false;
+    }
+  });
+
+  const decideBudgetRequest = act(async (activity, request, status) => {
+    const declining = status === 'Declined';
+    const note = await dialog.prompt({
+      title: declining ? t('budget.declineTitle') : t('budget.approveTitle'),
+      message: `${formatUsd(request.currentBudget)} → ${formatUsd(request.requestedAmount)} · ${request.reason}`,
+      label: declining ? t('msg.declineReason') : t('msg.noteForRequester'),
+      required: declining,
+      multiline: true,
+      danger: declining,
+      confirmLabel: declining ? t('action.decline') : t('approval.approve')
+    });
+    if (note === null) return;
+    setError('');
+    try {
+      await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/budget-requests/${request.id}`, {
+        method: 'PATCH', body: JSON.stringify({ status, decisionNote: note })
+      });
+      notify(declining ? t('msg.budgetRequestDeclined') : t('msg.budgetRequestApproved'));
+      await refreshActivity(activity.id);
+    } catch (decisionError) { fail(decisionError.message); }
+  });
 
   // ---- reports -------------------------------------------------------------
 
-  // One place builds the query, so the report on screen and the file that is
-  // exported can never be asked for different periods.
   const reportQuery = (mode = reportMode, range = reportRange) => {
     if (mode === 'monthly') return `period=monthly&month=${encodeURIComponent(range.month)}`;
     if (mode === 'custom') return `period=custom&start=${encodeURIComponent(range.start)}&end=${encodeURIComponent(range.end)}`;
@@ -667,150 +1333,79 @@ Minimum 6 characters.`, '');
     return `period=weekly&start=${encodeURIComponent(range.week)}`;
   };
 
-  const requestReport = async (mode = reportMode, range = reportRange) => {
+  const requestReport = async () => {
     setError('');
     setReportBusy(true);
+    const query = reportQuery();
     try {
-      setReport(await fetchJson(`/api/reports/activities?${reportQuery(mode, range)}`));
+      setReport(await fetchJson(`/api/reports/activities?${query}`));
+      setReportQueryUsed(query);
     } catch (reportError) {
       setReport(null);
-      setError(reportError.message);
+      fail(reportError.message);
     } finally {
       setReportBusy(false);
     }
   };
 
   // The export runs the same scoped query on the server, so a manager's file
-  // holds their own working area and nothing more. It comes back as a binary
-  // body rather than JSON, which is why it bypasses the JSON helper -- and it
-  // travels with the Authorization header rather than a token in the URL.
+  // holds their own working area and nothing more -- and it is the query the
+  // report on screen came from, so the file matches what is being read.
   const exportReport = async (format) => {
+    if (!report || !reportQueryUsed) return;
     setError('');
     setReportBusy(true);
     try {
-      const response = await fetch(`/api/reports/activities/export?format=${format}&${reportQuery()}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.message || 'The report could not be exported.');
-      }
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `activity-report-${report?.period?.start || 'period'}-to-${report?.period?.end || 'period'}.${format}`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-      setMessage(`${format === 'xlsx' ? 'Excel' : 'PDF'} report downloaded.`);
+      await download(
+        `/api/reports/activities/export?format=${format}&${reportQueryUsed}`,
+        `activity-report-${report.period.start}-to-${report.period.end}.${format}`
+      );
+      notify(fill(t('msg.reportDownloaded'), { format: format === 'xlsx' ? 'Excel' : 'PDF' }));
     } catch (exportError) {
-      setError(exportError.message);
+      fail(exportError.message);
     } finally {
       setReportBusy(false);
     }
   };
 
-  const logout = () => {
-    localStorage.removeItem('ops-token'); localStorage.removeItem('ops-user');
-    setToken(''); setUser(null);
-  };
+  // ---- derived lists -----------------------------------------------------------
 
   const filteredProjects = useMemo(() => projects.filter((project) => {
     const matchesSector = sectorFilter === 'All' || project.sector === sectorFilter;
-    const term = projectSearch.toLowerCase();
+    const term = projectSearch.trim().toLowerCase();
     return matchesSector && (!term || [project.name, project.location, project.owner, project.category].some((value) => String(value || '').toLowerCase().includes(term)));
   }), [projects, sectorFilter, projectSearch]);
 
   const filteredUsers = useMemo(() => {
     const term = userSearch.trim().toLowerCase();
     return register.users.filter((account) => (userRoleFilter === 'All' || account.role === userRoleFilter)
-      && (!term || [account.name, account.username, account.managerName, sectorName(account.sector), roleName(account.role)]
+      && (!term || [account.name, account.username, account.managerName, sectorName(account.sector), roleName(account.role, t)]
         .some((value) => String(value || '').toLowerCase().includes(term))));
-  }, [register.users, userSearch, userRoleFilter]);
+  }, [register.users, userSearch, userRoleFilter, t]);
 
-  // "Awaiting review" is the Director's queue: undecided requests plus finished
-  // work handed back. It is a view over the statuses, not a status of its own.
+  // "Awaiting review" is the Director's queue: undecided requests, finished work
+  // handed back, and budget changes waiting for an answer. It is a view over the
+  // records, not a status of its own -- the same one the API's awaiting=review runs.
   const awaitingReview = (activity) => activity.status === 'Pending Approval'
-    || (activity.completionSubmittedAt && activity.status !== 'Completed');
-
-  // "Assigned to me" is the same idea seen from the other end: everything the
-  // Director handed to whoever is signed in.
-  const assignedToMe = (activity) => Boolean(user) && activity.assignedTo === user.id;
-
-  const selectedActivities = useMemo(() => activities.filter((activity) => {
-    const matchesProject = !selectedProjectId || activity.projectId === selectedProjectId;
-    const matchesSector = sectorFilter === 'All' || activity.sector === sectorFilter;
-    const matchesStatus = activityStatusFilter === 'All'
-      || (activityStatusFilter === 'Awaiting review' && awaitingReview(activity))
-      || (activityStatusFilter === 'Assigned to me' && assignedToMe(activity))
-      || activityStatusFilter === activity.status;
-    return matchesProject && matchesSector && matchesStatus;
-  }), [activities, selectedProjectId, sectorFilter, activityStatusFilter, user]);
+    || (activity.completionSubmittedAt && activity.status !== 'Completed')
+    || activity.pendingBudgetRequests > 0;
 
   const reviewQueue = useMemo(() => activities.filter(awaitingReview), [activities]);
   // The manager's own queue, soonest deadline first, because that is the order
   // the work is due. Anything without a deadline sits at the end.
   const myAssignments = useMemo(() => activities
-    .filter((activity) => assignedToMe(activity) && OPEN_ASSIGNMENT_STATUSES.includes(activity.status))
+    .filter((activity) => activity.assignedTo === user.id && OPEN_ASSIGNMENT_STATUSES.includes(activity.status))
     .sort((left, right) => (left.deadline || '9999-12-31').localeCompare(right.deadline || '9999-12-31')),
-  [activities, user]);
+  [activities, user.id]);
   const pendingApprovals = approvals.filter((approval) => approval.status === 'Pending');
-  const selectedProject = projects.find((project) => project.id === selectedProjectId);
+  const formProject = projects.find((project) => project.id === activityForm.projectId);
   const usd = Number(activityForm.costUsd || 0);
   // A sector manager may only file against their own sector; the API enforces
   // the same rule, this just keeps the unusable options out of the dropdown.
   const sectorOptions = useMemo(
-    () => (user && user.role !== 'super-admin' && user.sector ? sectors.filter((sector) => sector.id === user.sector) : sectors),
-    [user]
+    () => (!isDirector && user.sector ? sectors.filter((sector) => sector.id === user.sector) : sectors),
+    [isDirector, user.sector]
   );
-
-  if (!token || !user) {
-    return <LanguageContext.Provider value={i18n}><div className="login-shell"><form className="login-card" onSubmit={login}>
-      <img className="login-logo" src="/logo.png" srcSet="/logo.png 1x, /logo@2x.png 2x" alt="Gisuma Project Operations Management" />
-      <LanguagePicker language={language} setLanguage={setLanguage} label={t('app.language')} />
-      <h1>{t('auth.signIn')}</h1>
-      <p>{t('auth.signInBlurb')}</p>
-      <label>{t('auth.username')}<input required value={loginForm.username} onChange={(event) => setLoginForm({ ...loginForm, username: event.target.value })} /></label>
-      <label>{t('auth.password')}<input required type="password" value={loginForm.password} onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })} /></label>
-      <button className="primary-btn full-width" type="submit">{t('auth.signIn')}</button>
-      {error && <div className="error-state">{error}</div>}
-    </form></div></LanguageContext.Provider>;
-  }
-
-  const isDirector = user.role === 'super-admin';
-
-  // An external business partner gets a different application, not a trimmed
-  // version of this one: a read-only window onto the single business operation
-  // their account carries. The internal shell -- registers, approvals, admin --
-  // is never constructed for them, and the API would refuse it anyway.
-  if (user.role === 'partner') {
-    return <LanguageContext.Provider value={i18n}><div className="application-shell partner-shell">
-      <aside className="sidebar">
-        <div className="brand-lockup"><img className="brand-logo" src="/logo-mark.png" alt="" /><div><strong>{t('app.name')}</strong><span>{t('portal.title')}</span></div></div>
-        <div className="sidebar-label">{t('app.businessOperation')}</div>
-        <div className="partner-operation">{operationName(user.sector, language)}</div>
-        <div className="sidebar-bottom">
-          <LanguagePicker language={language} setLanguage={setLanguage} label={t('app.language')} />
-          <div className="sidebar-label">{t('app.signedInAs')}</div>
-          <strong>{user.name}</strong>
-          <span>{t('role.partner')}</span>
-          <span>{t('partners.viewOnly')}</span>
-          <button className="logout-btn" onClick={logout} type="button">{t('app.signOut')}</button>
-        </div>
-      </aside>
-      <div className="main-area">
-        <header className="top-header">
-          <div><span className="eyebrow">{t('portal.title')}</span><h1>{operationName(user.sector, language)}</h1></div>
-          <div className="header-meta"><span className="connection-dot" />{t('partners.viewOnly')}</div>
-        </header>
-        {message && <div className="success-banner">{message}<button type="button" onClick={() => setMessage('')}>{t('app.dismiss')}</button></div>}
-        {error && <div className="error-banner">{error}<button type="button" onClick={() => setError('')}>{t('app.dismiss')}</button></div>}
-        <PartnerPortal user={user} fetchJson={fetchJson} language={language} t={t} onError={setError} />
-      </div>
-    </div></LanguageContext.Provider>;
-  }
 
   // Four figures everyone gets, and a fifth that depends on who is reading it:
   // the Director sees the size of the organisation, a manager sees the work
@@ -826,265 +1421,318 @@ Minimum 6 characters.`, '');
     ...(isDirector ? [] : [[t('metric.needingYourAction'), summary.summary?.activitiesAssignedToMe || 0]])
   ];
 
-  // The badge is the number of records personally held up by this account. It
-  // comes from the API's own count of the same predicate the queue runs, so the
-  // two can never drift apart.
-  const approvalCount = summary.summary?.approvalsAwaitingMe ?? approvalQueue.total ?? 0;
+  const pageTitle = navItems.find(([id]) => id === view)?.[1];
+  const go = (id) => navigate(buildHash(id));
+  // Stable, because the modules key their loading effects on them.
+  const openPlanRoute = useCallback((planId) => navigate(buildHash('monthly', planId)), [navigate]);
+  const closePlanRoute = useCallback(() => navigate(buildHash('monthly')), [navigate]);
+  const openMovementRoute = useCallback((movementId) => navigate(buildHash('movements', movementId)), [navigate]);
+  const closeMovementRoute = useCallback(() => navigate(buildHash('movements')), [navigate]);
+  const openQueueItem = (item) => (item.ref ? navigate(buildHash('movements', item.id)) : openActivity(item.id));
+  const onModuleChanged = useCallback(() => { loadData(); }, [loadData]);
 
-  const navItems = [
-    ['dashboard', t('nav.dashboard')],
-    ['approval-queue', t('nav.approvalQueue'), approvalCount],
-    ['projects', t('nav.projects')], ['activities', t('nav.activities')],
-    ['monthly', t('nav.monthlyPlans')],
-    ['approvals', t('nav.approvals')], ['movements', operationName('movement', language)],
-    ...(isDirector ? [['users', t('nav.users')], ['partners', t('nav.partners')]] : [])
-  ];
+  // ---- the page ------------------------------------------------------------------
 
-  return <LanguageContext.Provider value={i18n}><div className="application-shell">
-    <aside className="sidebar">
-      <div className="brand-lockup"><img className="brand-logo" src="/logo-mark.png" alt="" /><div><strong>{t('app.name')}</strong><span>{t('app.subtitle')}</span></div></div>
-      <div className="sidebar-label">{t('app.workspace')}</div>
-      <nav>{navItems.map(([id, label, badge]) => <button key={id} className={activeView === id ? 'nav-item active' : 'nav-item'} onClick={() => setActiveView(id)} type="button">
-        <span className={`nav-icon nav-${id}`} />{label}
-        {badge > 0 && <span className="nav-badge" aria-label={`${badge} waiting on you`}>{badge}</span>}
-      </button>)}</nav>
-      <div className="sidebar-bottom">
-        <LanguagePicker language={language} setLanguage={setLanguage} label={t('app.language')} />
-        <div className="sidebar-label">{t('app.signedInAs')}</div>
-        <strong>{user.name}</strong>
-        <span>{t(`role.${user.role}`)}</span>
-        {user.coversAllSectors
-          ? <span>{t('app.businessOperation')}: {t('user.allOperations')}</span>
-          : user.sector && <span>{t('app.businessOperation')}: {sectorName(user.sector)}</span>}
-        <button className="logout-btn" onClick={logout} type="button">{t('app.signOut')}</button>
+  let content;
+  if (loadState === 'loading') {
+    content = <div className="loading-state"><span className="spinner" />{t('app.loading')}</div>;
+  } else if (loadState === 'failed') {
+    content = <div className="empty-state load-issue">
+      <strong>{t('app.loadFailed')}</strong>
+      <button className="primary-btn" type="button" onClick={() => { setLoadState('loading'); loadData(); }}>{t('action.retry')}</button>
+    </div>;
+  } else if (view === 'dashboard') {
+    content = <>
+      <section className="welcome-strip"><div><span className="eyebrow">{t('dash.systemOverview')}</span><h2>{t('dash.headline')}</h2><p>{t('dash.blurb')}</p></div><button className="primary-btn" type="button" onClick={() => navigate(`${buildHash('activities')}?new=1`)}>{isDirector ? t('action.assignActivity') : t('action.raiseActivity')}</button></section>
+      <div className={`metric-grid${dashboardMetrics.length === 5 ? ' metric-grid-5' : ''}`}>
+        {dashboardMetrics.map(([label, value]) => <Metric key={label} label={label} value={value} />)}
       </div>
-    </aside>
-
-    <div className="main-area">
-      <header className="top-header"><div><span className="eyebrow">{t('app.operationsControl')}</span><h1>{navItems.find(([id]) => id === activeView)?.[1]}</h1></div><div className="header-meta"><span className="connection-dot" />{t('app.databaseConnected')}</div></header>
-      {message && <div className="success-banner">{message}<button type="button" onClick={() => setMessage('')}>{t('app.dismiss')}</button></div>}
-      {error && <div className="error-banner">{error}<button type="button" onClick={() => setError('')}>{t('app.dismiss')}</button></div>}
-      {loading ? <div className="loading-state"><span className="spinner" />{t('app.loading')}</div> : <>
-
-        {activeView === 'dashboard' && <>
-          <section className="welcome-strip"><div><span className="eyebrow">{t('dash.systemOverview')}</span><h2>{t('dash.headline')}</h2><p>{t('dash.blurb')}</p></div><button className="primary-btn" type="button" onClick={() => setActiveView('activities')}>{isDirector ? t('action.assignActivity') : t('action.raiseActivity')}</button></section>
-          <div className={`metric-grid${dashboardMetrics.length === 5 ? ' metric-grid-5' : ''}`}>
-            {dashboardMetrics.map(([label, value]) => <Metric key={label} label={label} value={value} />)}
-          </div>
-          {/* The decisions this account is personally holding up. First on the
-              dashboard because nothing else moves until they are taken. */}
-          <Panel
-            title={t('approval.queueTitle')}
-            subtitle={approvalCount ? `${approvalCount} \u00b7 ${t('approval.queueBlurb')}` : t('approval.queueEmpty')}
-            action={t('action.openQueue')}
-            onAction={() => setActiveView('approval-queue')}
-          >
-            <ApprovalQueueTable
-              items={[...approvalQueue.activities, ...approvalQueue.movements].slice(0, 6)}
-              onOpen={(item) => {
-                if (item.ref) return setActiveView('movements');
-                setActiveView('activities');
-                openActivity(item.id);
-              }}
-              onDecide={decideFromQueue}
-              empty={t('approval.queueEmpty')}
-            />
-          </Panel>
-          {/* A manager's own queue: what the Director handed them, soonest
-              deadline first, so nothing is accepted late or quietly forgotten. */}
-          {!isDirector && <Panel
-            title={t('panel.workAssignedToYou')}
-            subtitle={`${myAssignments.length} \u00b7 ${t('nav.activities')}`}
-            action={t('action.openRegister')}
-            onAction={() => { setActivityStatusFilter('Assigned to me'); setActiveView('activities'); }}
-          >
-            <AssignmentQueue
-              activities={myAssignments.slice(0, 6)}
-              onOpen={(id) => { setActiveView('activities'); openActivity(id); }}
-              empty={t('empty.nothingAssigned')}
-            />
-          </Panel>}
-          {/* A request submitted by a manager lands here the moment it is
-              raised, so nothing sits unnoticed in the register. */}
-          <Panel
-            title={isDirector ? t('panel.awaitingYourReview') : t('panel.awaitingDirector')}
-            subtitle={`${summary.summary?.activityReviewsPending || 0} \u00b7 ${summary.summary?.completionsAwaitingReview || 0} ${t('activities.completionSubmitted')}`}
-            action={t('action.openRegister')}
-            onAction={() => setActiveView('activities')}
-          >
-            <ReviewQueue
-              activities={reviewQueue.slice(0, 6)}
-              onOpen={(id) => { setActiveView('activities'); openActivity(id); }}
-              empty={isDirector ? t('empty.nothingWaiting') : t('empty.noneOfYours')}
-            />
-          </Panel>
-          {(summary.sectorBreakdown || []).length > 1 && <Panel title={t('panel.operationsOverview')} subtitle={t('panel.operationsOverviewBlurb')}><SectorBoard rows={summary.sectorBreakdown} onSelect={(sector) => { setSectorFilter(sector); setActiveView('projects'); }} /></Panel>}
-          <div className="dashboard-columns"><Panel title={t('panel.projects')} action={t('action.viewAll')} onAction={() => setActiveView('projects')}><ProjectPreview projects={projects.slice(0, 5)} empty={t('empty.noProjects')} /></Panel><Panel title={t('panel.pendingApprovals')} action={t('approval.review')} onAction={() => setActiveView('approvals')}><ApprovalPreview approvals={pendingApprovals.slice(0, 5)} empty={t('empty.noPendingApprovals')} /></Panel></div>
-        </>}
-
-        {activeView === 'approval-queue' && <>
-          <section className="welcome-strip">
-            <div>
-              <span className="eyebrow">{t('approval.yourQueue')}</span>
-              <h2>{t('approval.queueTitle')} <span className="queue-count">{approvalCount}</span></h2>
-              <p>
-                {t('approval.queueBlurb')} {t('approval.onlyYou')}
-              </p>
-            </div>
-          </section>
-          <Panel
-            title={t('approval.activitiesWaiting')}
-            subtitle={`${approvalQueue.activities.length}`}
-          >
-            <ApprovalQueueTable
-              items={approvalQueue.activities}
-              onOpen={(item) => { setActiveView('activities'); openActivity(item.id); }}
-              onDecide={decideFromQueue}
-              empty={t('approval.queueEmpty')}
-            />
-          </Panel>
-          <Panel
-            title={t('approval.movementsWaiting')}
-            subtitle={`${approvalQueue.movements.length}`}
-          >
-            <ApprovalQueueTable
-              items={approvalQueue.movements}
-              onOpen={() => setActiveView('movements')}
-              onDecide={decideFromQueue}
-              empty={t('approval.queueEmpty')}
-            />
-          </Panel>
-        </>}
-
-        {activeView === 'projects' && <><section className="toolbar-row"><div className="filter-group"><select value={sectorFilter} onChange={(event) => setSectorFilter(event.target.value)}><option value="All">{t('app.allOperations')}</option>{(summary.sectors || sectors).map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}</select><input placeholder={t('form.searchProjects')} value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} /></div>{user.role === 'super-admin' && <button className="primary-btn" type="button" onClick={() => document.getElementById('project-form')?.scrollIntoView({ behavior: 'smooth' })}>{t('form.addProject')}</button>}</section><Panel title={t('panel.projectRegister')} subtitle={`${filteredProjects.length}`}><ProjectTable projects={filteredProjects} managers={managers} onSelect={chooseProject} onAssign={assignManager} onDelete={(id) => deleteRecord(`/api/projects/${id}`, 'project')} empty={t('empty.noProjectsMatch')} /></Panel>{user.role === 'super-admin' && <ProjectForm form={projectForm} setForm={setProjectForm} managers={managers} onSubmit={(event) => submit(event, '/api/projects', projectForm, 'Project added.', () => setProjectForm(emptyProject))} />}</>}
-
-        {activeView === 'activities' && <>
-          <section className="context-strip">
-            <div><span className="eyebrow">{t('activities.eyebrow')}</span><h2>{t('activities.title')}</h2><p>{isDirector ? t('activities.directorBlurb') : t('activities.managerBlurb')}</p></div>
-            <select value={selectedProjectId} onChange={(event) => chooseProject(event.target.value)}><option value="">{t('form.selectProject')}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
-          </section>
-
-          {activityDetail && <ActivityReview
-            detail={activityDetail}
-            user={user}
-            token={token}
-            sectorLabel={sectorName}
-            managers={managers}
-            onClose={() => setActivityDetail(null)}
-            onDecision={saveDecision}
-            onStatus={changeActivityStatus}
-            onAssign={saveActivityAssignment}
-            onUpload={uploadActivityEvidence}
-            onRemoveEvidence={removeActivityEvidence}
-            onSubmitCompletion={submitCompletion}
-            onApprove={decideActivityApproval}
-            onVisibility={setActivityVisibility}
-            onRecordExpense={(activity, expense, reset) => recordExpense(activity, expense, reset)}
-            onRemoveExpense={removeExpense}
+      {/* The decisions this account is personally holding up. First on the
+          dashboard because nothing else moves until they are taken. */}
+      <Panel
+        title={t('approval.queueTitle')}
+        subtitle={approvalCount ? `${approvalCount} · ${t('approval.queueBlurb')}` : t('approval.queueEmpty')}
+        action={t('action.openQueue')}
+        onAction={() => go('approval-queue')}
+      >
+        {issues.queue
+          ? <LoadIssue onRetry={loadData} />
+          : <ApprovalQueueTable
+            items={[...approvalQueue.activities, ...approvalQueue.movements].slice(0, 6)}
+            onOpen={openQueueItem}
+            onDecide={decideFromQueue}
+            busy={actionBusy}
+            empty={t('approval.queueEmpty')}
           />}
+      </Panel>
+      {/* A manager's own queue: what the Director handed them, soonest
+          deadline first, so nothing is accepted late or quietly forgotten. */}
+      {!isDirector && <Panel
+        title={t('panel.workAssignedToYou')}
+        subtitle={`${myAssignments.length} · ${t('nav.activities')}`}
+        action={t('action.openRegister')}
+        onAction={() => { setActivityStatusFilter('Assigned to me'); go('activities'); }}
+      >
+        <AssignmentQueue activities={myAssignments.slice(0, 6)} onOpen={openActivity} empty={t('empty.nothingAssigned')} />
+      </Panel>}
+      {/* A request submitted by a manager lands here the moment it is
+          raised, so nothing sits unnoticed in the register. */}
+      <Panel
+        title={isDirector ? t('panel.awaitingYourReview') : t('panel.awaitingDirector')}
+        subtitle={`${summary.summary?.activityReviewsPending || 0} · ${summary.summary?.completionsAwaitingReview || 0} ${t('activities.completionSubmitted')} · ${summary.summary?.budgetChangesPending || 0} ${t('budget.changesPending')}`}
+        action={t('action.openRegister')}
+        onAction={() => go('activities')}
+      >
+        <ReviewQueue activities={reviewQueue.slice(0, 6)} onOpen={openActivity} empty={isDirector ? t('empty.nothingWaiting') : t('empty.noneOfYours')} />
+      </Panel>
+      {(summary.sectorBreakdown || []).length > 1 && <Panel title={t('panel.operationsOverview')} subtitle={t('panel.operationsOverviewBlurb')}><SectorBoard rows={summary.sectorBreakdown} onSelect={(sector) => { setSectorFilter(sector); go('projects'); }} /></Panel>}
+      <div className="dashboard-columns">
+        <Panel title={t('panel.projects')} action={t('action.viewAll')} onAction={() => go('projects')}><ProjectPreview projects={projects.slice(0, 5)} empty={t('empty.noProjects')} /></Panel>
+        <Panel title={t('panel.pendingApprovals')} action={t('approval.review')} onAction={() => go('approvals')}><ApprovalPreview approvals={pendingApprovals.slice(0, 5)} empty={t('empty.noPendingApprovals')} /></Panel>
+      </div>
+    </>;
+  } else if (view === 'approval-queue') {
+    content = <>
+      <section className="welcome-strip">
+        <div>
+          <span className="eyebrow">{t('approval.yourQueue')}</span>
+          <h2>{t('approval.queueTitle')} <span className="queue-count">{approvalCount}</span></h2>
+          <p>{t('approval.queueBlurb')} {t('approval.onlyYou')}</p>
+        </div>
+      </section>
+      {issues.queue ? <Panel title={t('approval.queueTitle')}><LoadIssue onRetry={loadData} /></Panel> : <>
+        <Panel title={t('approval.activitiesWaiting')} subtitle={`${approvalQueue.activities.length}`}>
+          <ApprovalQueueTable items={approvalQueue.activities} onOpen={openQueueItem} onDecide={decideFromQueue} busy={actionBusy} empty={t('approval.queueEmpty')} />
+        </Panel>
+        <Panel title={t('approval.movementsWaiting')} subtitle={`${approvalQueue.movements.length}`}>
+          <ApprovalQueueTable items={approvalQueue.movements} onOpen={openQueueItem} onDecide={decideFromQueue} busy={actionBusy} empty={t('approval.queueEmpty')} />
+        </Panel>
+      </>}
+    </>;
+  } else if (view === 'projects') {
+    content = <>
+      <section className="toolbar-row">
+        <div className="filter-group">
+          <label className="sr-only" htmlFor="project-sector-filter">{t('app.businessOperation')}</label>
+          <select id="project-sector-filter" value={sectorFilter} onChange={(event) => setSectorFilter(event.target.value)}><option value="All">{t('app.allOperations')}</option>{sectors.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}</select>
+          <label className="sr-only" htmlFor="project-search">{t('form.searchProjects')}</label>
+          <input id="project-search" type="search" placeholder={t('form.searchProjects')} value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} />
+        </div>
+        {isDirector && <button className="primary-btn" type="button" onClick={() => document.getElementById('project-form')?.scrollIntoView({ behavior: 'smooth' })}>{t('form.addProject')}</button>}
+      </section>
+      <Panel title={t('panel.projectRegister')} subtitle={`${filteredProjects.length}`}>
+        <ProjectTable projects={filteredProjects} managers={managers} isDirector={isDirector} busy={actionBusy} onShowActivities={showProjectActivities} onAssign={assignManager} onDelete={deleteProject} empty={t('empty.noProjectsMatch')} />
+      </Panel>
+      {isDirector && <ProjectForm form={projectForm} setForm={setProjectForm} managers={managers} busy={actionBusy} onSubmit={(event) => submit(event, '/api/projects', projectForm, t('msg.projectAdded'), () => setProjectForm(emptyProject))} />}
+    </>;
+  } else if (view === 'activities') {
+    content = <>
+      <section className="context-strip">
+        <div><span className="eyebrow">{t('activities.eyebrow')}</span><h2>{t('activities.title')}</h2><p>{isDirector ? t('activities.directorBlurb') : t('activities.managerBlurb')}</p></div>
+        <button className="primary-btn" type="button" onClick={() => document.getElementById('activity-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>{isDirector ? t('action.assignActivity') : t('action.raiseActivity')}</button>
+      </section>
 
-          <section className="toolbar-row"><div className="filter-group">
-            <select value={activityStatusFilter} onChange={(event) => setActivityStatusFilter(event.target.value)}>
-              <option value="All">{t('form.allStatuses')}</option>
-              <option value="Awaiting review">{t('activities.awaitingReview')}</option>
-              {!isDirector && <option value="Assigned to me">{t('activities.assignedToMe')}</option>}
-              {ACTIVITY_STATUSES.map((status) => <option key={status} value={status}>{t(`status.${status}`)}</option>)}
-            </select>
-            <select value={selectedProjectId} onChange={(event) => chooseProject(event.target.value)}><option value="">{t('form.allProjects')}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
-          </div></section>
-
-          <Panel title={t('panel.activityRegister')} subtitle={`${selectedActivities.length}`}>
-            <ActivityTable
-              activities={selectedActivities}
-              isDirector={user.role === 'super-admin'}
-              openId={activityDetail?.activity?.id}
-              onOpen={openActivity}
-              onDelete={(id) => { setActivityDetail(null); return deleteRecord(`/api/activities/${id}`, 'activity'); }}
-              empty={t('empty.noActivitiesMatch')}
-            />
-          </Panel>
-
-          <ActivityForm
-            form={activityForm} setForm={setActivityForm} projects={projects} onChooseProject={chooseProject}
-            selectedProject={selectedProject} sectorOptions={sectorOptions} managers={managers}
-            isDirector={isDirector} usd={usd}
-            onSubmit={(event) => {
-              const { categoryChoice, ...payload } = activityForm;
-              return submit(
-                event, '/api/activities',
-                { ...payload, projectId: payload.projectId || selectedProjectId, costRwf: usd * exchangeRates.rwfPerUsd, costCdf: usd * exchangeRates.cdfPerUsd },
-                isDirector ? 'Activity assigned. It is now on the manager\u2019s dashboard for them to accept.' : 'Activity submitted for review.',
-                (result) => { setActivityForm({ ...emptyActivity, projectId: result.projectId, sector: result.sector }); },
-                (result) => openActivity(result.id)
-              );
-            }}
-          />
-          <ReportsSection
-            mode={reportMode}
-            range={reportRange}
-            report={report}
-            busy={reportBusy}
-            sectorLabel={sectorName}
-            onModeChange={(next) => { setReportMode(next); setReport(null); }}
-            onRangeChange={(changes) => setReportRange({ ...reportRange, ...changes })}
-            onGenerate={() => requestReport()}
-            onExport={exportReport}
-            onPrint={() => window.print()}
-            onClose={() => setReport(null)}
-          />
-        </>}
-
-        {activeView === 'approvals' && <><section className="toolbar-row"><div className="filter-group"><select value={sectorFilter} onChange={(event) => setSectorFilter(event.target.value)}><option value="All">{t('app.allOperations')}</option>{(summary.sectors || sectors).map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}</select></div></section><Panel title={t('panel.approvalRegister')} subtitle={`${approvals.length}`}><ApprovalTable approvals={approvals.filter((approval) => sectorFilter === 'All' || approval.sector === sectorFilter)} canDecide={user.role === 'super-admin'} onDecide={decideApproval} empty={t('empty.noApprovalRecords')} /></Panel><ApprovalForm form={approvalForm} setForm={setApprovalForm} sectorOptions={sectorOptions} onSubmit={(event) => submit(event, '/api/approvals', approvalForm, 'Request sent for approval.', () => setApprovalForm({ ...emptyApproval, sector: sectorOptions[0]?.id || emptyApproval.sector, requestedBy: user.name }))} /></>}
-
-        {activeView === 'users' && user.role === 'super-admin' && <>
-          <div className="metric-grid metric-grid-5">
-            <Metric label={t('metric.registeredUsers')} value={register.total} />
-            <Metric label={t('metric.operationManagers')} value={register.roleCounts?.manager || 0} />
-            <Metric label={t('metric.teamMembers')} value={register.roleCounts?.staff || 0} />
-            <Metric label={t('metric.withoutManager')} value={register.unassigned || 0} />
-            {/* A manager who covers every operation covers this one too, so they
-                count here as well -- matching on sector alone read their NULL
-                sector as covering nothing and left every operation uncovered. */}
-            <Metric label={t('metric.operationsWithoutManager')} value={sectors.filter((sector) => !register.users.some((account) => account.role === 'manager' && (account.coversAllSectors || account.sector === sector.id))).length} />
-          </div>
-          <section className="toolbar-row"><div className="filter-group">
-            <select value={userRoleFilter} onChange={(event) => setUserRoleFilter(event.target.value)}>
-              <option value="All">{t('form.allRoles')}</option>
-              <option value="super-admin">{t('role.super-admin')}</option>
-              <option value="manager">{t('role.manager')}</option>
-              <option value="staff">{t('role.staff')}</option>
-            </select>
-            <input placeholder={t('form.searchUsers')} value={userSearch} onChange={(event) => setUserSearch(event.target.value)} />
-          </div><button className="primary-btn" type="button" onClick={() => document.getElementById('account-form')?.scrollIntoView({ behavior: 'smooth' })}>{t('form.addUser')}</button></section>
-          <Panel title={t('panel.userManagement')} subtitle={`${filteredUsers.length} / ${register.total}`}>
-            <UserTable users={filteredUsers} managers={managers} onChangeManager={changeUserManager} onChangeSector={changeUserSector} onResetPassword={resetPassword} empty={t('empty.noAccountsMatch')} />
-          </Panel>
-          <AccountForm form={accountForm} setForm={setAccountForm} managers={managers} onSubmit={(event) => submit(event, '/api/users', { ...accountForm, managerId: accountForm.managerId || null }, 'Account created.', () => setAccountForm(emptyAccount))} />
-        </>}
-
-        {activeView === 'monthly' && <MonthlyPlans
+      {activityDetail && activeRouteActivity && activityDetail.activity.id === activeRouteActivity && <DetailView onClose={closeActivity} label={activityDetail.activity.activity}>
+        <ActivityReview
+          detail={activityDetail}
           user={user}
-          fetchJson={fetchJson}
+          token={token}
+          busy={actionBusy}
+          sectorLabel={sectorName}
           managers={managers}
-          activities={activities}
-          onMessage={setMessage}
-          onError={setError}
-        />}
+          onClose={closeActivity}
+          onDecision={saveDecision}
+          onStatus={changeActivityStatus}
+          onAssign={saveActivityAssignment}
+          onUpload={uploadActivityEvidence}
+          onRemoveEvidence={removeActivityEvidence}
+          onSubmitCompletion={submitCompletion}
+          onApprove={decideActivityApproval}
+          onVisibility={setActivityVisibility}
+          onRecordExpense={recordExpense}
+          onRemoveExpense={removeExpense}
+          onRequestBudget={requestBudgetChange}
+          onDecideBudget={decideBudgetRequest}
+          onDelete={isDirector ? deleteActivity : undefined}
+        />
+      </DetailView>}
 
-        {activeView === 'partners' && isDirector && <ExternalPartners
-          register={partnerRegister}
-          language={language}
-          t={t}
-          onInvite={invitePartner}
-          onChangeOperation={changePartnerOperation}
-          onChangeStatus={changePartnerStatus}
-          onResetPassword={resetPartnerPassword}
-          onRemove={removePartner}
-        />}
+      <section className="toolbar-row"><div className="filter-group">
+        <label className="sr-only" htmlFor="activity-status-filter">{t('table.status')}</label>
+        <select id="activity-status-filter" value={activityStatusFilter} onChange={(event) => setActivityStatusFilter(event.target.value)}>
+          <option value="All">{t('form.allStatuses')}</option>
+          <option value="Awaiting review">{t('activities.awaitingReview')}</option>
+          {!isDirector && <option value="Assigned to me">{t('activities.assignedToMe')}</option>}
+          {ACTIVITY_STATUSES.map((status) => <option key={status} value={status}>{t(`status.${status}`)}</option>)}
+        </select>
+        <label className="sr-only" htmlFor="activity-project-filter">{t('field.project')}</label>
+        <select id="activity-project-filter" value={selectedProjectId} onChange={(event) => setSelectedProjectId(event.target.value)}><option value="">{t('form.allProjects')}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
+        <label className="sr-only" htmlFor="activity-search">{t('form.searchActivities')}</label>
+        <input id="activity-search" type="search" placeholder={t('form.searchActivities')} value={activitySearch} onChange={(event) => setActivitySearch(event.target.value)} />
+      </div></section>
 
-        {activeView === 'movements' && <MovementModule user={user} token={token} fetchJson={fetchJson} onMessage={setMessage} onError={setError} />}
-      </>}</div>
-  </div></LanguageContext.Provider>;
+      <Panel title={t('panel.activityRegister')} subtitle={registerPage.loading && !registerPage.items.length ? t('app.loading') : `${registerPage.items.length}${registerPage.hasMore ? '+' : ''}`}>
+        {registerPage.failed && !registerPage.items.length
+          ? <LoadIssue onRetry={() => loadRegister('reset')} />
+          : registerPage.loading && !registerPage.items.length
+            ? <div className="loading-state compact-loading"><span className="spinner" />{t('app.loading')}</div>
+            : <ActivityTable
+              activities={registerPage.items}
+              isDirector={isDirector}
+              openId={activeRouteActivity}
+              onOpen={openActivity}
+              onDelete={deleteActivity}
+              busy={actionBusy}
+              empty={t('empty.noActivitiesMatch')}
+            />}
+        {registerPage.hasMore && <div className="load-more-row">
+          <button className="secondary-btn" type="button" disabled={registerPage.loading} onClick={() => loadRegister('more')}>
+            {registerPage.loading ? t('app.loading') : t('action.loadMore')}
+          </button>
+        </div>}
+      </Panel>
+
+      <ActivityForm
+        form={activityForm} setForm={setActivityForm} projects={projects} onChooseProject={chooseFormProject}
+        selectedProject={formProject} sectorOptions={sectorOptions} managers={managers}
+        isDirector={isDirector} usd={usd} rate={rate} busy={actionBusy}
+        onSubmit={(event) => {
+          const { categoryChoice, ...payload } = activityForm;
+          return submit(
+            event, '/api/activities',
+            { ...payload, costRwf: round2(usd * rate.rwfPerUsd), costCdf: round2(usd * rate.cdfPerUsd) },
+            isDirector ? t('msg.activityAssigned') : t('msg.activitySubmitted'),
+            (result) => { setActivityForm({ ...emptyActivity, projectId: result.projectId, sector: result.sector }); },
+            (result) => openActivity(result.id)
+          );
+        }}
+      />
+      <ReportsSection
+        mode={reportMode}
+        range={reportRange}
+        report={report}
+        busy={reportBusy}
+        sectorLabel={sectorName}
+        onModeChange={(next) => { setReportMode(next); setReport(null); }}
+        // A report is a reading of one period. Once the range moves it no
+        // longer describes what the pickers show, so it is cleared.
+        onRangeChange={(changes) => { setReportRange((current) => ({ ...current, ...changes })); setReport(null); }}
+        onGenerate={requestReport}
+        onExport={exportReport}
+        onPrint={() => window.print()}
+        onClose={() => setReport(null)}
+      />
+    </>;
+  } else if (view === 'approvals') {
+    content = <>
+      <section className="toolbar-row"><div className="filter-group">
+        <label className="sr-only" htmlFor="approval-sector-filter">{t('app.businessOperation')}</label>
+        <select id="approval-sector-filter" value={sectorFilter} onChange={(event) => setSectorFilter(event.target.value)}><option value="All">{t('app.allOperations')}</option>{sectors.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}</select>
+      </div></section>
+      <Panel title={t('panel.approvalRegister')} subtitle={`${approvals.length}`}>
+        <ApprovalTable approvals={approvals.filter((approval) => sectorFilter === 'All' || approval.sector === sectorFilter)} canDecide={isDirector} busy={actionBusy} onDecide={decideApproval} empty={t('empty.noApprovalRecords')} />
+      </Panel>
+      {/* A request is raised by a sector manager and decided by the Director,
+          who therefore has nobody to raise one to. */}
+      {isManager && <ApprovalForm form={approvalForm} setForm={setApprovalForm} sectorOptions={sectorOptions} busy={actionBusy} onSubmit={(event) => submit(event, '/api/approvals', approvalForm, t('msg.requestSent'), () => setApprovalForm({ ...emptyApproval, sector: sectorOptions[0]?.id || emptyApproval.sector, requestedBy: user.name }))} />}
+    </>;
+  } else if (view === 'users') {
+    content = <>
+      <div className="metric-grid metric-grid-5">
+        <Metric label={t('metric.registeredUsers')} value={register.total} />
+        <Metric label={t('metric.operationManagers')} value={register.roleCounts?.manager || 0} />
+        <Metric label={t('metric.teamMembers')} value={register.roleCounts?.staff || 0} />
+        <Metric label={t('metric.withoutManager')} value={register.unassigned || 0} />
+        {/* A manager who covers every operation covers this one too, so they
+            count here as well -- matching on sector alone read their NULL
+            sector as covering nothing and left every operation uncovered. */}
+        <Metric label={t('metric.operationsWithoutManager')} value={sectors.filter((sector) => !register.users.some((account) => account.role === 'manager' && (account.coversAllSectors || account.sector === sector.id))).length} />
+      </div>
+      <section className="toolbar-row"><div className="filter-group">
+        <label className="sr-only" htmlFor="user-role-filter">{t('field.role')}</label>
+        <select id="user-role-filter" value={userRoleFilter} onChange={(event) => setUserRoleFilter(event.target.value)}>
+          <option value="All">{t('form.allRoles')}</option>
+          <option value="super-admin">{t('role.super-admin')}</option>
+          <option value="manager">{t('role.manager')}</option>
+          <option value="staff">{t('role.staff')}</option>
+        </select>
+        <label className="sr-only" htmlFor="user-search">{t('form.searchUsers')}</label>
+        <input id="user-search" type="search" placeholder={t('form.searchUsers')} value={userSearch} onChange={(event) => setUserSearch(event.target.value)} />
+      </div><button className="primary-btn" type="button" onClick={() => document.getElementById('account-form')?.scrollIntoView({ behavior: 'smooth' })}>{t('form.addUser')}</button></section>
+      <Panel title={t('panel.userManagement')} subtitle={`${filteredUsers.length} / ${register.total}`}>
+        {issues.users
+          ? <LoadIssue onRetry={loadData} />
+          : <UserTable users={filteredUsers} managers={managers} currentUserId={user.id} busy={actionBusy} onChangeManager={changeUserManager} onChangeSector={changeUserSector} onResetPassword={resetPassword} empty={t('empty.noAccountsMatch')} />}
+      </Panel>
+      <AccountForm form={accountForm} setForm={setAccountForm} managers={managers} busy={actionBusy} onSubmit={(event) => submit(event, '/api/users', { ...accountForm, managerId: accountForm.managerId || null }, t('msg.accountCreated'), () => setAccountForm(emptyAccount))} />
+    </>;
+  } else if (view === 'monthly') {
+    content = <MonthlyPlans
+      user={user}
+      fetchJson={fetchJson}
+      managers={managers}
+      planId={routeId}
+      onOpenPlan={openPlanRoute}
+      onClosePlan={closePlanRoute}
+      onChanged={onModuleChanged}
+      onMessage={notify}
+      onError={fail}
+    />;
+  } else if (view === 'partners') {
+    content = issues.partners
+      ? <Panel title={t('nav.partners')}><LoadIssue onRetry={loadData} /></Panel>
+      : <ExternalPartners
+        register={partnerRegister}
+        language={language}
+        t={t}
+        busy={actionBusy}
+        onInvite={invitePartner}
+        onChangeOperation={changePartnerOperation}
+        onChangeStatus={changePartnerStatus}
+        onResetPassword={resetPartnerPassword}
+        onRemove={removePartner}
+      />;
+  } else if (view === 'movements') {
+    content = <MovementModule
+      user={user}
+      token={token}
+      fetchJson={fetchJson}
+      upload={upload}
+      openId={routeId}
+      onOpen={openMovementRoute}
+      onClose={closeMovementRoute}
+      onChanged={onModuleChanged}
+      onMessage={notify}
+      onError={fail}
+    />;
+  }
+
+  return <AppShell
+    user={user}
+    subtitle={t('app.subtitle')}
+    navLabel={t('app.mainNavigation')}
+    nav={navItems}
+    activeId={view}
+    onNavigate={go}
+    eyebrow={t('app.operationsControl')}
+    title={pageTitle}
+    badge={approvalCount}
+    onBadge={() => go('approval-queue')}
+    online={online}
+    refreshing={refreshing}
+    onRefresh={loadData}
+    onLogout={onLogout}
+    accountLines={[
+      roleName(user.role, t),
+      ...(user.coversAllSectors
+        ? [`${t('app.businessOperation')}: ${t('user.allOperations')}`]
+        : user.sector ? [`${t('app.businessOperation')}: ${sectorName(user.sector)}`] : [])
+    ]}
+  >
+    <Banners message={message} error={error} onDismissMessage={clearMessage} onDismissError={clearError} />
+    {issues.managers && loadState === 'ready' && <p className="notice-banner" role="status">{t('msg.managersUnavailable')}</p>}
+    <ErrorBoundary resetKey={view}>{content}</ErrorBoundary>
+  </AppShell>;
 }
 
 // Available before sign-in as well as after, because someone who reads no
@@ -1098,39 +1746,68 @@ function LanguagePicker({ language, setLanguage, label }) {
   </label>;
 }
 
-function UserTable({ users, managers, onChangeManager, onChangeSector, onResetPassword, empty }) {
+function LoadIssue({ onRetry }) {
   const t = useT();
-  return users.length ? <div className="table-wrap"><table><thead><tr><th>{t('field.name')}</th><th>{t('field.username')}</th><th>{t('field.role')}</th><th>{t('field.reportsTo')}</th><th>{t('field.workingArea')}</th><th>{t('field.projects')}</th><th>{t('field.team')}</th><th>{t('field.added')}</th><th>{t('field.password')}</th><th>{t('field.action')}</th></tr></thead><tbody>
+  return <div className="empty-state load-issue" role="alert">
+    <strong>{t('app.sectionLoadFailed')}</strong>
+    <button className="secondary-btn" type="button" onClick={onRetry}>{t('action.retry')}</button>
+  </div>;
+}
+
+// Rows that open something are reachable from the keyboard as well as by click.
+function rowActivation(onActivate) {
+  return {
+    tabIndex: 0,
+    role: 'button',
+    onClick: onActivate,
+    onKeyDown: (event) => {
+      if (event.target !== event.currentTarget) return;
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        onActivate();
+      }
+    }
+  };
+}
+
+function UserTable({ users, managers, currentUserId, busy, onChangeManager, onChangeSector, onResetPassword, empty }) {
+  const t = useT();
+  return users.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('field.name')}</th><th>{t('field.username')}</th><th>{t('field.role')}</th><th>{t('field.reportsTo')}</th><th>{t('field.workingArea')}</th><th>{t('field.projects')}</th><th>{t('field.team')}</th><th>{t('field.added')}</th><th>{t('field.password')}</th><th>{t('field.action')}</th></tr></thead><tbody>
     {users.map((account) => {
       const isDirector = account.role === 'super-admin';
+      const isSelf = account.id === currentUserId;
       // Only managers who work the same area can be picked, which is the rule
       // the API applies; the current manager stays listed so the cell is never
       // blank while the two are still in step.
       const managerOptions = managers.filter((manager) => manager.id !== account.id
         && (manager.coversAllSectors || manager.sector === account.sector || manager.id === account.managerId));
       return <tr key={account.id}>
-        <td><strong>{account.name}</strong><small>#{account.id}</small></td>
-        <td>{account.username}</td>
-        <td><span className={isDirector ? 'role-badge role-admin' : 'role-badge'}>{t(`role.${account.role}`)}</span></td>
-        <td>{isDirector ? <span className="muted-cell">{t('user.reportsToNobody')}</span>
-          : <select value={account.managerId || ''} onChange={(event) => onChangeManager(account, event.target.value)}>
+        <td className="card-title-cell"><strong>{account.name}</strong><small>#{account.id}</small></td>
+        <td data-label={t('field.username')}>{account.username}</td>
+        <td data-label={t('field.role')}><span className={isDirector ? 'role-badge role-admin' : 'role-badge'}>{t(`role.${account.role}`)}</span></td>
+        <td data-label={t('field.reportsTo')}>{isDirector ? <span className="muted-cell">{t('user.reportsToNobody')}</span>
+          : <select aria-label={`${t('field.reportsTo')}: ${account.name}`} disabled={busy} value={account.managerId || ''} onChange={(event) => onChangeManager(account, event.target.value)}>
             <option value="">{t('user.noManager')}</option>
             {managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}
           </select>}</td>
-        <td>{isDirector ? <span className="muted-cell">{t('user.allOperations')}</span>
-          : <select value={account.coversAllSectors ? ALL_OPERATIONS : (account.sector || '')} onChange={(event) => onChangeSector(account, event.target.value)}>
+        <td data-label={t('field.workingArea')}>{isDirector ? <span className="muted-cell">{t('user.allOperations')}</span>
+          : <select aria-label={`${t('field.workingArea')}: ${account.name}`} disabled={busy} value={account.coversAllSectors ? ALL_OPERATIONS : (account.sector || '')} onChange={(event) => onChangeSector(account, event.target.value)}>
             {!account.sector && !account.coversAllSectors && <option value="">{t('user.notAssigned')}</option>}
             {/* Offered only to managers: the API refuses it for a team member. */}
             {account.role === 'manager' && <option value={ALL_OPERATIONS}>{t('user.allOperations')}</option>}
             {sectors.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}
           </select>}</td>
-        <td>{account.assignedProjects}</td>
-        <td>{account.teamSize || <span className="muted-cell">&mdash;</span>}</td>
-        <td>{account.createdAt ? new Date(account.createdAt).toLocaleDateString() : <span className="muted-cell">&mdash;</span>}</td>
+        <td data-label={t('field.projects')}>{account.assignedProjects}</td>
+        <td data-label={t('field.team')}>{account.teamSize || <span className="muted-cell">&mdash;</span>}</td>
+        <td data-label={t('field.added')}>{account.createdAt ? formatShortDate(account.createdAt) : <span className="muted-cell">&mdash;</span>}</td>
         {/* Only ever a date. The stored value is a bcrypt hash, so there is no
             password here for anyone, the Director included, to read. */}
-        <td>{account.passwordChangedAt ? <span className="muted-cell">{t('user.passwordReset')} {new Date(account.passwordChangedAt).toLocaleDateString()}</span> : <span className="muted-cell">{t('user.passwordOriginal')}</span>}</td>
-        <td><button className="text-btn" onClick={() => onResetPassword(account)} type="button">{t('action.changePassword')}</button></td>
+        <td data-label={t('field.password')}>{account.passwordChangedAt ? <span className="muted-cell">{t('user.passwordReset')} {formatShortDate(account.passwordChangedAt)}</span> : <span className="muted-cell">{t('user.passwordOriginal')}</span>}</td>
+        {/* Resetting your own password here would end the session you are
+            using mid-action, so it is not offered on your own row. */}
+        <td className="card-actions">{isSelf
+          ? <span className="muted-cell">{t('user.thisIsYou')}</span>
+          : <button className="text-btn" disabled={busy} onClick={() => onResetPassword(account)} type="button">{t('action.changePassword')}</button>}</td>
       </tr>;
     })}
   </tbody></table></div> : <EmptyState>{empty}</EmptyState>;
@@ -1140,12 +1817,16 @@ function Metric({ label, value }) { return <div className="metric-card"><span>{l
 
 function ReviewQueue({ activities, onOpen, empty }) {
   const t = useT();
-  return activities.length ? <div className="preview-list">{activities.map((activity) => <div className="preview-row review-row" key={activity.id} onClick={() => onOpen(activity.id)} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter') onOpen(activity.id); }}>
+  return activities.length ? <div className="preview-list">{activities.map((activity) => <div className="preview-row review-row" key={activity.id} {...rowActivation(() => onOpen(activity.id))}>
     <div>
       <strong>{sectorName(activity.sector)} &mdash; {activity.activity}</strong>
-      <span>{activity.createdByName || '\u2014'} &middot; {formatUsd(activity.requestedBudget)} &middot; {new Date(activity.createdAt).toLocaleDateString()}</span>
+      <span>{activity.createdByName || '—'} &middot; {formatUsd(activity.requestedBudget)} &middot; {formatShortDate(activity.createdAt)}</span>
     </div>
-    <span className={`status-badge ${statusTone(activity.status)}`}>{activity.status === 'Pending Approval' ? t('activities.needsDecision') : t('activities.completionSubmitted')}</span>
+    <span className={`status-badge ${statusTone(activity.status)}`}>{activity.status === 'Pending Approval'
+      ? t('activities.needsDecision')
+      : activity.completionSubmittedAt && activity.status !== 'Completed'
+        ? t('activities.completionSubmitted')
+        : t('budget.changeRequested')}</span>
   </div>)}</div> : <EmptyState>{empty}</EmptyState>;
 }
 
@@ -1156,8 +1837,7 @@ function AssignmentQueue({ activities, onOpen, empty }) {
   const t = useT();
   return activities.length ? <div className="preview-list">{activities.map((activity) => {
     const due = deadlineNote(activity, displayLanguage());
-    return <div className="preview-row review-row" key={activity.id} onClick={() => onOpen(activity.id)} role="button" tabIndex={0}
-      onKeyDown={(event) => { if (event.key === 'Enter') onOpen(activity.id); }}>
+    return <div className="preview-row review-row" key={activity.id} {...rowActivation(() => onOpen(activity.id))}>
       <div>
         <strong>{sectorName(activity.sector)} &mdash; {activity.activity}</strong>
         <span>
@@ -1177,10 +1857,10 @@ function AssignmentQueue({ activities, onOpen, empty }) {
 // Every row states who must approve it, so an approval is never presented as a
 // bare "Pending" with nobody attached. Review / Approve / Reject are the only
 // actions offered, and each one is checked again by the API.
-function ApprovalQueueTable({ items, onOpen, onDecide, empty }) {
+function ApprovalQueueTable({ items, onOpen, onDecide, busy, empty }) {
   const t = useT();
   if (!items.length) return <EmptyState>{empty}</EmptyState>;
-  return <div className="table-wrap"><table className="approval-queue-table"><thead><tr>
+  return <div className="table-wrap"><table className="approval-queue-table card-table"><thead><tr>
     <th>{t('table.activityMovement')}</th><th>{t('table.createdBy')}</th><th>{t('table.assignedTo')}</th><th>{t('table.department')}</th>
     <th>{t('table.budget')}</th><th>{t('table.date')}</th><th>{t('approval.status')}</th><th>{t('table.actions')}</th>
   </tr></thead><tbody>
@@ -1188,8 +1868,8 @@ function ApprovalQueueTable({ items, onOpen, onDecide, empty }) {
       const isMovement = Boolean(item.ref);
       const title = isMovement ? `${item.ref} — ${item.purpose}` : item.activity;
       const detail = isMovement
-        ? `${item.movementType} · ${item.origin || '—'} → ${item.destination}`
-        : (item.description || 'No description');
+        ? `${t(`mtype.${item.movementType}`)} · ${item.origin || '—'} → ${item.destination}`
+        : (item.description || t('review.noDescription'));
       const budget = isMovement
         ? `${item.currency} ${formatNumber(item.estimatedTotal)}`
         : formatUsd(item.approvedBudget === null ? item.requestedBudget : item.approvedBudget);
@@ -1197,22 +1877,22 @@ function ApprovalQueueTable({ items, onOpen, onDecide, empty }) {
         ? (item.assignedToName || item.personTeam || null)
         : item.assignedToName;
       return <tr key={`${isMovement ? 'mov' : 'act'}-${item.id}`}>
-        <td><strong>{title}</strong><small>{detail}</small></td>
-        <td>{item.createdByName || <span className="muted-cell">&mdash;</span>}</td>
-        <td>{carrier || <span className="muted-cell">Unassigned</span>}</td>
-        <td>{sectorName(item.department || item.sector)}</td>
-        <td>{budget}</td>
-        <td>{new Date(item.createdAt).toLocaleDateString()}</td>
-        <td>
+        <td className="card-title-cell"><strong>{title}</strong><small>{detail}</small></td>
+        <td data-label={t('table.createdBy')}>{item.createdByName || <span className="muted-cell">&mdash;</span>}</td>
+        <td data-label={t('table.assignedTo')}>{carrier || <span className="muted-cell">{t('table.unassigned')}</span>}</td>
+        <td data-label={t('table.department')}>{sectorName(item.department || item.sector)}</td>
+        <td data-label={t('table.budget')}>{budget}</td>
+        <td data-label={t('table.date')}>{formatShortDate(item.createdAt)}</td>
+        <td data-label={t('approval.status')}>
           <span className={`status-badge ${approvalTone(item.approvalStatus)}`}>
-            {APPROVAL_STATUS_LABELS[item.approvalStatus] || item.approvalStatus}
+            {t(`approval.${item.approvalStatus}`)}
           </span>
           <small className="awaiting-flag">{t('approval.waitingFor')} {approverName(item, sectorName, t)}</small>
         </td>
-        <td className="queue-actions">
+        <td className="queue-actions card-actions">
           <button className="text-btn" type="button" onClick={() => onOpen(item)}>{t('approval.review')}</button>
-          <button className="primary-btn compact" type="button" onClick={() => onDecide(item, 'approve')}>{t('approval.approve')}</button>
-          <button className="danger-btn outlined compact" type="button" onClick={() => onDecide(item, 'reject')}>{t('approval.reject')}</button>
+          <button className="primary-btn compact" type="button" disabled={busy} onClick={() => onDecide(item, 'approve')}>{t('approval.approve')}</button>
+          <button className="danger-btn outlined compact" type="button" disabled={busy} onClick={() => onDecide(item, 'reject')}>{t('approval.reject')}</button>
         </td>
       </tr>;
     })}
@@ -1221,94 +1901,122 @@ function ApprovalQueueTable({ items, onOpen, onDecide, empty }) {
 
 function SectorBoard({ rows, onSelect }) {
   const t = useT();
-  return <div className="table-wrap"><table className="sector-board"><thead><tr><th>{t('app.businessOperation')}</th><th>{t('field.projects')}</th><th>{t('nav.activities')}</th><th>{t('portal.inProgress')}</th><th>{t('portal.completed')}</th><th>{t('metric.pendingApprovals')}</th><th>{t('field.budget')}</th><th>{t('field.spent')}</th><th>{t('report.remainingBudget')}</th><th>{t('table.progress')}</th></tr></thead><tbody>
-    {rows.map((row) => <tr key={row.id} onClick={() => onSelect(row.id)}>
-      <td><strong>{sectorName(row.id)}</strong><small>{row.id}</small></td>
-      <td>{row.projects}</td>
-      <td>{row.activities}</td>
-      <td>{row.activeActivities}</td>
-      <td>{row.completedActivities}</td>
-      <td>{row.approvalsPending ? <span className="priority-badge">{row.approvalsPending}</span> : <span className="muted-cell">{t('table.none')}</span>}</td>
-      <td>{formatRwf(row.budget)}</td>
-      <td>{formatRwf(row.spent)}</td>
-      <td className={row.remaining < 0 ? 'over-budget' : undefined}>{formatRwf(row.remaining)}</td>
-      <td><div className="progress-meter"><span style={{ width: `${Math.max(0, Math.min(100, row.progress))}%` }} /></div><small>{row.progress}%</small></td>
+  return <div className="table-wrap"><table className="sector-board card-table"><thead><tr><th>{t('app.businessOperation')}</th><th>{t('field.projects')}</th><th>{t('nav.activities')}</th><th>{t('portal.inProgress')}</th><th>{t('portal.completed')}</th><th>{t('metric.pendingApprovals')}</th><th>{t('field.budget')}</th><th>{t('field.spent')}</th><th>{t('report.remainingBudget')}</th><th>{t('table.progress')}</th></tr></thead><tbody>
+    {rows.map((row) => <tr key={row.id} {...rowActivation(() => onSelect(row.id))}>
+      <td className="card-title-cell"><strong>{sectorName(row.id)}</strong></td>
+      <td data-label={t('field.projects')}>{row.projects}</td>
+      <td data-label={t('nav.activities')}>{row.activities}</td>
+      <td data-label={t('portal.inProgress')}>{row.activeActivities}</td>
+      <td data-label={t('portal.completed')}>{row.completedActivities}</td>
+      <td data-label={t('metric.pendingApprovals')}>{row.approvalsPending ? <span className="priority-badge">{row.approvalsPending}</span> : <span className="muted-cell">{t('table.none')}</span>}</td>
+      <td data-label={t('field.budget')}>{formatRwf(row.budget)}</td>
+      <td data-label={t('field.spent')}>{formatRwf(row.spent)}</td>
+      <td data-label={t('report.remainingBudget')} className={row.remaining < 0 ? 'over-budget' : undefined}>{formatRwf(row.remaining)}</td>
+      <td data-label={t('table.progress')}><div className="progress-meter"><span style={{ width: `${Math.max(0, Math.min(100, row.progress))}%` }} /></div><small>{row.progress}%</small></td>
     </tr>)}
   </tbody></table></div>;
 }
+
 function Panel({ title, subtitle, action, onAction, children }) { return <section className="panel"><div className="panel-header"><div><h2>{title}</h2>{subtitle && <span>{subtitle}</span>}</div>{action && <button className="text-btn" onClick={onAction} type="button">{action} &rarr;</button>}</div>{children}</section>; }
 function EmptyState({ children }) { const t = useT(); return <div className="empty-state"><strong>{children}</strong><span>{t('table.noData')}</span></div>; }
 function ProjectPreview({ projects, empty }) { const t = useT(); return projects.length ? <div className="preview-list">{projects.map((project) => <div className="preview-row" key={project.id}><div><strong>{project.name}</strong><span>{project.location} &middot; {project.category || t('activities.notDecided')}</span></div><span className="status-badge">{t(`status.${project.status}`)}</span></div>)}</div> : <EmptyState>{empty}</EmptyState>; }
-function ApprovalPreview({ approvals, empty }) { return approvals.length ? <div className="preview-list">{approvals.map((approval) => <div className="preview-row" key={approval.id}><div><strong>{approval.title}</strong><span>{approval.owner} &middot; {formatRwf(approval.amount)}</span></div><span className="priority-badge">{approval.priority}</span></div>)}</div> : <EmptyState>{empty}</EmptyState>; }
-function ProjectTable({ projects, managers, onSelect, onAssign, onDelete, empty }) { const t = useT(); return projects.length ? <div className="table-wrap"><table><thead><tr><th>{t('field.project')}</th><th>{t('app.businessOperation')}</th><th>{t('field.location')}</th><th>{t('field.organizationOwner')}</th><th>{t('field.manager')}</th><th>{t('field.status')}</th><th>{t('table.progress')}</th><th>{t('field.budget')}</th><th>{t('field.spent')}</th><th>{t('table.actions')}</th></tr></thead><tbody>{projects.map((project) => <tr key={project.id} onClick={() => onSelect(project.id)}><td><strong>{project.name}</strong><small>{project.id}</small></td><td>{sectorName(project.sector)}</td><td>{project.location}</td><td>{project.owner}</td><td><select value={project.managerId || ''} onClick={(event) => event.stopPropagation()} onChange={(event) => onAssign(project.id, event.target.value)}><option value="">{t('table.unassigned')}</option>{managers.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}</select></td><td><span className="status-badge">{t(`status.${project.status}`)}</span></td><td>{project.progress}%</td><td>{formatRwf(project.budget)}</td><td>{formatRwf(project.spent)}</td><td><button className="danger-btn" onClick={(event) => { event.stopPropagation(); onDelete(project.id); }} type="button">{t('action.delete')}</button></td></tr>)}</tbody></table></div> : <EmptyState>{empty}</EmptyState>; }
-// The register doubles as the Director's queue: what was asked for, what was
-// approved, and whether anything is still waiting on a decision.
-function ActivityTable({ activities, isDirector, openId, onOpen, onDelete, empty }) {
+function ApprovalPreview({ approvals, empty }) { const t = useT(); return approvals.length ? <div className="preview-list">{approvals.map((approval) => <div className="preview-row" key={approval.id}><div><strong>{approval.title}</strong><span>{approval.owner} &middot; {formatRwf(approval.amount)}</span></div><span className="priority-badge">{t(`form.priority${approval.priority}`)}</span></div>)}</div> : <EmptyState>{empty}</EmptyState>; }
+
+// Delete and the manager picker are the Director's; the API refuses anyone else,
+// so a manager is no longer shown controls that could only ever fail.
+function ProjectTable({ projects, managers, isDirector, busy, onShowActivities, onAssign, onDelete, empty }) {
   const t = useT();
-  return activities.length ? <div className="table-wrap"><table><thead><tr>
+  return projects.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('field.project')}</th><th>{t('app.businessOperation')}</th><th>{t('field.location')}</th><th>{t('field.organizationOwner')}</th><th>{t('field.manager')}</th><th>{t('field.status')}</th><th>{t('table.progress')}</th><th>{t('field.budget')}</th><th>{t('field.spent')}</th><th>{t('table.actions')}</th></tr></thead><tbody>
+    {projects.map((project) => {
+      // A project is managed by someone who works its own operation.
+      const managerOptions = managers.filter((manager) => manager.coversAllSectors || manager.sector === project.sector || manager.id === project.managerId);
+      return <tr key={project.id}>
+        <td className="card-title-cell"><strong>{project.name}</strong><small>{project.id}</small></td>
+        <td data-label={t('app.businessOperation')}>{sectorName(project.sector)}</td>
+        <td data-label={t('field.location')}>{project.location}</td>
+        <td data-label={t('field.organizationOwner')}>{project.owner}</td>
+        <td data-label={t('field.manager')}>{isDirector
+          ? <select aria-label={`${t('field.manager')}: ${project.name}`} disabled={busy} value={project.managerId || ''} onChange={(event) => onAssign(project.id, event.target.value)}><option value="">{t('table.unassigned')}</option>{managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}</select>
+          : (project.managerName || <span className="muted-cell">{t('table.unassigned')}</span>)}</td>
+        <td data-label={t('field.status')}><span className="status-badge">{t(`status.${project.status}`)}</span></td>
+        <td data-label={t('table.progress')}>{project.progress}%</td>
+        <td data-label={t('field.budget')}>{formatRwf(project.budget)}</td>
+        <td data-label={t('field.spent')}>{formatRwf(project.spent)}</td>
+        <td className="card-actions">
+          <button className="text-btn" type="button" onClick={() => onShowActivities(project.id)}>{t('nav.activities')}</button>
+          {isDirector && <button className="danger-btn" disabled={busy} onClick={() => onDelete(project)} type="button">{t('action.delete')}</button>}
+        </td>
+      </tr>;
+    })}
+  </tbody></table></div> : <EmptyState>{empty}</EmptyState>;
+}
+
+function ActivityTable({ activities, isDirector, openId, onOpen, onDelete, busy, empty }) {
+  const t = useT();
+  return activities.length ? <div className="table-wrap"><table className="card-table"><thead><tr>
     <th>{t('table.activity')}</th><th>{t('table.category')}</th><th>{t('activities.originalBudget')}</th><th>{t('approval.approved')}</th><th>{t('activities.adjustment')}</th><th>{t('table.status')}</th><th>{t('field.evidence')}</th><th>{t('activities.raisedBy')}</th><th>{t('field.carriedOutBy')}</th><th>{t('table.actions')}</th>
   </tr></thead><tbody>
     {activities.map((activity) => {
       const awaiting = activity.status === 'Pending Approval' || (activity.completionSubmittedAt && activity.status !== 'Completed');
       const due = deadlineNote(activity, displayLanguage());
       return <tr key={activity.id} className={activity.id === openId ? 'row-selected' : undefined}>
-        <td><strong>{activity.activity}</strong><small>{activity.description || t('review.noDescription')}</small></td>
-        <td>{activity.category}</td>
-        <td>{formatUsd(activity.requestedBudget)}</td>
-        <td>{activity.approvedBudget === null ? <span className="muted-cell">{t('activities.notDecided')}</span> : formatUsd(activity.approvedBudget)}</td>
-        <td className={activity.budgetAdjustment ? 'over-budget' : undefined}>
+        <td className="card-title-cell"><strong>{activity.activity}</strong><small>{activity.description || t('review.noDescription')}</small></td>
+        <td data-label={t('table.category')}>{categoryLabel(activity.category, t)}</td>
+        <td data-label={t('activities.originalBudget')}>{formatUsd(activity.requestedBudget)}</td>
+        <td data-label={t('approval.approved')}>{activity.approvedBudget === null ? <span className="muted-cell">{t('activities.notDecided')}</span> : formatUsd(activity.approvedBudget)}</td>
+        <td data-label={t('activities.adjustment')} className={activity.budgetAdjustment ? 'over-budget' : undefined}>
           {activity.budgetAdjustment ? `${activity.budgetAdjustment > 0 ? '+' : ''}${formatUsd(activity.budgetAdjustment)}` : <span className="muted-cell">&mdash;</span>}
         </td>
         {/* A pending record always names the person it is pending on, so the
             register never presents "Pending" as if anyone could act on it. */}
-        <td><span className={`status-badge ${statusTone(activity.status)}`}>{t(`status.${activity.status}`)}</span>
-          {activity.approvalRequired && activity.approvalStatus === 'pending' && !['Draft', 'Cancelled'].includes(activity.status)
+        <td data-label={t('table.status')}><span className={`status-badge ${statusTone(activity.status)}`}>{t(`status.${activity.status}`)}</span>
+          {activity.approvalRequired && activity.approvalStatus === 'pending' && !['Draft', 'Cancelled', 'On Hold'].includes(activity.status)
             ? <small className="awaiting-flag">{t('approval.waitingFor')} {approverName(activity, sectorName, t)}</small>
             : awaiting && <small className="awaiting-flag">{t('activities.completionSubmitted')}</small>}</td>
-        <td>{activity.evidenceCount ? `${activity.evidenceCount} \u00d7 ${t('field.file')}` : <span className="muted-cell">{t('table.none')}</span>}</td>
-        <td>{activity.createdByName || <span className="muted-cell">&mdash;</span>}</td>
+        <td data-label={t('field.evidence')}>{activity.evidenceCount ? `${activity.evidenceCount} × ${t('field.file')}` : <span className="muted-cell">{t('table.none')}</span>}</td>
+        <td data-label={t('activities.raisedBy')}>{activity.createdByName || <span className="muted-cell">&mdash;</span>}</td>
         {/* Who the work sits with, and how its deadline stands. An overdue
             record is flagged here, not only inside the review screen. */}
-        <td>{activity.assignedToName
+        <td data-label={t('field.carriedOutBy')}>{activity.assignedToName
           ? <><strong>{activity.assignedToName}</strong>{activity.deadline && <small className={due && due.tone !== 'ok' ? `deadline-flag deadline-${due.tone}` : undefined}>
             {formatDate(activity.deadline)}{due && due.tone !== 'ok' ? ` · ${due.text}` : ''}
           </small>}</>
           : <span className="muted-cell">{t('table.unassigned')}</span>}</td>
-        <td>
+        <td className="card-actions">
           <button className="text-btn" onClick={() => onOpen(activity.id)} type="button">{isDirector ? t('approval.review') : t('action.open')}</button>
-          {isDirector && <button className="danger-btn" onClick={() => onDelete(activity.id)} type="button">{t('action.delete')}</button>}
+          {isDirector && <button className="danger-btn" disabled={busy} onClick={() => onDelete(activity)} type="button">{t('action.delete')}</button>}
         </td>
       </tr>;
     })}
   </tbody></table></div> : <EmptyState>{empty}</EmptyState>;
 }
-function ApprovalTable({ approvals, canDecide, onDecide, empty }) {
+
+function ApprovalTable({ approvals, canDecide, busy, onDecide, empty }) {
   const t = useT();
-  return approvals.length ? <div className="table-wrap"><table><thead><tr><th>{t('field.whatIsNeeded')}</th><th>{t('app.businessOperation')}</th><th>{t('field.amount')}</th><th>{t('field.organizationOwner')}</th><th>{t('field.priority')}</th><th>{t('table.status')}</th><th>{t('field.requestedBy')}</th><th>{t('field.added')}</th><th>{t('approval.yourDecision')}</th></tr></thead><tbody>
+  return approvals.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('field.whatIsNeeded')}</th><th>{t('app.businessOperation')}</th><th>{t('field.amount')}</th><th>{t('field.organizationOwner')}</th><th>{t('field.priority')}</th><th>{t('table.status')}</th><th>{t('field.requestedBy')}</th><th>{t('field.added')}</th><th>{t('approval.yourDecision')}</th></tr></thead><tbody>
     {approvals.map((approval) => <tr key={approval.id}>
-      <td><strong>{approval.title}</strong>{approval.justification && <small className="justification">{approval.justification}</small>}<small>{approval.id}</small></td>
-      <td>{sectorName(approval.sector)}</td>
-      <td>{formatRwf(approval.amount)}</td>
-      <td>{approval.owner}</td>
-      <td><span className="priority-badge">{approval.priority}</span></td>
-      <td><span className={`status-badge status-${approval.status.toLowerCase()}`}>{approval.status}</span></td>
-      <td>{approval.requestedBy}</td>
-      <td>{new Date(approval.createdAt).toLocaleDateString()}</td>
-      <td>
+      <td className="card-title-cell"><strong>{approval.title}</strong>{approval.justification && <small className="justification">{approval.justification}</small>}<small>{approval.id}</small></td>
+      <td data-label={t('app.businessOperation')}>{sectorName(approval.sector)}</td>
+      <td data-label={t('field.amount')}>{formatRwf(approval.amount)}</td>
+      <td data-label={t('field.organizationOwner')}>{approval.owner}</td>
+      <td data-label={t('field.priority')}><span className="priority-badge">{t(`form.priority${approval.priority}`)}</span></td>
+      <td data-label={t('table.status')}><span className={`status-badge status-${approval.status.toLowerCase()}`}>{t(`approval.${approval.status.toLowerCase()}`)}</span></td>
+      <td data-label={t('field.requestedBy')}>{approval.requestedBy}</td>
+      <td data-label={t('field.added')}>{formatShortDate(approval.createdAt)}</td>
+      <td className="card-actions">
         {approval.status === 'Pending'
           ? (canDecide
-            ? <div className="decision-actions"><button className="text-btn" onClick={() => onDecide(approval, 'Approved')} type="button">{t('approval.approve')}</button><button className="danger-btn" onClick={() => onDecide(approval, 'Rejected')} type="button">{t('action.decline')}</button></div>
-            : <span className="muted-cell">Awaiting the Director</span>)
-          : <div className="decision-trail"><strong>{approval.decidedBy || 'Recorded'}</strong>{approval.decidedAt && <small>{new Date(approval.decidedAt).toLocaleDateString()}</small>}{approval.decisionNote && <small className="justification">{approval.decisionNote}</small>}</div>}
+            ? <div className="decision-actions"><button className="text-btn" disabled={busy} onClick={() => onDecide(approval, 'Approved')} type="button">{t('approval.approve')}</button><button className="danger-btn" disabled={busy} onClick={() => onDecide(approval, 'Rejected')} type="button">{t('action.decline')}</button></div>
+            : <span className="muted-cell">{t('approval.awaitingDirector')}</span>)
+          : <div className="decision-trail"><strong>{approval.decidedBy || t('approval.recorded')}</strong>{approval.decidedAt && <small>{formatShortDate(approval.decidedAt)}</small>}{approval.decisionNote && <small className="justification">{approval.decisionNote}</small>}</div>}
       </td>
     </tr>)}
   </tbody></table></div> : <EmptyState>{empty}</EmptyState>;
 }
-// A textarea in a three-column grid is unreadably narrow, so a field can ask
-// for two columns of it.
+
 function Field({ label, wide, children }) { return <label className={wide ? 'form-field form-field-wide' : 'form-field'}><span>{label}</span>{children}</label>; }
 
-function AccountForm({ form, setForm, managers, onSubmit }) {
+function AccountForm({ form, setForm, managers, busy, onSubmit }) {
   const t = useT();
   // A manager heads an area, so they report to nobody and the field is hidden.
   const showsManager = form.role === 'staff';
@@ -1316,8 +2024,8 @@ function AccountForm({ form, setForm, managers, onSubmit }) {
   return <form className="form-panel" id="account-form" onSubmit={onSubmit}>
     <div className="panel-header"><div><h2>{t('form.addUser')}</h2><span>{t('form.addUserBlurbHash')}</span></div></div>
     <div className="form-grid">
-      <Field label={t('field.name')}><input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></Field>
-      <Field label={t('field.username')}><input required autoComplete="off" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></Field>
+      <Field label={t('field.name')}><input required maxLength="150" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></Field>
+      <Field label={t('field.username')}><input required maxLength="100" autoComplete="off" autoCapitalize="none" spellCheck="false" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></Field>
       <Field label={t('field.password')}><input required minLength="6" type="password" autoComplete="new-password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></Field>
       {/* Switching to a team member drops an "all operations" choice that only a
           manager may hold, rather than submitting a value the API will refuse. */}
@@ -1327,23 +2035,52 @@ function AccountForm({ form, setForm, managers, onSubmit }) {
       <Field label={t('field.workingArea')}><select required value={form.sector || ''} onChange={(event) => setForm({ ...form, sector: event.target.value, managerId: '' })}><option value="">{t('form.selectOperation')}</option>{form.role === 'manager' && <option value={ALL_OPERATIONS}>{t('user.allOperations')}</option>}{sectors.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}</select></Field>
       {showsManager && <Field label={t('field.reportsTo')}><select value={form.managerId || ''} onChange={(event) => setForm({ ...form, managerId: event.target.value })} disabled={!form.sector}><option value="">{t('form.noManagerYet')}</option>{managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}</select></Field>}
     </div>
-    <button className="primary-btn" type="submit">{form.role === 'manager' ? t('form.addManager') : t('form.addTeamMember')}</button>
+    <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{form.role === 'manager' ? t('form.addManager') : t('form.addTeamMember')}</button></div>
   </form>;
 }
-function ProjectForm({ form, setForm, managers, onSubmit }) { const t = useT(); return <form className="form-panel" id="project-form" onSubmit={onSubmit}><div className="panel-header"><div><h2>{t('form.addProject')}</h2><span>{t('form.addProjectBlurb')}</span></div></div><div className="form-grid"><Field label={t('field.name')}><input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></Field><Field label={t('app.businessOperation')}><select value={form.sector} onChange={(event) => setForm({ ...form, sector: event.target.value })}>{sectors.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}</select></Field><Field label={t('field.location')}><input required value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} /></Field><Field label={t('field.organizationOwner')}><input required value={form.owner} onChange={(event) => setForm({ ...form, owner: event.target.value })} /></Field><Field label={t('field.status')}><select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}>{['On Track', 'In Review', 'Delayed', 'Healthy'].map((option) => <option key={option} value={option}>{t(`status.${option}`)}</option>)}</select></Field><Field label={t('table.progress')}><input required type="number" min="0" max="100" value={form.progress} onChange={(event) => setForm({ ...form, progress: event.target.value })} /></Field><Field label={t('field.category')}><input required value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} /></Field><Field label={t('field.manager')}><select value={form.managerId} onChange={(event) => setForm({ ...form, managerId: event.target.value })}><option value="">{t('table.unassigned')}</option>{managers.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}</select></Field><Field label={t('field.budget')}><input required type="number" min="0" value={form.budget} onChange={(event) => setForm({ ...form, budget: event.target.value })} /></Field><Field label={t('field.spent')}><input required type="number" min="0" value={form.spent} onChange={(event) => setForm({ ...form, spent: event.target.value })} /></Field></div><button className="primary-btn" type="submit">{t('form.addProject')}</button></form>; }
+
+function ProjectForm({ form, setForm, managers, busy, onSubmit }) {
+  const t = useT();
+  const managerOptions = managers.filter((manager) => manager.coversAllSectors || manager.sector === form.sector);
+  return <form className="form-panel" id="project-form" onSubmit={onSubmit}>
+    <div className="panel-header"><div><h2>{t('form.addProject')}</h2><span>{t('form.addProjectBlurb')}</span></div></div>
+    <div className="form-grid">
+      <Field label={t('field.name')}><input required maxLength="200" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></Field>
+      <Field label={t('app.businessOperation')}><select value={form.sector} onChange={(event) => setForm({ ...form, sector: event.target.value, managerId: '' })}>{sectors.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}</select></Field>
+      <Field label={t('field.location')}><input required maxLength="200" value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} /></Field>
+      <Field label={t('field.organizationOwner')}><input required maxLength="200" value={form.owner} onChange={(event) => setForm({ ...form, owner: event.target.value })} /></Field>
+      <Field label={t('field.status')}><select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}>{PROJECT_STATUSES.map((option) => <option key={option} value={option}>{t(`status.${option}`)}</option>)}</select></Field>
+      <Field label={t('table.progress')}><input required type="number" inputMode="numeric" min="0" max="100" step="1" value={form.progress} onChange={(event) => setForm({ ...form, progress: event.target.value })} /></Field>
+      <Field label={t('field.category')}><input required maxLength="100" value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} /></Field>
+      <Field label={t('field.manager')}><select value={form.managerId} onChange={(event) => setForm({ ...form, managerId: event.target.value })}><option value="">{t('table.unassigned')}</option>{managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}</select></Field>
+      <Field label={t('field.budget')}><input required type="number" inputMode="decimal" min="0" value={form.budget} onChange={(event) => setForm({ ...form, budget: event.target.value })} /></Field>
+      <Field label={t('field.spent')}><input required type="number" inputMode="decimal" min="0" value={form.spent} onChange={(event) => setForm({ ...form, spent: event.target.value })} /></Field>
+    </div>
+    <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('form.addProject')}</button></div>
+  </form>;
+}
+
 // One form for both ways in. A manager fills it to raise work and the budget it
 // needs, which the Director then decides; the Director fills it to hand work
 // out, and the three fields at the end -- who carries it out, by when, and on
 // what terms -- are theirs alone.
-function ActivityForm({ form, setForm, projects, selectedProject, sectorOptions, managers, isDirector, usd, onChooseProject, onSubmit }) {
+function ActivityForm({ form, setForm, projects, selectedProject, sectorOptions, managers, isDirector, usd, rate, busy, onChooseProject, onSubmit }) {
   const t = useT();
   // A manager only ever reads their own working area, so only the managers who
   // cover the chosen area can be handed the work. The API refuses the rest.
   // A manager covering every operation can take work in any of them, so they
   // belong in every list alongside that operation's own managers.
   const managerOptions = managers.filter((manager) => manager.coversAllSectors || manager.sector === form.sector);
-  const incomplete = !form.projectId || !form.category.trim() || !form.activity.trim()
-    || Number(form.quantity) <= 0 || form.costUsd === '' || (isDirector && !form.assignedTo);
+  // What is still missing, said plainly next to the button, rather than a
+  // disabled button with no explanation.
+  const missing = [
+    !form.projectId && t('field.project'),
+    !form.category.trim() && t('field.category'),
+    !form.activity.trim() && t('field.activity'),
+    !(Number(form.quantity) > 0) && t('field.quantity'),
+    form.costUsd === '' && (isDirector ? t('form.budgetUsd') : t('form.requestedBudgetUsd')),
+    isDirector && !form.assignedTo && t('field.carriedOutBy')
+  ].filter(Boolean);
 
   return <form className="form-panel" id="activity-form" onSubmit={onSubmit}>
     <div className="panel-header"><div>
@@ -1368,15 +2105,15 @@ function ActivityForm({ form, setForm, projects, selectedProject, sectorOptions,
       <Field label={t('field.category')}>
         <select required value={form.categoryChoice} onChange={(event) => { const choice = event.target.value; setForm({ ...form, categoryChoice: choice, category: choice === OTHER_CATEGORY ? '' : choice }); }}>
           <option value="">{t('form.selectCategory')}</option>
-          {categoriesForSector(form.sector).map((category) => <option key={category} value={category}>{category}</option>)}
+          {categoriesForSector(form.sector).map((category) => <option key={category} value={category}>{categoryLabel(category, t)}</option>)}
           <option value={OTHER_CATEGORY}>{t('form.otherSpecify')}</option>
         </select>
       </Field>
       {form.categoryChoice === OTHER_CATEGORY && <Field label={t('field.specifyCategory')}>
-        <input required value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} />
+        <input required maxLength="100" value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} />
       </Field>}
       <Field label={t('field.activity')}>
-        <input required value={form.activity} onChange={(event) => setForm({ ...form, activity: event.target.value })} />
+        <input required maxLength="200" value={form.activity} onChange={(event) => setForm({ ...form, activity: event.target.value })} />
       </Field>
       <Field label={t('field.description')}>
         <input placeholder={isDirector ? t('form.whatWorkInvolves') : t('form.whyWorkNeeded')} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
@@ -1385,13 +2122,15 @@ function ActivityForm({ form, setForm, projects, selectedProject, sectorOptions,
         <textarea rows="3" placeholder={t('form.onePerLine')} value={form.materials} onChange={(event) => setForm({ ...form, materials: event.target.value })} />
       </Field>
       <Field label={t('field.quantity')}>
-        <input required type="number" min="0.01" step="0.01" value={form.quantity} onChange={(event) => setForm({ ...form, quantity: event.target.value })} />
+        <input required type="number" inputMode="decimal" min="0.01" step="0.01" value={form.quantity} onChange={(event) => setForm({ ...form, quantity: event.target.value })} />
       </Field>
       <Field label={isDirector ? t('form.budgetUsd') : t('form.requestedBudgetUsd')}>
-        <input required type="number" min="0" step="0.01" placeholder={isDirector ? t('form.amountReleased') : t('form.amountNeeded')} value={form.costUsd} onChange={(event) => setForm({ ...form, costUsd: event.target.value })} />
+        <input required type="number" inputMode="decimal" min="0" step="0.01" placeholder={isDirector ? t('form.amountReleased') : t('form.amountNeeded')} value={form.costUsd} onChange={(event) => setForm({ ...form, costUsd: event.target.value })} />
       </Field>
-      <Field label={t('field.equivalentRwf')}><input readOnly value={usd ? usd * exchangeRates.rwfPerUsd : ''} placeholder={t('form.calculatedFromUsd')} /></Field>
-      <Field label={t('field.equivalentCdf')}><input readOnly value={usd ? usd * exchangeRates.cdfPerUsd : ''} placeholder={t('form.calculatedFromUsd')} /></Field>
+      {/* At the Director's current reference rate, the same one the Movements
+          module uses -- not a figure fixed in the code. */}
+      <Field label={t('field.equivalentRwf')}><input readOnly tabIndex={-1} value={usd ? formatNumber(round2(usd * rate.rwfPerUsd)) : ''} placeholder={t('form.calculatedFromUsd')} /></Field>
+      <Field label={t('field.equivalentCdf')}><input readOnly tabIndex={-1} value={usd ? formatNumber(round2(usd * rate.cdfPerUsd)) : ''} placeholder={t('form.calculatedFromUsd')} /></Field>
       {isDirector && <>
         <Field label={t('field.carriedOutBy')}>
           <select required value={form.assignedTo} onChange={(event) => setForm({ ...form, assignedTo: event.target.value })} disabled={!managerOptions.length}>
@@ -1409,10 +2148,30 @@ function ActivityForm({ form, setForm, projects, selectedProject, sectorOptions,
       <label className="check-field"><input type="checkbox" checked={form.signed} onChange={(event) => setForm({ ...form, signed: event.target.checked })} />{t('form.signed')}</label>
     </div>
     {isDirector && !managerOptions.length && <p className="decision-hint">{t('form.noManagerCovers')}</p>}
-    <button className="primary-btn" disabled={incomplete} type="submit">{isDirector ? t('action.assignActivity') : t('form.submitForReview')}</button>
+    <div className="form-submit-bar">
+      {missing.length > 0 && <p className="form-missing">{t('form.stillNeeded')}: {missing.join(', ')}</p>}
+      <button className="primary-btn" disabled={busy || missing.length > 0} type="submit">{isDirector ? t('action.assignActivity') : t('form.submitForReview')}</button>
+    </div>
   </form>;
 }
-function ApprovalForm({ form, setForm, sectorOptions, onSubmit }) { const t = useT(); return <form className="form-panel" onSubmit={onSubmit}><div className="panel-header"><div><h2>{t('form.raiseRequest')}</h2><span>{t('form.raiseRequestBlurb')}</span></div></div><div className="form-grid"><Field label={t('field.whatIsNeeded')}><input required value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></Field><Field label={t('app.businessOperation')}><select value={form.sector} onChange={(event) => setForm({ ...form, sector: event.target.value })}>{sectorOptions.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}</select></Field><Field label={t('field.estimatedAmount')}><input required type="number" min="0" value={form.amount} onChange={(event) => setForm({ ...form, amount: event.target.value })} /></Field><Field label={t('field.organizationOwner')}><input required value={form.owner} onChange={(event) => setForm({ ...form, owner: event.target.value })} /></Field><Field label={t('field.priority')}><select value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })}>{[['Low', 'form.priorityLow'], ['Medium', 'form.priorityMedium'], ['High', 'form.priorityHigh']].map(([value, key]) => <option key={value} value={value}>{t(key)}</option>)}</select></Field><Field label={t('field.requestedBy')}><input readOnly value={form.requestedBy} /></Field><Field label={t('field.reasonForRequest')}><textarea required rows="3" value={form.justification} onChange={(event) => setForm({ ...form, justification: event.target.value })} /></Field></div><button className="primary-btn" type="submit">{t('action.sendForApproval')}</button></form>; }
+
+function ApprovalForm({ form, setForm, sectorOptions, busy, onSubmit }) {
+  const t = useT();
+  return <form className="form-panel" onSubmit={onSubmit}>
+    <div className="panel-header"><div><h2>{t('form.raiseRequest')}</h2><span>{t('form.raiseRequestBlurb')}</span></div></div>
+    <div className="form-grid">
+      <Field label={t('field.whatIsNeeded')}><input required maxLength="200" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></Field>
+      <Field label={t('app.businessOperation')}><select value={form.sector} onChange={(event) => setForm({ ...form, sector: event.target.value })}>{sectorOptions.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}</select></Field>
+      <Field label={t('field.estimatedAmount')}><input required type="number" inputMode="decimal" min="0" value={form.amount} onChange={(event) => setForm({ ...form, amount: event.target.value })} /></Field>
+      <Field label={t('field.organizationOwner')}><input required maxLength="150" value={form.owner} onChange={(event) => setForm({ ...form, owner: event.target.value })} /></Field>
+      <Field label={t('field.priority')}><select value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })}>{[['Low', 'form.priorityLow'], ['Medium', 'form.priorityMedium'], ['High', 'form.priorityHigh']].map(([value, key]) => <option key={value} value={value}>{t(key)}</option>)}</select></Field>
+      <Field label={t('field.requestedBy')}><input readOnly tabIndex={-1} value={form.requestedBy} /></Field>
+      <Field label={t('field.reasonForRequest')}><textarea required rows="3" value={form.justification} onChange={(event) => setForm({ ...form, justification: event.target.value })} /></Field>
+    </div>
+    <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('action.sendForApproval')}</button></div>
+  </form>;
+}
+
 // The Reports section: pick a period, read the figures, take them away.
 //
 // Every number below is computed on the server from the activity register, and
@@ -1428,10 +2187,11 @@ function ReportsSection({ mode, range, report, busy, sectorLabel, onModeChange, 
         <h2>{t('report.title')}</h2>
         <span>{t('report.blurb')}</span>
       </div>
-      <div className="report-actions report-controls">
+      <div className="report-actions report-controls" role="group" aria-label={t('report.title')}>
         {REPORT_MODES.map(([id, key]) => <button
           key={id}
           className={mode === id ? 'primary-btn' : 'secondary-btn'}
+          aria-pressed={mode === id}
           onClick={() => onModeChange(id)}
           type="button"
         >{t(key)}</button>)}
@@ -1480,10 +2240,9 @@ function ReportBody({ report, busy, sectorLabel, onExport, onPrint, onClose }) {
       <div>
         <strong>{report.period.label}</strong>
         <span>
-          {report.period.start} {t('report.to')} {report.period.end} &middot; {sectorName(report.scope.sector) || report.scope.sectorName}
-          {' '}&middot; {t('report.generated')} {new Date(report.generatedAt).toLocaleString()}
+          {formatDate(report.period.start)} {t('report.to')} {formatDate(report.period.end)} &middot; {sectorName(report.scope.sector) || report.scope.sectorName}
+          {' '}&middot; {t('report.generated')} {new Date(report.generatedAt).toLocaleString(displayLanguage())}
         </span>
-        <span className="muted-cell">{report.basis}</span>
       </div>
       <div className="report-actions report-controls">
         <button className="secondary-btn" type="button" disabled={busy} onClick={() => onExport('pdf')}>{t('action.exportPdf')}</button>
@@ -1516,52 +2275,54 @@ function ReportBody({ report, busy, sectorLabel, onExport, onPrint, onClose }) {
           <div className="budget-block">
             <span>{t('report.totalAssignedBudget')}</span>
             <strong>{formatUsd(budget.assigned)}</strong>
-            <small>What was originally set or asked for</small>
+            <small>{t('report.assignedHint')}</small>
           </div>
           <div className={`budget-block${budget.revised !== budget.assigned ? ' budget-adjusted' : ''}`}>
             <span>{t('report.totalRevisedBudget')}</span>
             <strong>{formatUsd(budget.revised)}</strong>
-            <small>{budget.revised === budget.assigned ? 'Unchanged on review' : `${budget.revised > budget.assigned ? '+' : ''}${formatUsd(budget.revised - budget.assigned)} against the original`}</small>
+            <small>{budget.revised === budget.assigned
+              ? t('report.unchangedOnReview')
+              : fill(t('report.againstOriginal'), { change: `${budget.revised > budget.assigned ? '+' : ''}${formatUsd(budget.revised - budget.assigned)}` })}</small>
           </div>
           <div className="budget-block">
             <span>{t('report.totalActualSpending')}</span>
             <strong>{formatUsd(budget.spent)}</strong>
-            <small>{budget.utilisation}% of the revised budget, from filed evidence</small>
+            <small>{fill(t('report.utilisationHint'), { percent: budget.utilisation })}</small>
           </div>
           <div className={`budget-block${budget.remaining < 0 ? ' budget-adjusted' : ''}`}>
             <span>{t('report.remainingBudget')}</span>
             <strong>{formatUsd(budget.remaining)}</strong>
-            <small>{budget.remaining < 0 ? 'Spending has passed the released budget' : 'Released but not yet spent'}</small>
+            <small>{budget.remaining < 0 ? t('report.overspent') : t('report.releasedNotSpent')}</small>
           </div>
         </div>
 
         <h3 className="form-section-title">{t('report.managerPerformance')}</h3>
-        <div className="table-wrap"><table>
+        <div className="table-wrap"><table className="card-table">
           <thead><tr>
             <th>{t('field.manager')}</th><th>{t('report.activitiesAssigned')}</th><th>{t('portal.completed')}</th><th>{t('portal.inProgress')}</th>
             <th>{t('report.overdue')}</th><th>{t('report.totalBudgetHandled')}</th><th>{t('field.spent')}</th>
           </tr></thead>
           <tbody>{report.managers.map((entry) => <tr key={entry.managerId ?? 'unassigned'}>
-            <td><strong>{entry.managerName}</strong>
-              {entry.managerId === null && <small className="muted-cell">Work nobody has been given yet</small>}</td>
-            <td>{entry.assigned}</td>
-            <td>{entry.completed}</td>
-            <td>{entry.inProgress}</td>
-            <td className={entry.overdue ? 'over-budget' : undefined}>{entry.overdue || <span className="muted-cell">0</span>}</td>
-            <td>{formatUsd(entry.budgetHandled)}</td>
-            <td>{formatUsd(entry.spent)}</td>
+            <td className="card-title-cell"><strong>{entry.managerId === null ? t('table.unassigned') : entry.managerName}</strong>
+              {entry.managerId === null && <small className="muted-cell">{t('report.unassignedWork')}</small>}</td>
+            <td data-label={t('report.activitiesAssigned')}>{entry.assigned}</td>
+            <td data-label={t('portal.completed')}>{entry.completed}</td>
+            <td data-label={t('portal.inProgress')}>{entry.inProgress}</td>
+            <td data-label={t('report.overdue')} className={entry.overdue ? 'over-budget' : undefined}>{entry.overdue || <span className="muted-cell">0</span>}</td>
+            <td data-label={t('report.totalBudgetHandled')}>{formatUsd(entry.budgetHandled)}</td>
+            <td data-label={t('field.spent')}>{formatUsd(entry.spent)}</td>
           </tr>)}</tbody>
         </table></div>
 
         <h3 className="form-section-title">{t('report.activityDetails')}</h3>
-        <div className="table-wrap"><table className="report-detail-table">
+        <div className="table-wrap scroll-hint"><table className="report-detail-table">
           <thead><tr>
             <th>{t('table.activity')}</th><th>{t('report.projectArea')}</th><th>{t('report.assignedManager')}</th>
             <th>{t('activities.originalBudget')}</th><th>{t('report.revisedBudget')}</th><th>{t('report.actualSpending')}</th>
             <th>{t('table.status')}</th><th>{t('report.dateAssigned')}</th><th>{t('report.completionDate')}</th><th>{t('report.adminNotes')}</th>
           </tr></thead>
           <tbody>{report.activities.map((item) => <tr key={item.id}>
-            <td><strong>{item.activity}</strong><small>{item.category}</small></td>
+            <td><strong>{item.activity}</strong><small>{categoryLabel(item.category, t)}</small></td>
             <td>{item.projectName}<small className="muted-cell">{sectorLabel(item.sector)}</small></td>
             <td>{item.assignedToName || <span className="muted-cell">{t('review.notAssigned')}</span>}</td>
             <td>{formatUsd(item.originalBudget)}</td>
@@ -1569,16 +2330,16 @@ function ReportBody({ report, busy, sectorLabel, onExport, onPrint, onClose }) {
                 read as the Director having released nothing. */}
             <td className={item.budgetAdjustment ? 'over-budget' : undefined}>
               {item.revisedBudget === null
-                ? <span className="muted-cell">Not decided</span>
+                ? <span className="muted-cell">{t('activities.notDecided')}</span>
                 : <>{formatUsd(item.revisedBudget)}
                   {item.budgetAdjustment ? <small>{item.budgetAdjustment > 0 ? '+' : ''}{formatUsd(item.budgetAdjustment)}</small> : null}</>}
             </td>
             <td>{formatUsd(item.actualSpending)}
               <small className={item.remainingBudget < 0 ? 'over-budget' : 'muted-cell'}>
-                {formatUsd(item.remainingBudget)} left
+                {fill(t('report.left'), { amount: formatUsd(item.remainingBudget) })}
               </small></td>
-            <td><span className={`status-badge ${statusTone(item.status)}`}>{item.status}</span>
-              {item.overdue && <small className="deadline-flag deadline-overdue">Overdue</small>}</td>
+            <td><span className={`status-badge ${statusTone(item.status)}`}>{t(`status.${item.status}`)}</span>
+              {item.overdue && <small className="deadline-flag deadline-overdue">{t('report.overdue')}</small>}</td>
             <td>{item.dateAssigned ? formatDate(item.dateAssigned) : <span className="muted-cell">&mdash;</span>}</td>
             <td>{item.completionDate ? formatDate(item.completionDate) : <span className="muted-cell">&mdash;</span>}</td>
             <td className="report-note-cell"><ReportNotes item={item} /></td>
@@ -1592,19 +2353,20 @@ function ReportBody({ report, busy, sectorLabel, onExport, onPrint, onClose }) {
 // beside the revised one. The Director's standing note, the trail of what they
 // actually changed it to, and any request a manager raised, all read together.
 function ReportNotes({ item }) {
+  const t = useT();
   const hasAnything = item.adminNote || item.budgetRevisions.length || item.budgetRequests.length;
   if (!hasAnything) return <span className="muted-cell">&mdash;</span>;
 
   return <div className="report-notes">
     {item.adminNote && <span className="admin-note">&ldquo;{item.adminNote}&rdquo;</span>}
     {item.budgetRevisions.map((change, index) => <small key={`revision-${index}`}>
-      {change.from === null ? 'Not set' : formatUsd(change.from)} &rarr; {change.to === null ? 'not set' : formatUsd(change.to)}
-      {change.changedBy ? ` by ${change.changedBy}` : ''}
+      {change.from === null ? t('report.notSet') : formatUsd(change.from)} &rarr; {change.to === null ? t('report.notSet') : formatUsd(change.to)}
+      {change.changedBy ? ` · ${change.changedBy}` : ''}
       {change.note ? ` — ${change.note}` : ''}
     </small>)}
     {item.budgetRequests.map((request, index) => <small key={`request-${index}`}>
-      {request.requestedBy || 'Manager'} asked for {formatUsd(request.requestedAmount)}: {request.reason}
-      {' '}({request.status === 'Pending' ? 'awaiting an answer' : request.status.toLowerCase()})
+      {fill(t('report.askedFor'), { name: request.requestedBy || t('role.manager'), amount: formatUsd(request.requestedAmount) })}: {request.reason}
+      {' '}({request.status === 'Pending' ? t('report.awaitingAnswer') : t(`budgetRequest.status.${request.status}`)})
       {request.decisionNote ? ` — ${request.decisionNote}` : ''}
     </small>)}
   </div>;

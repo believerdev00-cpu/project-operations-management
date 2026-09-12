@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { operationName } from '../shared/businessOperations.js';
+import { categoryLabel } from './ActivityReview.jsx';
 
 // External Business Partner / Business Operation Access.
 //
@@ -43,14 +44,16 @@ function statusTone(status) {
   return 'tone-waiting';
 }
 
-export default function PartnerPortal({ user, fetchJson, language, t, onError }) {
-  const [tab, setTab] = useState('overview');
+// The tab is carried in the address (#/activities, #/reports ...) by the shell,
+// so the back button steps between tabs and a refresh keeps the one open.
+export default function PartnerPortal({ user, fetchJson, language, t, tab = 'overview', onTab, onError }) {
   const [overview, setOverview] = useState(null);
   const [activities, setActivities] = useState([]);
   const [movements, setMovements] = useState([]);
   const [report, setReport] = useState(null);
   const [updates, setUpdates] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
 
   // The operation is read from the signed-in account, never chosen here. There
   // is no operation picker in this interface because there is nothing to pick:
@@ -72,7 +75,9 @@ export default function PartnerPortal({ user, fetchJson, language, t, onError })
       setMovements(movementResult);
       setReport(reportResult);
       setUpdates(updateResult);
+      setFailed(false);
     } catch (loadError) {
+      setFailed(true);
       onError(loadError.message);
     } finally {
       setLoading(false);
@@ -83,6 +88,12 @@ export default function PartnerPortal({ user, fetchJson, language, t, onError })
 
   if (loading) {
     return <div className="loading-state"><span className="spinner" />{t('app.loading')}</div>;
+  }
+  if (failed && !overview) {
+    return <div className="empty-state load-issue">
+      <strong>{t('app.loadFailed')}</strong>
+      <button className="secondary-btn" type="button" onClick={load}>{t('action.retry')}</button>
+    </div>;
   }
 
   return <>
@@ -102,12 +113,13 @@ export default function PartnerPortal({ user, fetchJson, language, t, onError })
       <strong>{t('portal.approvedOnly')}.</strong> {t('portal.approvedOnlyNote')}
     </p>
 
-    <nav className="partner-tabs">
+    <nav className="partner-tabs" aria-label={t('portal.title')}>
       {TABS.map(([id, labelKey]) => <button
         key={id}
         type="button"
         className={tab === id ? 'partner-tab active' : 'partner-tab'}
-        onClick={() => setTab(id)}
+        aria-current={tab === id ? 'page' : undefined}
+        onClick={() => onTab?.(id)}
       >{t(labelKey)}</button>)}
     </nav>
 
@@ -138,45 +150,45 @@ export default function PartnerPortal({ user, fetchJson, language, t, onError })
       title={t('portal.movements')}
       subtitle={`${movements.length} · ${operation}`}
     >
-      {movements.length ? <div className="table-wrap"><table>
+      {movements.length ? <div className="table-wrap"><table className="card-table">
         <thead><tr>
           <th>{t('table.purpose')}</th><th>{t('table.destination')}</th><th>{t('table.date')}</th>
           <th>{t('table.budget')}</th><th>{t('table.status')}</th>
         </tr></thead>
         <tbody>{movements.map((movement) => <tr key={movement.id}>
-          <td><strong>{movement.purpose}</strong><small>{movement.ref} · {movement.movementType}</small></td>
-          <td>{movement.origin ? `${movement.origin} → ` : ''}{movement.destination}</td>
-          <td>{formatDate(movement.departureDate, language)}</td>
-          <td>{movement.currency} {new Intl.NumberFormat('en-US').format(movement.estimatedTotal)}</td>
-          <td><span className={`status-badge ${statusTone(movement.status)}`}>{t(`status.${movement.status}`)}</span></td>
+          <td className="card-title-cell"><strong>{movement.purpose}</strong><small>{movement.ref} · {t(`mtype.${movement.movementType}`)}</small></td>
+          <td data-label={t('table.destination')}>{movement.origin ? `${movement.origin} → ` : ''}{movement.destination}</td>
+          <td data-label={t('table.date')}>{formatDate(movement.departureDate, language)}</td>
+          <td data-label={t('table.budget')}>{movement.currency} {new Intl.NumberFormat(language).format(movement.estimatedTotal)}</td>
+          <td data-label={t('table.status')}><span className={`status-badge ${statusTone(movement.status)}`}>{t(`status.${movement.status}`)}</span></td>
         </tr>)}</tbody>
       </table></div> : <EmptyState t={t}>{t('portal.noMovements')}</EmptyState>}
     </Panel>}
 
     {tab === 'reports' && report && <>
       <Panel title={t('portal.byMonth')} subtitle={operation}>
-        {report.byMonth.length ? <div className="table-wrap"><table>
+        {report.byMonth.length ? <div className="table-wrap"><table className="card-table">
           <thead><tr>
             <th>{t('portal.period')}</th><th>{t('portal.activities')}</th>
             <th>{t('portal.completed')}</th><th>{t('portal.approvedBudget')}</th>
           </tr></thead>
           <tbody>{report.byMonth.map((row) => <tr key={row.period}>
-            <td><strong>{row.period}</strong></td>
-            <td>{row.activities}</td>
-            <td>{row.completed}</td>
-            <td>{formatMoney(row.approvedBudget)}</td>
+            <td className="card-title-cell"><strong>{row.period}</strong></td>
+            <td data-label={t('portal.activities')}>{row.activities}</td>
+            <td data-label={t('portal.completed')}>{row.completed}</td>
+            <td data-label={t('portal.approvedBudget')}>{formatMoney(row.approvedBudget)}</td>
           </tr>)}</tbody>
         </table></div> : <EmptyState t={t}>{t('portal.noActivities')}</EmptyState>}
       </Panel>
       <Panel title={t('portal.byCategory')} subtitle={operation}>
-        {report.byCategory.length ? <div className="table-wrap"><table>
+        {report.byCategory.length ? <div className="table-wrap"><table className="card-table">
           <thead><tr>
             <th>{t('table.category')}</th><th>{t('portal.activities')}</th><th>{t('portal.approvedBudget')}</th>
           </tr></thead>
           <tbody>{report.byCategory.map((row) => <tr key={row.category}>
-            <td><strong>{row.category}</strong></td>
-            <td>{row.activities}</td>
-            <td>{formatMoney(row.approvedBudget)}</td>
+            <td className="card-title-cell"><strong>{categoryLabel(row.category, t)}</strong></td>
+            <td data-label={t('portal.activities')}>{row.activities}</td>
+            <td data-label={t('portal.approvedBudget')}>{formatMoney(row.approvedBudget)}</td>
           </tr>)}</tbody>
         </table></div> : <EmptyState t={t}>{t('portal.noActivities')}</EmptyState>}
       </Panel>
@@ -194,17 +206,17 @@ export default function PartnerPortal({ user, fetchJson, language, t, onError })
 
 function ActivityTable({ rows, language, t, empty }) {
   if (!rows.length) return <EmptyState t={t}>{empty}</EmptyState>;
-  return <div className="table-wrap"><table>
+  return <div className="table-wrap"><table className="card-table">
     <thead><tr>
       <th>{t('table.activity')}</th><th>{t('table.category')}</th><th>{t('table.budget')}</th>
       <th>{t('table.deadline')}</th><th>{t('table.status')}</th>
     </tr></thead>
     <tbody>{rows.map((row) => <tr key={row.id}>
-      <td><strong>{row.activity}</strong><small>{row.description || row.projectName || ''}</small></td>
-      <td>{row.category}</td>
-      <td>{row.approvedBudget === null ? '—' : formatMoney(row.approvedBudget)}</td>
-      <td>{formatDate(row.deadline, language)}</td>
-      <td><span className={`status-badge ${statusTone(row.status)}`}>{t(`status.${row.status}`)}</span></td>
+      <td className="card-title-cell"><strong>{row.activity}</strong><small>{row.description || row.projectName || ''}</small></td>
+      <td data-label={t('table.category')}>{categoryLabel(row.category, t)}</td>
+      <td data-label={t('table.budget')}>{row.approvedBudget === null ? '—' : formatMoney(row.approvedBudget)}</td>
+      <td data-label={t('table.deadline')}>{formatDate(row.deadline, language)}</td>
+      <td data-label={t('table.status')}><span className={`status-badge ${statusTone(row.status)}`}>{t(`status.${row.status}`)}</span></td>
     </tr>)}</tbody>
   </table></div>;
 }

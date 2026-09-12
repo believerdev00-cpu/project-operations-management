@@ -2,8 +2,9 @@
 
 The frontend and the API deploy together as one Vercel project. The Vite build
 is served as static files; the whole Express app runs as a single serverless
-function at `api/[...path].js`, so the browser keeps calling `/api/...` on the
-same origin and there is no CORS to configure.
+function at `api/index.js`, and `vercel.json` rewrites every `/api/...` path to
+it (Express still sees the original URL). The browser keeps calling `/api/...`
+on the same origin and there is no CORS to configure.
 
 ## 1. Create a Supabase Storage bucket
 

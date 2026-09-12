@@ -13,7 +13,7 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
 import { pool } from '../db/database.js';
-import { asyncRoute, isAdmin, requiredText, sectorIds } from '../lib/http.js';
+import { asyncRoute, isAdmin, parseId, requiredText, sectorIds } from '../lib/http.js';
 import { operationById } from '../../shared/businessOperations.js';
 
 const router = express.Router();
@@ -26,6 +26,13 @@ router.use((req, res, next) => {
   if (!isAdmin(req.user)) {
     return res.status(403).json({ message: 'Only the administrator can manage external partner access.' });
   }
+  next();
+});
+
+// Every /:id here is a users.id. Anything that is not one is simply not a
+// partner, rather than an integer cast Postgres refuses with a server error.
+router.param('id', (req, res, next, value) => {
+  if (!parseId(value)) return res.status(404).json({ message: 'External partner not found.' });
   next();
 });
 

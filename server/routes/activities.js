@@ -21,7 +21,10 @@ import express from 'express';
 import multer from 'multer';
 import { pool, safeRollback } from '../db/database.js';
 import { ACTIVITY_STATUSES, ACTIVITY_ORIGINS } from '../db/activitySchema.js';
-import { asyncRoute, hasFullScope, isAdmin, managerScope, requiredText, validNumber, validateSector, withinScope } from '../lib/http.js';
+import {
+  asyncRoute, contentDisposition, hasFullScope, isAdmin, isValidDate, managerScope, parseId, requiredText,
+  validNumber, validateSector, withinScope
+} from '../lib/http.js';
 import { canApprove, pendingForMeSql, resolveDirector, APPROVER_ROLE_LABELS } from '../lib/approvals.js';
 import { PAYMENT_METHODS } from '../db/monthlySchema.js';
 import {
@@ -78,6 +81,9 @@ class ActivityError extends Error {
 // code has decided whether the caller may upload at all.
 const upload = multer({
   storage: multer.memoryStorage(),
+  // Browsers send the filename as UTF-8. Busboy reads it as Latin-1 unless told
+  // otherwise, which stored "Fagitire_ñ.pdf" as mojibake.
+  defParamCharset: 'utf8',
   limits: { fileSize: 10 * 1024 * 1024, files: 10 },
   fileFilter: (req, file, done) => {
     if (!ALLOWED_MIME.has(file.mimetype)) {
@@ -312,19 +318,43 @@ async function loadActivity(id, user) {
   return result.rows[0];
 }
 
+// The record as it stands after a write the caller was already authorised to
+// make. Not scoped again: approving a record is exactly what takes it out of the
+// approver's "waiting on me" scope, and re-reading it through that scope turned
+// a saved approval into "Activity not found."
+async function reloadActivity(id) {
+  const result = await pool.query(`${SELECT_ACTIVITY} WHERE a.id = $1`, [id]);
+  if (!result.rowCount) throw new ActivityError(404, 'Activity not found.');
+  return result.rows[0];
+}
+
 function requireAdmin(user, action) {
   if (!isAdmin(user)) throw new ActivityError(403, `Only the Director can ${action}.`);
 }
 
-// A manager may correct their own request only while it is still theirs -- once
-// the Director has decided it, the record is read-only to them.
-function canEditRequest(user, row) {
-  if (isAdmin(user)) return true;
-  return row.created_by === user.id && ['Draft', 'Pending Approval', 'Rejected'].includes(row.status);
+// A closed month is a signed-off account. Anything that would change what it
+// recorded -- a decision, a status, a budget, a spend, the evidence -- waits
+// until the Director reopens the month.
+function assertPlanOpen(row) {
+  if (row.plan_status === 'Closed') {
+    throw new ActivityError(409, 'This activity belongs to a closed month. Ask the Director to reopen the month first.');
+  }
 }
 
+// A manager may correct their own request only while it is still undecided --
+// once the Director has decided it, the record is read-only to them.
+function canEditRequest(user, row) {
+  if (isAdmin(user)) return true;
+  return row.created_by === user.id && ['Draft', 'Pending Approval'].includes(row.status);
+}
+
+// Evidence belongs to whoever carries the work: the Director, the sector's
+// managers, or the account the work was handed to. A team member in the same
+// sector is not a party to a manager's activity and goes through their manager.
 function canAttachEvidence(user, row) {
-  return withinScope(user, row.sector);
+  if (isAdmin(user)) return true;
+  if (!withinScope(user, row.sector)) return false;
+  return user.role === 'manager' || Number(row.assigned_to) === Number(user.id);
 }
 
 router.use((req, res, next) => {
@@ -335,7 +365,7 @@ router.use((req, res, next) => {
 // ---- register -------------------------------------------------------------
 
 router.get('/', asyncRoute(async (req, res) => {
-  const { projectId, sector, status, search, awaiting, assignedTo, limit } = req.query;
+  const { projectId, sector, status, search, awaiting, assignedTo, limit, offset, unplanned, paged } = req.query;
   const values = [];
   const filters = [];
 
@@ -381,14 +411,32 @@ router.get('/', asyncRoute(async (req, res) => {
     values.push(req.user.id);
     filters.push(`a.assigned_to = $${values.length}`);
   }
+  // Approved, live work that no monthly plan has taken in yet: what the Director
+  // may attach to a month. Asked of the server rather than filtered out of the
+  // newest page of the register, which silently missed anything older.
+  if (unplanned === '1' || unplanned === 'true') {
+    filters.push(`(a.monthly_plan_id IS NULL AND a.approval_status = 'approved' AND a.status NOT IN ('Rejected', 'Cancelled'))`);
+  }
   if (!approvalQueue) managerScope(req.user, 'a.sector', values, filters);
 
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
   const requestedLimit = Number(limit || 5);
   const safeLimit = Number.isInteger(requestedLimit) && requestedLimit > 0 && requestedLimit <= 200 ? requestedLimit : 5;
-  values.push(safeLimit);
-  const result = await pool.query(`${SELECT_ACTIVITY} ${where} ORDER BY a.created_at DESC LIMIT $${values.length}`, values);
-  res.json(result.rows.map(mapActivity));
+  const requestedOffset = Number(offset || 0);
+  const safeOffset = Number.isInteger(requestedOffset) && requestedOffset >= 0 && requestedOffset <= 100000 ? requestedOffset : 0;
+  // One row beyond the page is read so the register knows whether to offer
+  // "Load more" without a second counting query.
+  values.push(safeLimit + 1, safeOffset);
+  const result = await pool.query(
+    `${SELECT_ACTIVITY} ${where} ORDER BY a.created_at DESC, a.id DESC LIMIT $${values.length - 1} OFFSET $${values.length}`,
+    values
+  );
+  const items = result.rows.slice(0, safeLimit).map(mapActivity);
+  // The register asks for pages; every older caller still receives a plain list.
+  if (paged === '1' || paged === 'true') {
+    return res.json({ items, hasMore: result.rows.length > safeLimit, offset: safeOffset, limit: safeLimit });
+  }
+  res.json(items);
 }));
 
 // The full review screen in one request: the record, its evidence, its history.
@@ -416,6 +464,9 @@ function validateRequestBody(payload) {
     || !validNumber(payload.costUsd) || !validNumber(payload.costRwf) || !validNumber(payload.costCdf ?? payload.costFco)) {
     return 'Category, activity, quantity, USD, RWF, and CDF values must be valid. Quantity must be greater than zero.';
   }
+  // The column widths, answered here rather than as a database error.
+  if (payload.category.trim().length > 100) return 'The category can be at most 100 characters.';
+  if (payload.activity.trim().length > 200) return 'The activity name can be at most 200 characters.';
   return null;
 }
 
@@ -447,12 +498,12 @@ router.post('/', asyncRoute(async (req, res) => {
   let assignedTo = null;
   let deadline = null;
   if (assigning) {
-    assignedTo = payload.assignedTo ? Number(payload.assignedTo) : null;
+    assignedTo = parseId(payload.assignedTo);
     if (!assignedTo) {
       return res.status(400).json({ message: 'Choose the manager who will carry out this activity.' });
     }
     const manager = await pool.query(
-      "SELECT id, sector, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager'",
+      "SELECT id, sector, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager' AND status = 'active'",
       [assignedTo]
     );
     if (!manager.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
@@ -463,8 +514,8 @@ router.post('/', asyncRoute(async (req, res) => {
       return res.status(400).json({ message: 'That manager works in a different area. Pick a manager from the same working area.' });
     }
     deadline = payload.deadline ? String(payload.deadline).slice(0, 10) : null;
-    if (deadline && !/^\d{4}-\d{2}-\d{2}$/.test(deadline)) {
-      return res.status(400).json({ message: 'The deadline must be a date.' });
+    if (deadline && !isValidDate(deadline)) {
+      return res.status(400).json({ message: 'The deadline must be a real date.' });
     }
   }
 
@@ -585,6 +636,7 @@ router.post('/', asyncRoute(async (req, res) => {
 // a manager cannot edit their way to an approved budget.
 router.put('/:id', asyncRoute(async (req, res) => {
   const existing = await loadActivity(req.params.id, req.user);
+  assertPlanOpen(existing);
   if (!canEditRequest(req.user, existing)) {
     return res.status(403).json({ message: 'This request has been reviewed and can no longer be edited. Ask the Director to reopen it.' });
   }
@@ -670,6 +722,12 @@ router.patch('/:id/approval', asyncRoute(async (req, res) => {
   if (existing.status === 'Draft') {
     return res.status(400).json({ message: 'This activity is still a draft and has not been submitted for approval.' });
   }
+  // Parked work is the Director's to bring back. Without this, the manager a
+  // held activity was assigned to could approve it straight out of On Hold.
+  if (['On Hold', 'Cancelled', 'Rejected'].includes(existing.status)) {
+    return res.status(409).json({ message: `This activity is ${existing.status} and cannot be approved or rejected.` });
+  }
+  assertPlanOpen(existing);
   // The check the whole workflow rests on: current_user.id must be the account
   // the record is waiting on.
   if (!canApprove(req.user, existing)) {
@@ -748,7 +806,7 @@ router.patch('/:id/approval', asyncRoute(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
+    const written = await client.query(
       `UPDATE activities
        SET approval_status = $2::text,
            approved_by = $3,
@@ -770,6 +828,12 @@ router.patch('/:id/approval', asyncRoute(async (req, res) => {
         settledBudget, adminNote, approved ? '' : rejectionReason
       ]
     );
+    // Two approvers answering at once: the guard above lets only one write
+    // land, and the other must be told rather than logged as a second decision.
+    if (!written.rowCount) {
+      await safeRollback(client);
+      return res.status(409).json({ message: 'Somebody else decided this activity a moment ago. Refresh to see the outcome.' });
+    }
     await logHistory(client, existing.id, req.user, entries);
     await client.query('COMMIT');
   } catch (error) {
@@ -779,7 +843,7 @@ router.patch('/:id/approval', asyncRoute(async (req, res) => {
     client.release();
   }
 
-  res.json(mapActivity(await loadActivity(existing.id, req.user)));
+  res.json(mapActivity(await reloadActivity(existing.id)));
 }));
 
 // Whether an external business partner assigned to this operation may see this
@@ -864,6 +928,7 @@ router.patch('/:id/submit', asyncRoute(async (req, res) => {
 router.patch('/:id/decision', asyncRoute(async (req, res) => {
   requireAdmin(req.user, 'review an activity');
   const existing = await loadActivity(req.params.id, req.user);
+  assertPlanOpen(existing);
   const payload = req.body || {};
 
   const statusGiven = Object.prototype.hasOwnProperty.call(payload, 'status') && payload.status !== null && payload.status !== '';
@@ -951,37 +1016,50 @@ router.patch('/:id/decision', asyncRoute(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
+    const written = await client.query(
       `UPDATE activities
        SET approved_budget = $2, status = $3::text, admin_note = $4, approved = $5,
            reviewed_by = $6, reviewed_at = NOW(),
-           completed_at = CASE WHEN $3::text = 'Completed' THEN NOW() ELSE NULL END,
+           -- A note saved on finished work leaves the day it was finished alone.
+           completed_at = CASE
+             WHEN $3::text = 'Completed' THEN (CASE WHEN status = 'Completed' THEN completed_at ELSE NOW() END)
+             ELSE NULL END,
            completion_submitted_at = CASE WHEN $7 THEN NULL ELSE completion_submitted_at END,
            -- The Director's wider decision surface reaches the same statuses the
            -- approve/reject route does, so the approval trail has to follow it.
            -- Otherwise a record cleared here would sit in its approver's queue
            -- for ever, and one reopened here would never come back.
+           --
+           -- On Hold is deliberately absent: parking work is not reopening its
+           -- decision. Treating it as 'pending' put held work back in its
+           -- approver's queue, where they could approve it out of the hold.
            approval_status = CASE
              WHEN $3::text = ANY($8::text[]) THEN 'approved'
              WHEN $3::text IN ('Rejected', 'Cancelled') THEN 'rejected'
-             WHEN $3::text IN ('Pending Approval', 'Draft', 'On Hold') THEN 'pending'
+             WHEN $3::text IN ('Pending Approval', 'Draft') THEN 'pending'
              ELSE approval_status END,
            approved_by = CASE
              WHEN $3::text = ANY($8::text[]) THEN COALESCE(approved_by, $6)
-             WHEN $3::text IN ('Pending Approval', 'Draft', 'On Hold') THEN NULL
+             WHEN $3::text IN ('Pending Approval', 'Draft') THEN NULL
              ELSE approved_by END,
            approved_at = CASE
              WHEN $3::text = ANY($8::text[]) THEN COALESCE(approved_at, NOW())
-             WHEN $3::text IN ('Pending Approval', 'Draft', 'On Hold') THEN NULL
+             WHEN $3::text IN ('Pending Approval', 'Draft') THEN NULL
              ELSE approved_at END,
            rejection_reason = CASE
              WHEN $3::text = 'Rejected' THEN $4
              WHEN $3::text = ANY($8::text[]) THEN ''
              ELSE rejection_reason END,
            updated_at = NOW()
-       WHERE id = $1`,
-      [existing.id, approvedBudget, status, adminNote, settled, req.user.id, returned, APPROVED_STATUSES]
+       -- The move was validated against the status read above; it only lands
+       -- if nobody has moved the record since.
+       WHERE id = $1 AND status = $9::text`,
+      [existing.id, approvedBudget, status, adminNote, settled, req.user.id, returned, APPROVED_STATUSES, existing.status]
     );
+    if (!written.rowCount) {
+      await safeRollback(client);
+      return res.status(409).json({ message: 'This activity changed while you were reviewing it. Refresh and try again.' });
+    }
     await logHistory(client, existing.id, req.user, entries);
     await client.query('COMMIT');
   } catch (error) {
@@ -1008,13 +1086,15 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
   if (!(STATUS_FLOW[existing.status] || []).includes(status)) {
     return res.status(400).json({ message: `A ${existing.status} activity cannot move straight to ${status}.` });
   }
+  assertPlanOpen(existing);
 
   // The one move a manager owns on their own work: starting what has been
   // approved. Approving and rejecting go through /approval, which checks that
   // the caller is the named approver; everything else is the Director's.
+  // Unassigned work in a sector is its managers' to start, not a team member's.
   const ownsIt = !isAdmin(req.user)
     && withinScope(req.user, existing.sector)
-    && (existing.assigned_to === null || existing.assigned_to === req.user.id);
+    && (existing.assigned_to === null ? req.user.role === 'manager' : existing.assigned_to === req.user.id);
   const managerStart = ownsIt
     && status === 'In Progress'
     && ['Approved', 'Budget Adjusted', 'Needs Correction'].includes(existing.status);
@@ -1028,35 +1108,40 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
+    const written = await client.query(
       `UPDATE activities
        SET status = $2::text,
            approved = CASE WHEN $2::text = ANY($3::text[]) THEN TRUE ELSE approved END,
            completed_at = CASE WHEN $2::text = 'Completed' THEN NOW() ELSE NULL END,
            -- Same reason as the decision route: a status move that clears,
            -- refuses or reopens a record has to carry the approval trail with
-           -- it, or the approver's queue and the register disagree.
+           -- it, or the approver's queue and the register disagree. On Hold
+           -- keeps the decision as it stood, for the same reason as there.
            approval_status = CASE
              WHEN $2::text = ANY($3::text[]) THEN 'approved'
              WHEN $2::text IN ('Rejected', 'Cancelled') THEN 'rejected'
-             WHEN $2::text IN ('Pending Approval', 'Draft', 'On Hold') THEN 'pending'
+             WHEN $2::text IN ('Pending Approval', 'Draft') THEN 'pending'
              ELSE approval_status END,
            approved_by = CASE
              WHEN $2::text = ANY($3::text[]) THEN COALESCE(approved_by, $4)
-             WHEN $2::text IN ('Pending Approval', 'Draft', 'On Hold') THEN NULL
+             WHEN $2::text IN ('Pending Approval', 'Draft') THEN NULL
              ELSE approved_by END,
            approved_at = CASE
              WHEN $2::text = ANY($3::text[]) THEN COALESCE(approved_at, NOW())
-             WHEN $2::text IN ('Pending Approval', 'Draft', 'On Hold') THEN NULL
+             WHEN $2::text IN ('Pending Approval', 'Draft') THEN NULL
              ELSE approved_at END,
            rejection_reason = CASE
              WHEN $2::text = 'Rejected' THEN $5
              WHEN $2::text = ANY($3::text[]) THEN ''
              ELSE rejection_reason END,
            updated_at = NOW()
-       WHERE id = $1`,
-      [existing.id, status, APPROVED_STATUSES, req.user.id, note]
+       WHERE id = $1 AND status = $6::text`,
+      [existing.id, status, APPROVED_STATUSES, req.user.id, note, existing.status]
     );
+    if (!written.rowCount) {
+      await safeRollback(client);
+      return res.status(409).json({ message: 'This activity changed a moment ago. Refresh and try again.' });
+    }
     await logHistory(client, existing.id, req.user, [
       { action: 'Status changed', field: 'status', oldValue: existing.status, newValue: status, note }
     ]);
@@ -1075,11 +1160,21 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
 // the record: the Director reviews the evidence and sets Completed.
 router.post('/:id/completion', asyncRoute(async (req, res) => {
   const existing = await loadActivity(req.params.id, req.user);
-  if (!withinScope(req.user, existing.sector)) {
-    return res.status(403).json({ message: 'You can only submit activities in your own sector.' });
+  // Finished work is handed back by whoever carries it: the manager it was
+  // assigned to, or -- for unassigned work -- a manager of that sector.
+  const carriesIt = isAdmin(req.user) || (
+    withinScope(req.user, existing.sector)
+    && (existing.assigned_to === null ? req.user.role === 'manager' : existing.assigned_to === req.user.id)
+  );
+  if (!carriesIt) {
+    return res.status(403).json({ message: 'Only the manager carrying out this activity can submit it as finished.' });
   }
+  assertPlanOpen(existing);
   if (!WORKABLE_STATUSES.includes(existing.status)) {
     return res.status(400).json({ message: `A ${existing.status} activity cannot be submitted as finished.` });
+  }
+  if (existing.completion_submitted_at) {
+    return res.status(409).json({ message: 'This activity has already been submitted as finished and is waiting for the Director.' });
   }
   const evidence = await pool.query('SELECT COUNT(*)::int AS total FROM activity_evidence WHERE activity_id = $1', [existing.id]);
   if (!evidence.rows[0].total) {
@@ -1115,6 +1210,7 @@ router.post('/:id/completion', asyncRoute(async (req, res) => {
 router.patch('/:id/assignment', asyncRoute(async (req, res) => {
   requireAdmin(req.user, 'assign an activity');
   const existing = await loadActivity(req.params.id, req.user);
+  assertPlanOpen(existing);
   const payload = req.body || {};
 
   const managerGiven = Object.prototype.hasOwnProperty.call(payload, 'assignedTo');
@@ -1126,10 +1222,14 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
 
   let assignedTo = existing.assigned_to;
   if (managerGiven) {
-    assignedTo = payload.assignedTo === null || payload.assignedTo === '' ? null : Number(payload.assignedTo);
+    const unassigning = payload.assignedTo === null || payload.assignedTo === '';
+    assignedTo = unassigning ? null : parseId(payload.assignedTo);
+    if (!unassigning && !assignedTo) {
+      return res.status(400).json({ message: 'The selected manager is invalid.' });
+    }
     if (assignedTo) {
       const manager = await pool.query(
-        "SELECT id, sector, name, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager'",
+        "SELECT id, sector, name, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager' AND status = 'active'",
         [assignedTo]
       );
       if (!manager.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
@@ -1142,8 +1242,8 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
   let deadline = toDateOnly(existing.deadline);
   if (deadlineGiven) {
     deadline = payload.deadline ? String(payload.deadline).slice(0, 10) : null;
-    if (deadline && !/^\d{4}-\d{2}-\d{2}$/.test(deadline)) {
-      return res.status(400).json({ message: 'The deadline must be a date.' });
+    if (deadline && !isValidDate(deadline)) {
+      return res.status(400).json({ message: 'The deadline must be a real date.' });
     }
   }
 
@@ -1195,10 +1295,19 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
 // A manager cannot move a budget the Director set. They ask, with a reason, and
 // the Director answers. The activity's own budget is only ever written by the
 // approval below, which keeps the original figure intact in requested_budget.
+// A budget can only be changed once there is an approved one to change. Before
+// that the Director sets the figure in the approval itself; after refusal or
+// cancellation there is nothing left to fund.
+const BUDGET_CHANGEABLE_STATUSES = ['Approved', 'Budget Adjusted', 'In Progress', 'Needs Correction', 'On Hold', 'Completed'];
+
 router.post('/:id/budget-requests', asyncRoute(async (req, res) => {
   const existing = await loadActivity(req.params.id, req.user);
-  if (!withinScope(req.user, existing.sector)) {
-    return res.status(403).json({ message: 'You can only ask about activities in your own working area.' });
+  if (!isAdmin(req.user) && (!withinScope(req.user, existing.sector) || req.user.role !== 'manager')) {
+    return res.status(403).json({ message: 'Only a manager in this working area can ask for a budget change.' });
+  }
+  assertPlanOpen(existing);
+  if (!BUDGET_CHANGEABLE_STATUSES.includes(existing.status)) {
+    return res.status(400).json({ message: `A ${existing.status} activity has no approved budget to change yet.` });
   }
   const { amount, reason } = req.body || {};
   if (!validNumber(amount)) {
@@ -1246,6 +1355,7 @@ router.post('/:id/budget-requests', asyncRoute(async (req, res) => {
 router.patch('/:id/budget-requests/:requestId', asyncRoute(async (req, res) => {
   requireAdmin(req.user, 'decide a budget change');
   const existing = await loadActivity(req.params.id, req.user);
+  assertPlanOpen(existing);
   const { status, decisionNote } = req.body || {};
   if (!['Approved', 'Declined'].includes(status)) {
     return res.status(400).json({ message: 'Approve or decline the budget change.' });
@@ -1253,10 +1363,15 @@ router.patch('/:id/budget-requests/:requestId', asyncRoute(async (req, res) => {
   if (status === 'Declined' && !requiredText(decisionNote)) {
     return res.status(400).json({ message: 'Say why the budget change is declined.' });
   }
+  if (status === 'Approved' && !BUDGET_CHANGEABLE_STATUSES.includes(existing.status)) {
+    return res.status(400).json({ message: `A ${existing.status} activity has no approved budget to change. Decline the request instead.` });
+  }
+  const requestId = parseId(req.params.requestId);
+  if (!requestId) return res.status(404).json({ message: 'That budget change is not waiting for a decision.' });
 
   const found = await pool.query(
     "SELECT * FROM activity_budget_requests WHERE id = $1 AND activity_id = $2 AND status = 'Pending'",
-    [Number(req.params.requestId) || 0, existing.id]
+    [requestId, existing.id]
   );
   if (!found.rowCount) return res.status(404).json({ message: 'That budget change is not waiting for a decision.' });
   const request = found.rows[0];
@@ -1265,33 +1380,54 @@ router.patch('/:id/budget-requests/:requestId', asyncRoute(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
+    // Only a request still Pending at the moment of the write is decided, so two
+    // answers given at once cannot both land.
+    const decided = await client.query(
       `UPDATE activity_budget_requests
        SET status = $2, decision_note = $3, decided_by = $4, decided_by_name = $5, decided_at = NOW()
-       WHERE id = $1`,
+       WHERE id = $1 AND status = 'Pending'`,
       [request.id, status, note, req.user.id, req.user.name]
     );
+    if (!decided.rowCount) {
+      await safeRollback(client);
+      return res.status(409).json({ message: 'This budget change was decided a moment ago. Refresh to see the outcome.' });
+    }
     const entries = [{
       action: `Budget change ${status.toLowerCase()}`, field: 'budgetRequest',
       oldValue: round2(request.current_budget), newValue: round2(request.requested_amount), note
     }];
     if (status === 'Approved') {
+      // Locked, so a spend recorded at the same instant cannot slip under a
+      // budget that is about to shrink beneath it.
+      const position = await budgetPosition(client, existing.id);
+      if (cents(request.requested_amount) < cents(position.spent)) {
+        await safeRollback(client);
+        return res.status(400).json({
+          message: `${round2(position.spent)} has already been spent on this activity, so its budget cannot be set below that.`
+        });
+      }
       // Only the revised figure moves. requested_budget still holds the
-      // original, so the activity carries both from here on.
+      // original, so the activity carries both from here on. Finished and parked
+      // work keeps its status; live work reads as Budget Adjusted, which every
+      // live status may move to.
+      const nextStatus = ['Completed', 'On Hold'].includes(existing.status) ? existing.status : 'Budget Adjusted';
       await client.query(
         `UPDATE activities
-         SET approved_budget = $2, status = CASE WHEN status = 'Completed' THEN status ELSE 'Budget Adjusted' END,
-             admin_note = $3, reviewed_by = $4, reviewed_at = NOW(), approved = TRUE, updated_at = NOW()
+         SET approved_budget = $2, status = $5::text,
+             admin_note = $3, reviewed_by = $4, reviewed_at = NOW(), approved = TRUE,
+             approval_status = CASE WHEN approval_required THEN 'approved' ELSE approval_status END,
+             approved_by = COALESCE(approved_by, $4), approved_at = COALESCE(approved_at, NOW()),
+             updated_at = NOW()
          WHERE id = $1`,
-        [existing.id, round2(request.requested_amount), note || existing.admin_note, req.user.id]
+        [existing.id, round2(request.requested_amount), note || existing.admin_note, req.user.id, nextStatus]
       );
       entries.push({
         action: 'Budget decided', field: 'approvedBudget',
         oldValue: round2(request.current_budget), newValue: round2(request.requested_amount),
         note: note || request.reason
       });
-      if (existing.status !== 'Completed' && existing.status !== 'Budget Adjusted') {
-        entries.push({ action: 'Status changed', field: 'status', oldValue: existing.status, newValue: 'Budget Adjusted', note });
+      if (nextStatus !== existing.status) {
+        entries.push({ action: 'Status changed', field: 'status', oldValue: existing.status, newValue: nextStatus, note });
       }
     }
     await logHistory(client, existing.id, req.user, entries);
@@ -1318,9 +1454,16 @@ router.get('/:id/budget-requests', asyncRoute(async (req, res) => {
 
 router.delete('/:id', asyncRoute(async (req, res) => {
   const existing = await loadActivity(req.params.id, req.user);
-  if (!isAdmin(req.user) && !(existing.created_by === req.user.id && existing.status === 'Pending Review')) {
+  // A manager may withdraw their own request while it is still undecided. This
+  // used to test for 'Pending Review', a status the migration retired, so the
+  // branch could never be taken and every withdrawal was refused.
+  const withdrawable = existing.created_by === req.user.id
+    && ['Draft', 'Pending Approval'].includes(existing.status)
+    && existing.approval_status === 'pending';
+  if (!isAdmin(req.user) && !withdrawable) {
     return res.status(403).json({ message: 'Only the Director can delete a reviewed activity.' });
   }
+  assertPlanOpen(existing);
   const files = await pool.query('SELECT stored_name FROM activity_evidence WHERE activity_id = $1', [existing.id]);
   const result = await pool.query('DELETE FROM activities WHERE id = $1 RETURNING *', [existing.id]);
   // The rows are already gone by cascade; the bytes follow. A file that cannot
@@ -1337,13 +1480,23 @@ router.get('/:id/evidence', asyncRoute(async (req, res) => {
   res.json(result.rows.map(mapEvidence));
 }));
 
-router.post('/:id/evidence', upload.array('files', 10), asyncRoute(async (req, res) => {
-  // Nothing has been written anywhere yet -- the files are still in memory --
-  // so a refused upload leaves no bytes behind and needs no cleanup.
+// Decides whether the caller may upload BEFORE multer reads the body. Checked
+// after, any signed-in account could make the server hold 100 MB in memory for
+// an activity it cannot even see, only to be refused at the end.
+const authorizeEvidenceUpload = asyncRoute(async (req, res, next) => {
   const existing = await loadActivity(req.params.id, req.user);
   if (!canAttachEvidence(req.user, existing)) {
     return res.status(403).json({ message: 'You cannot attach evidence to this activity.' });
   }
+  assertPlanOpen(existing);
+  req.activity = existing;
+  next();
+});
+
+router.post('/:id/evidence', authorizeEvidenceUpload, upload.array('files', 10), asyncRoute(async (req, res) => {
+  // Nothing has been written anywhere yet -- the files are still in memory --
+  // so a refused upload leaves no bytes behind and needs no cleanup.
+  const existing = req.activity;
   if (!req.files?.length) return res.status(400).json({ message: 'Select at least one receipt, invoice or photograph to upload.' });
 
   const kind = EVIDENCE_KINDS.includes(req.body.kind) ? req.body.kind : 'Receipt';
@@ -1361,7 +1514,8 @@ router.post('/:id/evidence', upload.array('files', 10), asyncRoute(async (req, r
     if (evidenceType !== 'payment') {
       return res.status(400).json({ message: 'Only payment evidence can be attached to an expense.' });
     }
-    expenseId = Number(req.body.expenseId);
+    expenseId = parseId(req.body.expenseId);
+    if (!expenseId) return res.status(404).json({ message: 'That expense does not belong to this activity.' });
     const expense = await pool.query('SELECT id FROM activity_expenses WHERE id = $1 AND activity_id = $2', [expenseId, existing.id]);
     if (!expense.rowCount) return res.status(404).json({ message: 'That expense does not belong to this activity.' });
   }
@@ -1385,7 +1539,7 @@ router.post('/:id/evidence', upload.array('files', 10), asyncRoute(async (req, r
   try {
     await client.query('BEGIN');
     const saved = [];
-    for (const { file, storedName } of stored) {
+    for (const [index, { file, storedName }] of stored.entries()) {
       const result = await client.query(
         `INSERT INTO activity_evidence
            (activity_id, kind, original_name, stored_name, mime_type, size_bytes, amount, note,
@@ -1393,7 +1547,9 @@ router.post('/:id/evidence', upload.array('files', 10), asyncRoute(async (req, r
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
         [
           existing.id, kind, file.originalname.slice(0, 255), storedName, file.mimetype, file.size,
-          amount, note, req.user.id, req.user.name, evidenceType, expenseId
+          // One amount typed for one upload is one figure: carried on the first
+          // file only, so three receipts for a purchase do not read as three.
+          index === 0 ? amount : 0, note, req.user.id, req.user.name, evidenceType, expenseId
         ]
       );
       saved.push(mapEvidence(result.rows[0]));
@@ -1419,9 +1575,11 @@ router.post('/:id/evidence', upload.array('files', 10), asyncRoute(async (req, r
 
 router.get('/:id/evidence/:evidenceId/file', asyncRoute(async (req, res) => {
   const existing = await loadActivity(req.params.id, req.user);
+  const evidenceId = parseId(req.params.evidenceId);
+  if (!evidenceId) return res.status(404).json({ message: 'Evidence not found.' });
   const result = await pool.query(
     'SELECT * FROM activity_evidence WHERE id = $1 AND activity_id = $2',
-    [Number(req.params.evidenceId) || 0, existing.id]
+    [evidenceId, existing.id]
   );
   if (!result.rowCount) return res.status(404).json({ message: 'Evidence not found.' });
 
@@ -1430,30 +1588,53 @@ router.get('/:id/evidence/:evidenceId/file', asyncRoute(async (req, res) => {
   if (!file) return res.status(404).json({ message: 'The stored file is missing from the server.' });
 
   res.type(record.mime_type);
-  res.setHeader('Content-Disposition', `inline; filename="${record.original_name.replace(/"/g, '')}"`);
+  res.setHeader('Content-Disposition', contentDisposition(record.original_name));
   // Who may read this file is decided per request, so no shared cache and no
   // browser may keep a copy that outlives the check.
   res.setHeader('Cache-Control', 'private, no-store');
   // The disk gives back a stream, remote storage a buffer already in hand.
   if (Buffer.isBuffer(file)) return res.send(file);
+  // A read that fails part-way ends this response instead of leaving it hanging.
+  file.once('error', () => (res.headersSent ? res.destroy() : res.status(500).json({ message: 'The stored file could not be read.' })));
   return file.pipe(res);
 }));
 
 router.delete('/:id/evidence/:evidenceId', asyncRoute(async (req, res) => {
   const existing = await loadActivity(req.params.id, req.user);
   requireAdmin(req.user, 'remove evidence');
+  assertPlanOpen(existing);
+  const evidenceId = parseId(req.params.evidenceId);
+  if (!evidenceId) return res.status(404).json({ message: 'Evidence not found.' });
 
-  const result = await pool.query(
-    'DELETE FROM activity_evidence WHERE id = $1 AND activity_id = $2 RETURNING *',
-    [Number(req.params.evidenceId) || 0, existing.id]
-  );
-  if (!result.rowCount) return res.status(404).json({ message: 'Evidence not found.' });
+  // The row and its trail entry go together or not at all; the bytes are
+  // removed only once both are committed, so a failure can never leave evidence
+  // gone with no record of who removed it.
+  const client = await pool.connect();
+  let removed;
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      'DELETE FROM activity_evidence WHERE id = $1 AND activity_id = $2 RETURNING *',
+      [evidenceId, existing.id]
+    );
+    if (!result.rowCount) {
+      await safeRollback(client);
+      return res.status(404).json({ message: 'Evidence not found.' });
+    }
+    removed = result.rows[0];
+    await logHistory(client, existing.id, req.user, [
+      { action: 'Evidence removed', field: 'evidence', oldValue: removed.original_name, newValue: null }
+    ]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
 
-  await deleteFile(EVIDENCE_FOLDER, result.rows[0].stored_name);
-  await logHistory(pool, existing.id, req.user, [
-    { action: 'Evidence removed', field: 'evidence', oldValue: result.rows[0].original_name, newValue: null }
-  ]);
-  res.json({ message: 'Evidence removed.', deletedEvidence: mapEvidence(result.rows[0]) });
+  await deleteFile(EVIDENCE_FOLDER, removed.stored_name);
+  res.json({ message: 'Evidence removed.', deletedEvidence: mapEvidence(removed) });
 }));
 
 // ---- what was actually spent ----------------------------------------------
@@ -1519,8 +1700,8 @@ router.post('/:id/expenses', asyncRoute(async (req, res) => {
     return res.status(400).json({ message: 'The amount spent must be greater than zero.' });
   }
   const spentOn = payload.spentOn ? String(payload.spentOn).slice(0, 10) : null;
-  if (!spentOn || !/^\d{4}-\d{2}-\d{2}$/.test(spentOn)) {
-    return res.status(400).json({ message: 'The date spent is required.' });
+  if (!spentOn || !isValidDate(spentOn)) {
+    return res.status(400).json({ message: 'The date spent must be a real date.' });
   }
   if (!PAYMENT_METHODS.includes(payload.paymentMethod)) {
     return res.status(400).json({ message: `The payment method must be one of: ${PAYMENT_METHODS.join(', ')}.` });
@@ -1534,12 +1715,18 @@ router.post('/:id/expenses', asyncRoute(async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // A closed month is a signed-off account; nothing more is recorded against it.
+    // A closed month is a signed-off account; nothing more is recorded against
+    // it. A month still in Draft has no confirmed allocation yet, so there is no
+    // money handed over to spend.
     if (existing.monthly_plan_id) {
       const plan = await client.query('SELECT status FROM monthly_plans WHERE id = $1', [existing.monthly_plan_id]);
       if (plan.rowCount && plan.rows[0].status === 'Closed') {
         await safeRollback(client);
         return res.status(400).json({ message: 'This month has been closed. Ask the Director to reopen it.' });
+      }
+      if (plan.rowCount && plan.rows[0].status === 'Draft') {
+        await safeRollback(client);
+        return res.status(400).json({ message: 'This month has not been confirmed yet, so nothing can be spent against it.' });
       }
     }
 
@@ -1597,24 +1784,40 @@ router.delete('/:id/expenses/:expenseId', asyncRoute(async (req, res) => {
   if (!canDeleteExpense(req.user)) {
     return res.status(403).json({ message: 'Only the Director can remove a recorded expense.' });
   }
+  assertPlanOpen(existing);
+  const expenseId = parseId(req.params.expenseId);
+  if (!expenseId) return res.status(404).json({ message: 'Expense not found.' });
 
   const client = await pool.connect();
+  // The payment evidence filed against this expense is removed with it by
+  // cascade. Its rows are read first so the stored files go too, rather than
+  // being left in storage with nothing pointing at them.
+  let orphanedFiles = [];
   try {
     await client.query('BEGIN');
+    const files = await client.query(
+      'SELECT stored_name, original_name FROM activity_evidence WHERE expense_id = $1 AND activity_id = $2',
+      [expenseId, existing.id]
+    );
     const removed = await client.query(
       'DELETE FROM activity_expenses WHERE id = $1 AND activity_id = $2 RETURNING amount, description',
-      [req.params.expenseId, existing.id]
+      [expenseId, existing.id]
     );
     if (!removed.rowCount) {
       await safeRollback(client);
       return res.status(404).json({ message: 'Expense not found.' });
     }
+    orphanedFiles = files.rows;
     await logHistory(client, existing.id, req.user, [
       {
         action: 'Expense removed', field: 'actualExpense',
         oldValue: round2(removed.rows[0].amount), newValue: null,
         note: optionalText(req.body?.reason, 500) || removed.rows[0].description
-      }
+      },
+      ...files.rows.map((file) => ({
+        action: 'Evidence removed', field: 'evidence', oldValue: file.original_name, newValue: null,
+        note: 'Removed with its expense'
+      }))
     ]);
     await client.query('COMMIT');
   } catch (error) {
@@ -1623,6 +1826,7 @@ router.delete('/:id/expenses/:expenseId', asyncRoute(async (req, res) => {
   } finally {
     client.release();
   }
+  await Promise.all(orphanedFiles.map((file) => deleteFile(EVIDENCE_FOLDER, file.stored_name)));
 
   res.json({ message: 'Expense removed. The activity budget has been restored by that amount.' });
 }));

@@ -52,9 +52,16 @@ export async function resolveDirector(client) {
 // keeps work from stalling behind one named Director account while still
 // refusing every manager: a manager can never approve a director-role row, and
 // can never approve a row that names a different manager.
+// Statuses in which a record is not waiting on anybody's decision, even though
+// its approval_status may still read 'pending': a Draft is with its author, a
+// Cancelled record is nobody's to decide, and On Hold is parked by the Director
+// until the Director brings it back.
+export const NOT_AWAITING_STATUSES = ['Draft', 'Cancelled', 'On Hold'];
+
 export function canApprove(user, row) {
   if (!row.approval_required) return false;
   if (row.approval_status !== 'pending') return false;
+  if (NOT_AWAITING_STATUSES.includes(row.status)) return false;
   if (row.approval_required_role === 'director' && isDirectorRole(user)) return true;
   if (row.approval_required_from === null || row.approval_required_from === undefined) return false;
   return Number(row.approval_required_from) === Number(user.id);
@@ -72,12 +79,10 @@ export function approverMatchSql(user, values, alias) {
 }
 
 // A row is *waiting on* someone only once it has actually been submitted, and
-// only while it is still live. A Draft is still with its author and a Cancelled
-// record is nobody's decision to take, so neither is a queue item even though
-// approval_status is still 'pending'.
+// only while it is still live -- see NOT_AWAITING_STATUSES above.
 export function pendingForMeSql(user, values, alias = 'a') {
   return `(${alias}.approval_required = TRUE
     AND ${alias}.approval_status = 'pending'
-    AND ${alias}.status NOT IN ('Draft', 'Cancelled')
+    AND ${alias}.status NOT IN (${NOT_AWAITING_STATUSES.map((status) => `'${status}'`).join(', ')})
     AND ${approverMatchSql(user, values, alias)})`;
 }

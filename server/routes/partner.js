@@ -42,11 +42,15 @@ function activityVisibility(user, values) {
 // A movement belongs to the operation it supports; a Logistics partner also
 // sees the movements that are not linked to another operation, because those
 // are Movements & Facilitation's own work.
+//
+// Linkage is decided by related_area alone. movements.sector is 'movement' on
+// every row, so testing it here once let a Logistics partner read movements
+// that support Mining, Farming or Agriculture.
 function movementVisibility(user, values) {
   values.push(user.sector);
   const operation = `$${values.length}`;
   const belongs = user.sector === 'movement'
-    ? `(m.related_area IS NULL OR m.related_area = ${operation} OR m.sector = ${operation})`
+    ? `(m.related_area IS NULL OR m.related_area = ${operation})`
     : `m.related_area = ${operation}`;
   return `${belongs}
     AND m.approval_status = 'approved'
@@ -236,22 +240,29 @@ router.get('/report', asyncRoute(async (req, res) => {
 
   const values = [];
   const where = activityVisibility(req.user, values);
+  values.push(window);
+  // An activity belongs to the month its work was approved (or, failing that,
+  // handed out or raised). updated_at moved every time the record was touched --
+  // a visibility toggle, an upload -- and dragged old work into this month.
+  const day = 'COALESCE(a.approved_at, a.assigned_at, a.created_at)';
+  // Both tables read the same window, so they describe the same activities.
+  const inWindow = `${day} >= date_trunc('month', NOW()) - ($${values.length}::int - 1) * INTERVAL '1 month'`;
 
   const [byMonth, byCategory] = await Promise.all([
     pool.query(
-      `SELECT to_char(date_trunc('month', a.updated_at), 'YYYY-MM') AS period,
+      `SELECT to_char(date_trunc('month', ${day}), 'YYYY-MM') AS period,
               COUNT(*)::int AS activities,
               COUNT(*) FILTER (WHERE a.status = 'Completed')::int AS completed,
               COALESCE(SUM(a.approved_budget), 0) AS approved_budget
        FROM activities a
-       WHERE ${where} AND a.updated_at >= date_trunc('month', NOW()) - ($${values.length + 1}::int - 1) * INTERVAL '1 month'
+       WHERE ${where} AND ${inWindow}
        GROUP BY 1 ORDER BY 1`,
-      [...values, window]
+      values
     ),
     pool.query(
       `SELECT a.category, COUNT(*)::int AS activities,
               COALESCE(SUM(a.approved_budget), 0) AS approved_budget
-       FROM activities a WHERE ${where}
+       FROM activities a WHERE ${where} AND ${inWindow}
        GROUP BY 1 ORDER BY 2 DESC LIMIT 20`,
       values
     )
@@ -305,9 +316,8 @@ router.get('/updates', asyncRoute(async (req, res) => {
   })));
 }));
 
-router.use((error, req, res, next) => {
-  console.error(error);
-  res.status(500).json({ message: 'Server or database error.' });
-});
+// Handed on to the application's error handler, which tells bad input apart
+// from a genuine server fault.
+router.use((error, req, res, next) => next(error));
 
 export default router;

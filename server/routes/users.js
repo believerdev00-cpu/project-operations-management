@@ -1,7 +1,7 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
 import { pool } from '../db/database.js';
-import { ALL_OPERATIONS, asyncRoute, isAdmin, requiredText, sectorIds, withinScope } from '../lib/http.js';
+import { ALL_OPERATIONS, asyncRoute, isAdmin, parseId, requiredText, sectorIds, withinScope } from '../lib/http.js';
 
 const router = express.Router();
 
@@ -46,6 +46,11 @@ const ACCOUNT_SELECT = `
   LEFT JOIN users m ON m.id = u.manager_id
 `;
 
+router.param('id', (req, res, next, value) => {
+  if (!parseId(value)) return res.status(404).json({ message: 'Account not found.' });
+  next();
+});
+
 async function loadAccount(id) {
   const result = await pool.query(`${ACCOUNT_SELECT} WHERE u.id = $1`, [id]);
   return result.rowCount ? mapAccount(result.rows[0]) : null;
@@ -79,8 +84,12 @@ function translateConstraintError(error) {
 // The full account register, for the Director only: every user, their role, the
 // manager they report to, and the working area they cover.
 router.get('/', adminOnly('Only the administrator can view the account register.'), asyncRoute(async (req, res) => {
+  // External partners are managed from their own register, with their own
+  // controls; listed here they were offered a manager and a working area that
+  // mean nothing for an outside, view-only account.
   const result = await pool.query(
-    `${ACCOUNT_SELECT} ORDER BY CASE WHEN u.role = 'super-admin' THEN 0 WHEN u.role = 'manager' THEN 1 ELSE 2 END, u.name`
+    `${ACCOUNT_SELECT} WHERE u.role <> 'partner'
+     ORDER BY CASE WHEN u.role = 'super-admin' THEN 0 WHEN u.role = 'manager' THEN 1 ELSE 2 END, u.name`
   );
   const users = result.rows.map(mapAccount);
 
@@ -113,7 +122,8 @@ router.post('/', adminOnly('Only the administrator can create accounts.'), async
   }
   const storedSector = coversAll ? null : sector;
 
-  const managerId = req.body?.managerId ? Number(req.body.managerId) : null;
+  const managerId = req.body?.managerId ? parseId(req.body.managerId) : null;
+  if (req.body?.managerId && !managerId) return res.status(400).json({ message: 'The selected manager is invalid.' });
   if (managerId) {
     const manager = await pool.query(
       "SELECT id, sector, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager'",
@@ -175,6 +185,9 @@ router.patch('/:id/assignment', adminOnly('Only the administrator can change an 
   if (target.role === 'super-admin') {
     return res.status(403).json({ message: 'The Director oversees every area and reports to nobody.' });
   }
+  if (target.role === 'partner') {
+    return res.status(403).json({ message: 'Change an external partner\'s business operation from External Partners.' });
+  }
 
   // An absent key means "leave as is"; an explicit null means "clear it".
   const sectorGiven = Object.prototype.hasOwnProperty.call(payload, 'sector');
@@ -196,8 +209,11 @@ router.patch('/:id/assignment', adminOnly('Only the administrator can change an 
   const sector = coversAll ? null : requestedSector;
 
   let managerId = managerGiven
-    ? (payload.managerId === null || payload.managerId === '' ? null : Number(payload.managerId))
+    ? (payload.managerId === null || payload.managerId === '' ? null : parseId(payload.managerId))
     : target.manager_id;
+  if (managerGiven && payload.managerId !== null && payload.managerId !== '' && !managerId) {
+    return res.status(400).json({ message: 'The selected manager is invalid.' });
+  }
 
   if (managerId) {
     if (!Number.isInteger(managerId)) return res.status(400).json({ message: 'The selected manager is invalid.' });
@@ -215,6 +231,40 @@ router.patch('/:id/assignment', adminOnly('Only the administrator can change an 
     }
     if (await createsReportingLoop(target.id, managerId)) {
       return res.status(400).json({ message: 'That assignment would create a reporting loop.' });
+    }
+  }
+
+  // A manager whose scope narrows -- moved to another area, or no longer
+  // covering every area -- loses sight of everything outside the new one, so
+  // work they still hold there would be stranded: expenses nobody can record, a
+  // month-end report nobody can file, approvals nobody else can give. The move
+  // waits until that work has been handed to somebody else. Widening to every
+  // area strands nothing.
+  const narrows = target.role === 'manager' && !coversAll
+    && (target.covers_all_sectors || sector !== target.sector);
+  if (narrows) {
+    const held = await pool.query(
+      `SELECT
+         (SELECT COUNT(*) FROM activities
+           WHERE sector IS DISTINCT FROM $2 AND assigned_to = $1
+             AND status NOT IN ('Completed', 'Rejected', 'Cancelled'))::int AS activities,
+         (SELECT COUNT(*) FROM activities
+           WHERE sector IS DISTINCT FROM $2 AND approval_required_from = $1 AND approval_status = 'pending'
+             AND status NOT IN ('Draft', 'Cancelled', 'On Hold'))::int AS approvals,
+         (SELECT COUNT(*) FROM monthly_plans
+           WHERE sector IS DISTINCT FROM $2 AND manager_id = $1 AND status <> 'Closed')::int AS plans`,
+      [target.id, sector]
+    );
+    const { activities, approvals, plans } = held.rows[0];
+    if (activities || approvals || plans) {
+      const parts = [
+        activities && `${activities} open ${activities === 1 ? 'activity' : 'activities'}`,
+        approvals && `${approvals} pending ${approvals === 1 ? 'approval' : 'approvals'}`,
+        plans && `${plans} open monthly ${plans === 1 ? 'plan' : 'plans'}`
+      ].filter(Boolean);
+      return res.status(409).json({
+        message: `Hand this manager's work in their current area to someone else first: ${parts.join(', ')}.`
+      });
     }
   }
 

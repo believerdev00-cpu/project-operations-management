@@ -12,18 +12,19 @@ const emptyForm = { name: '', email: '', username: '', password: '', operation: 
 
 const STATUS_TONE = { active: 'tone-done', suspended: 'tone-waiting', revoked: 'tone-stopped' };
 
-export default function ExternalPartners({ register, language, t, onInvite, onChangeOperation, onChangeStatus, onResetPassword, onRemove }) {
+export default function ExternalPartners({ register, language, t, busy = false, onInvite, onChangeOperation, onChangeStatus, onResetPassword, onRemove }) {
   const [form, setForm] = useState(emptyForm);
 
+  // Cleared only once the invitation is saved, so a refused one keeps what was typed.
   const submit = (event) => {
     event.preventDefault();
-    onInvite(form, () => setForm(emptyForm));
+    Promise.resolve(onInvite(form)).then((saved) => { if (saved) setForm(emptyForm); });
   };
 
   return <>
     <section className="context-strip">
       <div>
-        <span className="eyebrow">EXTERNAL BUSINESS PARTNER ACCESS</span>
+        <span className="eyebrow">{t('partners.eyebrow')}</span>
         <h2>{t('partners.title')}</h2>
         <p>{t('partners.blurb')}</p>
       </div>
@@ -49,7 +50,7 @@ export default function ExternalPartners({ register, language, t, onInvite, onCh
           <span>{register.partners.length} · {t('partners.viewOnly')}</span>
         </div>
       </div>
-      {register.partners.length ? <div className="table-wrap"><table>
+      {register.partners.length ? <div className="table-wrap"><table className="card-table">
         <thead><tr>
           <th>{t('partners.name')}</th>
           <th>{t('partners.email')}</th>
@@ -60,12 +61,14 @@ export default function ExternalPartners({ register, language, t, onInvite, onCh
           <th>{t('table.actions')}</th>
         </tr></thead>
         <tbody>{register.partners.map((partner) => <tr key={partner.id}>
-          <td><strong>{partner.name}</strong><small>{partner.username}</small></td>
-          <td>{partner.email || <span className="muted-cell">—</span>}</td>
+          <td className="card-title-cell"><strong>{partner.name}</strong><small>{partner.username}</small></td>
+          <td data-label={t('partners.email')}>{partner.email || <span className="muted-cell">—</span>}</td>
           {/* Changing this one cell changes everything the partner can read, on
-              their very next request. */}
-          <td>
+              their very next request -- which is why the change is confirmed. */}
+          <td data-label={t('app.businessOperation')}>
             <select
+              aria-label={`${t('app.businessOperation')}: ${partner.name}`}
+              disabled={busy}
               value={partner.operation}
               onChange={(event) => onChangeOperation(partner, event.target.value)}
             >
@@ -74,21 +77,21 @@ export default function ExternalPartners({ register, language, t, onInvite, onCh
               </option>)}
             </select>
           </td>
-          <td><span className="status-badge">{t('partners.viewOnly')}</span></td>
-          <td><span className={`status-badge ${STATUS_TONE[partner.status] || ''}`}>
+          <td data-label={t('partners.accessLevel')}><span className="status-badge">{t('partners.viewOnly')}</span></td>
+          <td data-label={t('partners.status')}><span className={`status-badge ${STATUS_TONE[partner.status] || ''}`}>
             {t(`partners.${partner.status}`)}
           </span></td>
-          <td>
-            {partner.visibleActivities} {t('portal.activities').toLowerCase()}
-            <small>{partner.visibleMovements} {t('portal.movements').toLowerCase()}</small>
+          <td data-label={t('partners.visibleRecords')}>
+            {partner.visibleActivities} {t('portal.activities').toLocaleLowerCase(language)}
+            <small>{partner.visibleMovements} {t('portal.movements').toLocaleLowerCase(language)}</small>
           </td>
-          <td className="queue-actions">
+          <td className="queue-actions card-actions">
             {partner.status === 'active'
-              ? <button className="secondary-btn compact" type="button" onClick={() => onChangeStatus(partner, 'suspended')}>{t('partners.suspend')}</button>
-              : <button className="secondary-btn compact" type="button" onClick={() => onChangeStatus(partner, 'active')}>{t('partners.restore')}</button>}
-            {partner.status !== 'revoked' && <button className="danger-btn outlined compact" type="button" onClick={() => onChangeStatus(partner, 'revoked')}>{t('partners.revoke')}</button>}
-            <button className="text-btn" type="button" onClick={() => onResetPassword(partner)}>{t('partners.resetPassword')}</button>
-            <button className="danger-btn" type="button" onClick={() => onRemove(partner)}>{t('partners.remove')}</button>
+              ? <button className="secondary-btn compact" type="button" disabled={busy} onClick={() => onChangeStatus(partner, 'suspended')}>{t('partners.suspend')}</button>
+              : <button className="secondary-btn compact" type="button" disabled={busy} onClick={() => onChangeStatus(partner, 'active')}>{t('partners.restore')}</button>}
+            {partner.status !== 'revoked' && <button className="danger-btn outlined compact" type="button" disabled={busy} onClick={() => onChangeStatus(partner, 'revoked')}>{t('partners.revoke')}</button>}
+            <button className="text-btn" type="button" disabled={busy} onClick={() => onResetPassword(partner)}>{t('partners.resetPassword')}</button>
+            <button className="danger-btn" type="button" disabled={busy} onClick={() => onRemove(partner)}>{t('partners.remove')}</button>
           </td>
         </tr>)}</tbody>
       </table></div> : <div className="empty-state">
@@ -106,16 +109,16 @@ export default function ExternalPartners({ register, language, t, onInvite, onCh
       </div>
       <div className="form-grid">
         <label className="form-field"><span>{t('partners.name')}</span>
-          <input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
+          <input required maxLength="150" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
         </label>
         <label className="form-field"><span>{t('partners.email')}</span>
-          <input required type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} />
+          <input required type="email" inputMode="email" autoComplete="off" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} />
         </label>
         <label className="form-field"><span>{t('partners.username')}</span>
-          <input required value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} />
+          <input required maxLength="100" autoCapitalize="none" autoComplete="off" spellCheck="false" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} />
         </label>
         <label className="form-field"><span>{t('partners.password')}</span>
-          <input required type="password" minLength={6} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} />
+          <input required type="password" autoComplete="new-password" minLength={6} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} />
         </label>
         {/* Exactly one of the four. There is no "all operations" option, because
             an external partner is only ever given one. */}
@@ -129,10 +132,10 @@ export default function ExternalPartners({ register, language, t, onInvite, onCh
         {/* Not a choice: an external partner is view-only, and the API refuses
             any other level outright rather than quietly downgrading it. */}
         <label className="form-field"><span>{t('partners.accessLevel')}</span>
-          <input readOnly value={t('partners.viewOnly')} />
+          <input readOnly tabIndex={-1} value={t('partners.viewOnly')} />
         </label>
       </div>
-      <button className="primary-btn" type="submit">{t('partners.invite')}</button>
+      <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('partners.invite')}</button></div>
     </form>
   </>;
 }

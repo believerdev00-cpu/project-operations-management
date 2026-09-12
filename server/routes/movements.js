@@ -1,10 +1,13 @@
 import express from 'express';
 import multer from 'multer';
 import crypto from 'node:crypto';
-import { pool } from '../db/database.js';
+import { pool, safeRollback } from '../db/database.js';
 import { deleteFile, readFile, saveFile, storedFileName } from '../lib/storage.js';
 import { authMiddleware } from '../lib/auth.js';
-import { asyncRoute, hasFullScope, isAdmin, requiredText, validNumber, sectorIds } from '../lib/http.js';
+import {
+  asyncRoute, contentDisposition, hasFullScope, isAdmin, isValidDate as isCalendarDate, parseId, requiredText,
+  validNumber, sectorIds
+} from '../lib/http.js';
 import { MOVEMENT_STATUSES } from '../db/movementSchema.js';
 import { canApprove, pendingForMeSql, resolveDirector, APPROVER_ROLE_LABELS } from '../lib/approvals.js';
 import { CURRENCIES, convertAmount, getCurrentRate, round2 } from '../lib/rates.js';
@@ -47,6 +50,9 @@ const ALLOWED_MIME = new Set([
 // the caller may upload at all.
 const upload = multer({
   storage: multer.memoryStorage(),
+  // Browsers send the filename as UTF-8. Busboy reads it as Latin-1 unless told
+  // otherwise, which stored "Fagitire_ñ.pdf" as mojibake.
+  defParamCharset: 'utf8',
   limits: { fileSize: 10 * 1024 * 1024, files: 10 },
   fileFilter: (req, file, done) => {
     if (!ALLOWED_MIME.has(file.mimetype)) {
@@ -230,10 +236,13 @@ function visibilityScope(user, values) {
 }
 
 // Accepts a plain calendar date, and tolerates a full ISO timestamp so a record
-// read back from the API can be edited and sent straight in again.
+// read back from the API can be edited and sent straight in again. The date
+// part must be a real day: Date.parse rolls 2024-02-30 over to 1 March, which
+// used to pass here and then fail in Postgres as a server error.
 function isValidDate(value) {
-  return value === null || value === undefined || value === ''
-    || (/^\d{4}-\d{2}-\d{2}(T.*)?$/.test(String(value)) && !Number.isNaN(Date.parse(String(value).slice(0, 10))));
+  if (value === null || value === undefined || value === '') return true;
+  const text = String(value);
+  return /^\d{4}-\d{2}-\d{2}(T[\d:.]+(Z|[+-]\d{2}:?\d{2})?)?$/.test(text) && isCalendarDate(text.slice(0, 10));
 }
 
 function optionalDate(value) {
@@ -357,6 +366,13 @@ async function loadMovement(id, user) {
   return result.rows[0];
 }
 
+// The record after a write the caller was already authorised to make.
+async function reloadMovement(id) {
+  const result = await pool.query(`${SELECT_MOVEMENT} WHERE m.id = $1`, [id]);
+  if (!result.rowCount) throw new MovementError(404, 'Movement not found.');
+  return result.rows[0];
+}
+
 function canEdit(user, row) {
   if (isAdmin(user)) return true;
   // A movement officer may correct their own request only while it is still
@@ -419,12 +435,12 @@ router.get('/', asyncRoute(async (req, res) => {
   }
   if (dateFrom) {
     if (!isValidDate(dateFrom)) return res.status(400).json({ message: 'dateFrom must be a valid date.' });
-    values.push(dateFrom);
+    values.push(String(dateFrom).slice(0, 10));
     filters.push(`COALESCE(m.departure_date, m.created_at::date) >= $${values.length}`);
   }
   if (dateTo) {
     if (!isValidDate(dateTo)) return res.status(400).json({ message: 'dateTo must be a valid date.' });
-    values.push(dateTo);
+    values.push(String(dateTo).slice(0, 10));
     filters.push(`COALESCE(m.departure_date, m.created_at::date) <= $${values.length}`);
   }
 
@@ -492,12 +508,12 @@ router.get('/reports', asyncRoute(async (req, res) => {
 
   if (req.query.dateFrom) {
     if (!isValidDate(req.query.dateFrom)) return res.status(400).json({ message: 'dateFrom must be a valid date.' });
-    values.push(req.query.dateFrom);
+    values.push(String(req.query.dateFrom).slice(0, 10));
     filters.push(`COALESCE(m.departure_date, m.created_at::date) >= $${values.length}`);
   }
   if (req.query.dateTo) {
     if (!isValidDate(req.query.dateTo)) return res.status(400).json({ message: 'dateTo must be a valid date.' });
-    values.push(req.query.dateTo);
+    values.push(String(req.query.dateTo).slice(0, 10));
     filters.push(`COALESCE(m.departure_date, m.created_at::date) <= $${values.length}`);
   }
 
@@ -508,10 +524,10 @@ router.get('/reports', asyncRoute(async (req, res) => {
   ]);
   const rows = result.rows;
 
-  const byMonth = groupTotals(rows, rate, (row) => {
-    const source = row.departure_date || row.created_at;
-    return new Date(source).toISOString().slice(0, 7);
-  });
+  // Bucketed on the calendar day as stored. toISOString() converted local
+  // midnight to UTC first, so on a server east of Greenwich a trip departing on
+  // the 1st was counted in the previous month.
+  const byMonth = groupTotals(rows, rate, (row) => (toDateOnly(row.departure_date || row.created_at) || '').slice(0, 7));
   const byArea = groupTotals(rows, rate, (row) => row.related_area || 'unlinked');
   const byCurrency = groupTotals(rows, rate, (row) => row.currency);
   const byStatus = groupTotals(rows, rate, (row) => row.status);
@@ -533,9 +549,11 @@ router.get('/reports', asyncRoute(async (req, res) => {
     rate,
     movementCount: rows.length,
     totals: accumulate(rows, rate),
-    outstanding: rows.filter((row) => ['Draft', 'Pending', 'Approved', 'Funds Released', 'Ongoing'].includes(row.status)).length,
+    // The live statuses by their current names. 'Pending' and 'Ongoing' were
+    // renamed by the migration, so counting them here counted nothing.
+    outstanding: rows.filter((row) => ['Draft', 'Pending Approval', 'Approved', 'Funds Released', 'In Progress'].includes(row.status)).length,
     completed: rows.filter((row) => row.status === 'Completed').length,
-    evidenceOutstanding: rows.filter((row) => row.evidence_status !== 'Complete' && ['Funds Released', 'Ongoing', 'Completed'].includes(row.status)).length,
+    evidenceOutstanding: rows.filter((row) => row.evidence_status !== 'Complete' && ['Funds Released', 'In Progress', 'Completed'].includes(row.status)).length,
     fuelAndTransport: {
       fuel: inAllCurrencies(fuelAndTransport.fuelUsd, rate),
       transport: inAllCurrencies(fuelAndTransport.transportUsd, rate)
@@ -573,11 +591,18 @@ router.post('/', asyncRoute(async (req, res) => {
 
   // Who carries the movement out. When the Director names an account, that
   // account is the one who must approve it; otherwise the Director does.
-  let assignedTo = req.body?.assignedTo ? Number(req.body.assignedTo) : null;
-  if (assignedTo) {
+  let assignedTo = null;
+  if (req.body?.assignedTo) {
     if (!isAdmin(req.user)) throw new MovementError(403, 'Only the Director can assign a movement to somebody.');
-    const holder = await pool.query('SELECT id FROM users WHERE id = $1', [assignedTo]);
-    if (!holder.rowCount) throw new MovementError(400, 'The person this movement is assigned to does not exist.');
+    assignedTo = parseId(req.body.assignedTo);
+    // The assignee becomes the approver, and no route can change it later, so
+    // it must be somebody who can actually act: an active internal manager. A
+    // partner, a suspended account or a mistyped id left the movement waiting
+    // on nobody who could ever approve it.
+    const holder = assignedTo
+      ? await pool.query("SELECT id FROM users WHERE id = $1 AND role = 'manager' AND status = 'active'", [assignedTo])
+      : { rowCount: 0 };
+    if (!holder.rowCount) throw new MovementError(400, 'A movement can only be assigned to an active manager.');
   }
 
   let movementId = null;
@@ -656,7 +681,7 @@ router.post('/', asyncRoute(async (req, res) => {
     await client.query('COMMIT');
     movementId = result.rows[0].id;
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();
@@ -690,6 +715,21 @@ router.put('/:id', asyncRoute(async (req, res) => {
   const payload = readMovementPayload(req.body || {});
   const overrideRate = readRateOverride(req.body, req.user);
 
+  // Funds released and the actual expense are amounts in the record's currency.
+  // Relabelling the currency under them would turn RWF 500,000 into USD 500,000.
+  if (payload.currency !== existing.currency
+    && (Number(existing.funds_released) > 0 || Number(existing.actual_expense) > 0)) {
+    return res.status(400).json({ message: 'The currency cannot change once funds or expenses are recorded against this movement.' });
+  }
+  // The estimate is the sum of the cost lines -- except once an approver has
+  // decided a different figure. An edit that leaves the lines alone (a typo in
+  // the notes) keeps that decided figure instead of quietly restoring the one
+  // the approver cut; changing the lines is a deliberate re-pricing.
+  const linesChanged = COST_FIELDS.some((field) => round2(existing[`cost_${field}`]) !== payload.costs[field]);
+  const estimatedTotal = existing.approval_status === 'approved' && !linesChanged
+    ? round2(existing.cost)
+    : payload.estimatedTotal;
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -711,7 +751,7 @@ router.put('/:id', asyncRoute(async (req, res) => {
         payload.departureDate, payload.returnDate, payload.personTeam, payload.transportType, payload.vehicleDriver,
         payload.currency, payload.category, payload.notes,
         payload.costs.transport, payload.costs.fuel, payload.costs.accommodation,
-        payload.costs.meals, payload.costs.handling, payload.costs.other, payload.estimatedTotal,
+        payload.costs.meals, payload.costs.handling, payload.costs.other, estimatedTotal,
         overrideRate?.rwfPerUsd ?? null, overrideRate?.cdfPerUsd ?? null
       ]
     );
@@ -729,7 +769,7 @@ router.put('/:id', asyncRoute(async (req, res) => {
     await client.query('COMMIT');
     res.json(mapMovement(result.rows[0]));
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();
@@ -838,7 +878,7 @@ router.patch('/:id/approval', asyncRoute(async (req, res) => {
       ]
     );
     if (!result.rowCount) {
-      await client.query('ROLLBACK');
+      await safeRollback(client);
       return res.status(409).json({ message: 'This movement was decided by somebody else a moment ago.' });
     }
     const entries = [];
@@ -856,13 +896,16 @@ router.patch('/:id/approval', asyncRoute(async (req, res) => {
     await logHistory(client, existing.id, req.user, entries);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();
   }
 
-  res.json(mapMovement(await loadMovement(existing.id, req.user)));
+  // Not re-read through the caller's scope: deciding the movement is what takes
+  // it out of "waiting on me", so a manager approving a movement outside their
+  // area had the saved approval answered with "Movement not found."
+  res.json(mapMovement(await reloadMovement(existing.id)));
 }));
 
 // Section 6: release funds, run and complete. Approving and rejecting go
@@ -941,13 +984,22 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
     fields.push(`funds_released = $${values.length}`);
   }
 
+  let committed = false;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // The move was validated against the status read above; it only lands if
+    // nobody has moved the movement since, or two moves could chain into a
+    // sequence the flow never allows (Cancelled, then Funds Released).
+    values.push(existing.status);
     const result = await client.query(
-      `UPDATE movements SET ${fields.join(', ')} WHERE id = $1 RETURNING *`,
+      `UPDATE movements SET ${fields.join(', ')} WHERE id = $1 AND status = $${values.length} RETURNING *`,
       values
     );
+    if (!result.rowCount) {
+      await safeRollback(client);
+      return res.status(409).json({ message: 'This movement changed a moment ago. Refresh and try again.' });
+    }
     const after = result.rows[0];
     const entries = [{ action: 'Status changed', field: 'status', oldValue: existing.status, newValue: status }];
     if (Number(existing.funds_released) !== Number(after.funds_released)) {
@@ -961,17 +1013,21 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
     }
     await logHistory(client, existing.id, req.user, entries);
     await client.query('COMMIT');
+    committed = true;
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();
   }
+  if (!committed) return;
 
   // Reloaded through the joined view: RETURNING * carries no approver or
-  // assignee names, and the client renders those on the detail screen. It
-  // runs after the release for the pool reason given on the create route.
-  res.json(mapMovement(await loadMovement(existing.id, req.user)));
+  // assignee names, and the client renders those on the detail screen. It runs
+  // after the release for the pool reason given on the create route, and
+  // unscoped because a status change can take the movement out of the caller's
+  // "waiting on me" scope.
+  res.json(mapMovement(await reloadMovement(existing.id)));
 }));
 
 // Whether an external business partner in this operation may see this movement.
@@ -999,7 +1055,7 @@ router.patch('/:id/visibility', asyncRoute(async (req, res) => {
     ]);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();
@@ -1050,7 +1106,7 @@ router.patch('/:id/finance', asyncRoute(async (req, res) => {
     await logHistory(client, existing.id, req.user, entries);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();
@@ -1080,13 +1136,21 @@ router.get('/:id/evidence', asyncRoute(async (req, res) => {
   res.json(result.rows.map(mapEvidence));
 }));
 
-router.post('/:id/evidence', upload.array('files', 10), asyncRoute(async (req, res) => {
-  // Nothing has been written anywhere yet -- the files are still in memory --
-  // so a refused upload leaves no bytes behind and needs no cleanup.
+// Decides whether the caller may upload BEFORE multer reads the body into
+// memory, so a refused caller never gets the server to buffer 100 MB first.
+const authorizeEvidenceUpload = asyncRoute(async (req, res, next) => {
   const existing = await loadMovement(req.params.id, req.user);
   if (!isAdmin(req.user) && !((hasFullScope(req.user) || req.user.sector === 'movement') && existing.created_by === req.user.id)) {
     return res.status(403).json({ message: 'You cannot attach evidence to this movement.' });
   }
+  req.movement = existing;
+  next();
+});
+
+router.post('/:id/evidence', authorizeEvidenceUpload, upload.array('files', 10), asyncRoute(async (req, res) => {
+  // Nothing has been written anywhere yet -- the files are still in memory --
+  // so a refused upload leaves no bytes behind and needs no cleanup.
+  const existing = req.movement;
   if (!req.files?.length) return res.status(400).json({ message: 'Select at least one receipt, invoice or photograph to upload.' });
 
   const kind = EVIDENCE_KINDS.includes(req.body.kind) ? req.body.kind : 'Receipt';
@@ -1111,12 +1175,16 @@ router.post('/:id/evidence', upload.array('files', 10), asyncRoute(async (req, r
   try {
     await client.query('BEGIN');
     const saved = [];
-    for (const { file, storedName } of stored) {
+    for (const [index, { file, storedName }] of stored.entries()) {
+      // One amount typed for one upload is carried on the first file only.
       const result = await client.query(
         `INSERT INTO movement_evidence
            (movement_id, kind, original_name, stored_name, mime_type, size_bytes, amount, note, uploaded_by, uploaded_by_name)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-        [existing.id, kind, file.originalname.slice(0, 255), storedName, file.mimetype, file.size, amount, note, req.user.id, req.user.name]
+        [
+          existing.id, kind, file.originalname.slice(0, 255), storedName, file.mimetype, file.size,
+          index === 0 ? amount : 0, note, req.user.id, req.user.name
+        ]
       );
       saved.push(mapEvidence(result.rows[0]));
     }
@@ -1133,7 +1201,7 @@ router.post('/:id/evidence', upload.array('files', 10), asyncRoute(async (req, r
     await client.query('COMMIT');
     res.status(201).json(saved);
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     await Promise.all(stored.map((item) => deleteFile(EVIDENCE_FOLDER, item.storedName)));
     throw error;
   } finally {
@@ -1143,9 +1211,11 @@ router.post('/:id/evidence', upload.array('files', 10), asyncRoute(async (req, r
 
 router.get('/:id/evidence/:evidenceId/file', asyncRoute(async (req, res) => {
   const existing = await loadMovement(req.params.id, req.user);
+  const evidenceId = parseId(req.params.evidenceId);
+  if (!evidenceId) return res.status(404).json({ message: 'Evidence not found.' });
   const result = await pool.query(
     'SELECT * FROM movement_evidence WHERE id = $1 AND movement_id = $2',
-    [Number(req.params.evidenceId) || 0, existing.id]
+    [evidenceId, existing.id]
   );
   if (!result.rowCount) return res.status(404).json({ message: 'Evidence not found.' });
 
@@ -1154,30 +1224,50 @@ router.get('/:id/evidence/:evidenceId/file', asyncRoute(async (req, res) => {
   if (!file) return res.status(404).json({ message: 'The stored file is missing from the server.' });
 
   res.type(record.mime_type);
-  res.setHeader('Content-Disposition', `inline; filename="${record.original_name.replace(/"/g, '')}"`);
+  res.setHeader('Content-Disposition', contentDisposition(record.original_name));
   // Who may read this file is decided per request, so no shared cache and no
   // browser may keep a copy that outlives the check.
   res.setHeader('Cache-Control', 'private, no-store');
   // The disk gives back a stream, remote storage a buffer already in hand.
   if (Buffer.isBuffer(file)) return res.send(file);
+  // A read that fails part-way ends this response instead of leaving it hanging.
+  file.once('error', () => (res.headersSent ? res.destroy() : res.status(500).json({ message: 'The stored file could not be read.' })));
   return file.pipe(res);
 }));
 
 router.delete('/:id/evidence/:evidenceId', asyncRoute(async (req, res) => {
   const existing = await loadMovement(req.params.id, req.user);
   requireAdmin(req.user, 'remove evidence');
+  const evidenceId = parseId(req.params.evidenceId);
+  if (!evidenceId) return res.status(404).json({ message: 'Evidence not found.' });
 
-  const result = await pool.query(
-    'DELETE FROM movement_evidence WHERE id = $1 AND movement_id = $2 RETURNING *',
-    [Number(req.params.evidenceId) || 0, existing.id]
-  );
-  if (!result.rowCount) return res.status(404).json({ message: 'Evidence not found.' });
+  // Row and trail entry commit together; the bytes go only after both are safe.
+  const client = await pool.connect();
+  let removed;
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      'DELETE FROM movement_evidence WHERE id = $1 AND movement_id = $2 RETURNING *',
+      [evidenceId, existing.id]
+    );
+    if (!result.rowCount) {
+      await safeRollback(client);
+      return res.status(404).json({ message: 'Evidence not found.' });
+    }
+    removed = result.rows[0];
+    await logHistory(client, existing.id, req.user, [
+      { action: 'Evidence removed', field: 'evidence', oldValue: removed.original_name, newValue: null }
+    ]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
 
-  await deleteFile(EVIDENCE_FOLDER, result.rows[0].stored_name);
-  await logHistory(pool, existing.id, req.user, [
-    { action: 'Evidence removed', field: 'evidence', oldValue: result.rows[0].original_name, newValue: null }
-  ]);
-  res.json({ message: 'Evidence removed.', deletedEvidence: mapEvidence(result.rows[0]) });
+  await deleteFile(EVIDENCE_FOLDER, removed.stored_name);
+  res.json({ message: 'Evidence removed.', deletedEvidence: mapEvidence(removed) });
 }));
 
 router.get('/:id/history', asyncRoute(async (req, res) => {

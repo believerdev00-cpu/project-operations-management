@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { translate, useI18n, useT } from './i18n.js';
+import { displayLanguage, fill, translate, useI18n, useT } from './i18n.js';
 import { ExpensePanel } from './MonthlyPlans.jsx';
 
 // The Director's review screen for one activity, and the same record as the
@@ -38,9 +38,6 @@ const STARTABLE_STATUSES = ['Approved', 'Budget Adjusted', 'Needs Correction'];
 // A deadline on a record that is finished or refused is history, not a warning.
 const CLOSED_STATUSES = ['Completed', 'Rejected', 'Cancelled'];
 
-// How the role that must approve reads on screen.
-export const APPROVER_ROLE_LABELS = { manager: 'Manager Approval', director: 'Director Approval' };
-
 export function statusTone(status) {
   if (status === 'Completed' || status === 'Approved') return 'tone-done';
   if (status === 'Rejected' || status === 'Cancelled') return 'tone-stopped';
@@ -54,12 +51,6 @@ export function approvalTone(approvalStatus) {
   if (approvalStatus === 'rejected') return 'tone-stopped';
   return 'tone-waiting';
 }
-
-export const APPROVAL_STATUS_LABELS = {
-  pending: 'Pending Approval',
-  approved: 'Approved',
-  rejected: 'Rejected'
-};
 
 // "John — Farming Manager", or "Director/Admin" when the record names the
 // office rather than a person. Used wherever the screen has to say who a record
@@ -92,7 +83,7 @@ function formatLocal(value, currency) {
 }
 
 function formatDateTime(value) {
-  return value ? new Date(value).toLocaleString() : '—';
+  return value ? new Date(value).toLocaleString(displayLanguage()) : '—';
 }
 
 // A deadline is a calendar day, not an instant. Handing '2026-01-05' to Date
@@ -107,7 +98,7 @@ function dateParts(value) {
 export function formatDate(value) {
   const parts = dateParts(value);
   if (!parts) return value ? String(value) : '—';
-  return new Date(parts[0], parts[1] - 1, parts[2]).toLocaleDateString();
+  return new Date(parts[0], parts[1] - 1, parts[2]).toLocaleDateString(displayLanguage());
 }
 
 // How the deadline should read on screen: overdue, close, or simply a date.
@@ -143,18 +134,18 @@ function materialLines(materials) {
 export function canApproveRecord(user, record) {
   if (!record.approvalRequired) return false;
   if (record.approvalStatus !== 'pending') return false;
-  if (['Draft', 'Cancelled'].includes(record.status)) return false;
+  if (['Draft', 'Cancelled', 'On Hold'].includes(record.status)) return false;
   if (record.approvalRequiredRole === 'director' && user.role === 'super-admin') return true;
   return record.approvalRequiredFrom !== null && record.approvalRequiredFrom === user.id;
 }
 
 export function ActivityReview({
-  detail, user, token, sectorLabel, managers = [],
+  detail, user, token, sectorLabel, managers = [], busy = false,
   onClose, onDecision, onStatus, onAssign, onUpload, onRemoveEvidence, onSubmitCompletion, onApprove,
-  onVisibility, onRecordExpense, onRemoveExpense
+  onVisibility, onRecordExpense, onRemoveExpense, onRequestBudget, onDecideBudget, onDelete
 }) {
   const { language, t } = useI18n();
-  const { activity, evidence, history, expenses = [], expenseSummary = null } = detail;
+  const { activity, evidence, history, expenses = [], expenseSummary = null, budgetRequests = [] } = detail;
   // Section 7: the two kinds are listed under their own headings rather than
   // mixed into one table where a receipt and a site photograph look alike.
   const paymentEvidence = evidence.filter((item) => item.evidenceType !== 'activity');
@@ -164,10 +155,12 @@ export function ActivityReview({
   // Director's instruction to a manager; a requested one is the manager asking.
   const wasAssigned = activity.origin === 'assigned';
 
+  // The note field is for a NEW note. Pre-filling it with the standing one sent
+  // that old sentence back as the reason for any budget change saved later.
   const [decision, setDecision] = useState({
     approvedBudget: activity.approvedBudget === null ? String(activity.requestedBudget) : String(activity.approvedBudget),
     status: activity.status === 'Pending Approval' ? 'Approved' : activity.status,
-    adminNote: activity.adminNote || ''
+    adminNote: ''
   });
   // The approve/reject form, which is a different thing from the Director's
   // wider editing surface below: it is the decision the record is waiting on.
@@ -189,7 +182,7 @@ export function ActivityReview({
     setDecision({
       approvedBudget: activity.approvedBudget === null ? String(activity.requestedBudget) : String(activity.approvedBudget),
       status: activity.status === 'Pending Approval' ? 'Approved' : activity.status,
-      adminNote: activity.adminNote || ''
+      adminNote: ''
     });
     setApproval({
       approvedBudget: activity.approvedBudget === null ? String(activity.requestedBudget) : String(activity.approvedBudget),
@@ -209,6 +202,14 @@ export function ActivityReview({
 
   const typedBudget = Number(decision.approvedBudget || 0);
   const typedAdjustment = typedBudget - activity.requestedBudget;
+  // The figure the record carries now: the decided one, or the request while
+  // nothing has been decided. Only a typed figure that differs from it is a
+  // budget change -- saving an untouched form is not.
+  const currentFigure = activity.approvedBudget === null ? activity.requestedBudget : activity.approvedBudget;
+  const decisionBudgetMoves = decision.approvedBudget !== '' && typedBudget !== currentFigure;
+  const decisionNote = decision.adminNote.trim();
+  const decisionNoteRequired = decisionBudgetMoves || ['Rejected', 'Needs Correction'].includes(decision.status);
+  const decisionHasChanges = decisionBudgetMoves || decision.status !== activity.status || Boolean(decisionNote);
   // The Director trimmed the amount, so the record is a budget adjustment
   // rather than a plain approval unless they say otherwise.
   const suggestsAdjusted = decision.status === 'Approved' && typedBudget !== activity.requestedBudget;
@@ -239,11 +240,17 @@ export function ActivityReview({
   const hasAssignmentChanges = Object.keys(assignmentChanges).length > 0;
 
   const due = deadlineNote(activity, language);
+  // Mirrors the server: a closed month takes no more changes, and work is carried
+  // by the manager it names -- or, unassigned, by a manager of its area.
+  const monthOpen = activity.planStatus !== 'Closed';
   // Mirrors withinScope in server/lib/http.js: a manager marked as covering every
   // business operation is inside every area, and so has no single `sector` to
   // compare against.
   const inMyArea = Boolean(user.coversAllSectors) || user.sector === activity.sector;
-  const canAttach = isDirector || inMyArea;
+  const carriesIt = inMyArea
+    && (activity.assignedTo === null ? user.role === 'manager' : activity.assignedTo === user.id);
+  const canAttach = monthOpen && (isDirector
+    || (inMyArea && (user.role === 'manager' || activity.assignedTo === user.id)));
   // Whether this user is the person the record is waiting on. The API checks
   // the same thing again before it writes anything.
   const iAmApprover = canApproveRecord(user, activity);
@@ -252,11 +259,11 @@ export function ActivityReview({
   const canChangeBudget = iAmApprover && isDirector;
   // The one move a manager owns on their own work, mirroring the status route:
   // starting what has been approved.
-  const canWorkOnIt = !isDirector && inMyArea
-    && (activity.assignedTo === null || activity.assignedTo === user.id);
+  const canWorkOnIt = monthOpen && !isDirector && carriesIt;
   const managerCanStart = canWorkOnIt && STARTABLE_STATUSES.includes(activity.status)
     && (!activity.approvalRequired || activity.approvalStatus === 'approved');
-  const canSubmitCompletion = canAttach && WORKABLE_STATUSES.includes(activity.status);
+  const canSubmitCompletion = monthOpen && (isDirector || carriesIt)
+    && WORKABLE_STATUSES.includes(activity.status) && !activity.completionSubmittedAt;
   // Mirrors canRecordExpense in server/lib/monthly.js, which is what decides it.
   const canRecordExpense = (isDirector || activity.assignedTo === user.id)
     && (!activity.approvalRequired || activity.approvalStatus === 'approved')
@@ -284,7 +291,7 @@ export function ActivityReview({
           {' '}{formatDateTime(activity.createdAt)} · {activity.projectName || activity.projectId}
         </span>
       </div>
-      <button className="text-btn" type="button" onClick={onClose}>{t('action.close')}</button>
+      <button className="text-btn hide-on-sheet" type="button" onClick={onClose}>{t('action.close')}</button>
     </div>
 
     <ApprovalPanel record={activity} sectorLabel={sectorLabel} />
@@ -292,14 +299,14 @@ export function ActivityReview({
     <div className="detail-facts">
       <Fact label={t('table.status')} value={<span className={`status-badge ${statusTone(activity.status)}`}>{t(`status.${activity.status}`)}</span>} />
       <Fact label={t('table.department')} value={sectorLabel(activity.department || activity.sector)} />
-      <Fact label={t('table.category')} value={activity.category} />
+      <Fact label={t('table.category')} value={categoryLabel(activity.category, t)} />
       <Fact label={t('field.quantity')} value={activity.quantity} />
       <Fact label={t('table.createdBy')} value={activity.createdByName || <span className="muted-cell">&mdash;</span>} />
       <Fact label={t('field.carriedOutBy')} value={activity.assignedToName || <span className="muted-cell">{t('review.notAssigned')}</span>} />
       <Fact label={t('table.deadline')} value={activity.deadline
         ? <>{formatDate(activity.deadline)}{due && due.tone !== 'ok' && <small className={`deadline-flag deadline-${due.tone}`}>{due.text}</small>}</>
         : <span className="muted-cell">{t('review.noDeadline')}</span>} />
-      <Fact label={t('field.evidence')} value={<span className={`status-badge ${activity.evidenceStatus === 'Complete' ? 'tone-done' : 'tone-waiting'}`}>{activity.evidenceStatus}</span>} />
+      <Fact label={t('field.evidence')} value={<span className={`status-badge ${activity.evidenceStatus === 'Complete' ? 'tone-done' : 'tone-waiting'}`}>{t(`estatus.${activity.evidenceStatus}`)}</span>} />
       <Fact label={t('review.reviewedBy')} value={activity.reviewedByName ? `${activity.reviewedByName} · ${formatDateTime(activity.reviewedAt)}` : t('review.notReviewed')} />
       <Fact label={t('review.completionSubmitted')} value={activity.completionSubmittedAt ? formatDateTime(activity.completionSubmittedAt) : t('review.notSubmitted')} />
     </div>
@@ -336,9 +343,9 @@ export function ActivityReview({
         {formatUsd(typedApprovalBudget - activity.requestedBudget)})
       </p>}
       <div className="button-row">
-        <button className="primary-btn" type="submit">{t('approval.approve')}</button>
+        <button className="primary-btn" type="submit" disabled={busy}>{t('approval.approve')}</button>
         <button className="danger-btn outlined" type="button"
-          disabled={!approval.rejectionReason.trim()}
+          disabled={busy || !approval.rejectionReason.trim()}
           onClick={() => onApprove(activity, { action: 'reject', rejectionReason: approval.rejectionReason.trim() })}>
           {t('approval.reject')}
         </button>
@@ -383,10 +390,12 @@ export function ActivityReview({
     {isDirector
       ? <form className="decision-form" onSubmit={(event) => {
         event.preventDefault();
+        // Only what actually changed travels, so an untouched budget is never
+        // mistaken for a budget change that needs its own reason.
         onDecision(activity, {
-          approvedBudget: decision.approvedBudget === '' ? null : Number(decision.approvedBudget),
           status: decision.status,
-          adminNote: decision.adminNote.trim()
+          ...(decisionBudgetMoves ? { approvedBudget: typedBudget } : {}),
+          ...(decisionNote ? { adminNote: decisionNote } : {})
         });
       }}>
         <h3 className="form-section-title">{t('review.adminDecision')}</h3>
@@ -400,18 +409,19 @@ export function ActivityReview({
               {statusOptions.map((status) => <option key={status} value={status}>{t(`status.${status}`)}</option>)}
             </select>
           </label>
-          <label className="form-field form-field-wide"><span>{t('review.adminNote')}{typedBudget !== activity.requestedBudget || ['Rejected', 'Needs Correction'].includes(decision.status) ? ` (${t('field.required')})` : ''}</span>
-            <textarea rows="3"
+          <label className="form-field form-field-wide"><span>{t('review.adminNote')} ({decisionNoteRequired ? t('field.required') : t('field.optional')})</span>
+            <textarea rows="3" required={decisionNoteRequired}
               value={decision.adminNote} onChange={(event) => setDecision({ ...decision, adminNote: event.target.value })} />
           </label>
         </div>
+        {activity.adminNote && <p className="detail-notes admin-note">&ldquo;{activity.adminNote}&rdquo;</p>}
         {typedBudget !== activity.requestedBudget && <p className="decision-hint">
           {formatUsd(activity.requestedBudget)} &rarr; {formatUsd(typedBudget)}
           {' '}({typedAdjustment > 0 ? '+' : ''}{formatUsd(typedAdjustment)}).
           {suggestsAdjusted ? ` ${t('review.considerAdjusted')}` : ''}
         </p>}
         {decision.status === 'Needs Correction' && <p className="decision-hint">{t('review.needsCorrectionHint')}</p>}
-        <button className="primary-btn" type="submit">{t('action.saveDecision')}</button>
+        <button className="primary-btn" type="submit" disabled={busy || !decisionHasChanges}>{t('action.saveDecision')}</button>
       </form>
       : <div className="decision-readout">
         <h3 className="form-section-title">{t('review.adminDecision')}</h3>
@@ -419,7 +429,7 @@ export function ActivityReview({
           ? <p className="detail-notes">{t('review.notDecidedYet')}</p>
           : <>
             <p className="detail-notes"><strong>{t('review.approvedBudget')}:</strong> {formatUsd(activity.approvedBudget)}
-              {activity.budgetAdjustment ? ` (${activity.budgetAdjustment > 0 ? '+' : ''}${formatUsd(activity.budgetAdjustment)} against the ${wasAssigned ? 'original' : 'request'})` : ''}</p>
+              {activity.budgetAdjustment ? ` (${fill(t(wasAssigned ? 'review.changeAgainstOriginal' : 'review.changeAgainstRequest'), { change: `${activity.budgetAdjustment > 0 ? '+' : ''}${formatUsd(activity.budgetAdjustment)}` })})` : ''}</p>
             {activity.adminNote && <p className="detail-notes admin-note">&ldquo;{activity.adminNote}&rdquo;</p>}
           </>}
       </div>}
@@ -449,15 +459,16 @@ export function ActivityReview({
       </div>
       {!managerOptions.length && <p className="decision-hint">{t('review.noManagerCoversArea')}</p>}
       {assignmentChanges.assignedTo !== undefined && activity.acceptedAt && <p className="decision-hint">{t('review.reassignClearsAcceptance')}</p>}
-      <button className="secondary-btn" type="submit" disabled={!hasAssignmentChanges}>{t('action.saveAssignment')}</button>
+      <button className="secondary-btn" type="submit" disabled={busy || !hasAssignmentChanges}>{t('action.saveAssignment')}</button>
     </form>}
 
     {(managerCanStart || canSubmitCompletion) && <div className="workflow-actions button-row">
-      {managerCanStart && <button className="secondary-btn" type="button" onClick={() => onStatus(activity, 'In Progress')}>{t('action.startWork')}</button>}
+      {managerCanStart && <button className="secondary-btn" type="button" disabled={busy} onClick={() => onStatus(activity, 'In Progress')}>{t('action.startWork')}</button>}
       {canSubmitCompletion && <>
-        <input className="completion-note" placeholder={t('review.noteForDirector')}
+        <label className="sr-only" htmlFor={`completion-note-${activity.id}`}>{t('review.noteForDirector')}</label>
+        <input id={`completion-note-${activity.id}`} className="completion-note" placeholder={t('review.noteForDirector')}
           value={completionNote} onChange={(event) => setCompletionNote(event.target.value)} />
-        <button className="secondary-btn" type="button" onClick={() => onSubmitCompletion(activity, completionNote)}>
+        <button className="secondary-btn" type="button" disabled={busy} onClick={() => onSubmitCompletion(activity, completionNote)}>
           {t('action.submitCompleted')}
         </button>
       </>}
@@ -485,6 +496,7 @@ export function ActivityReview({
       <button
         className={activity.externallyVisible ? 'danger-btn outlined' : 'secondary-btn'}
         type="button"
+        disabled={busy}
         onClick={() => onVisibility(activity, !activity.externallyVisible)}
       >{activity.externallyVisible ? t('visibility.hide') : t('visibility.show')}</button>
     </div>}
@@ -497,9 +509,25 @@ export function ActivityReview({
       summary={expenseSummary}
       canRecord={canRecordExpense}
       canRemove={isDirector}
-      onRecord={onRecordExpense}
-      onRemoveExpense={onRemoveExpense}
+      busy={busy}
+      // The panel hands back only the expense; the handlers also need to know
+      // which activity it belongs to, exactly like the evidence handlers below.
+      onRecord={(expense, reset) => onRecordExpense(activity, expense, reset)}
+      onRemoveExpense={(expense) => onRemoveExpense(activity, expense)}
     />}
+
+    {/* When a spend will not fit, the answer is a budget change request -- the
+        over-budget message says so -- and this is where it is made and decided. */}
+    <BudgetRequestPanel
+      activity={activity}
+      requests={budgetRequests}
+      user={user}
+      isDirector={isDirector}
+      monthOpen={monthOpen}
+      busy={busy}
+      onRequest={onRequestBudget ? (body) => onRequestBudget(activity, body) : null}
+      onDecide={onDecideBudget ? (request, status) => onDecideBudget(activity, request, status) : null}
+    />
 
     {/* Section 7: proof money was spent, and proof the work was done. They are
         different things, so they are uploaded and listed separately. */}
@@ -508,6 +536,7 @@ export function ActivityReview({
     {canAttach && <EvidenceUpload
       evidenceType="payment"
       expenses={expenses}
+      busy={busy}
       onUpload={(formData) => onUpload(activity, formData)}
     />}
     <EvidenceList
@@ -515,6 +544,7 @@ export function ActivityReview({
       evidence={paymentEvidence}
       token={token}
       canRemove={isDirector}
+      busy={busy}
       onRemove={(item) => onRemoveEvidence(activity, item)}
     />
 
@@ -523,6 +553,7 @@ export function ActivityReview({
     {canAttach && <EvidenceUpload
       evidenceType="activity"
       expenses={[]}
+      busy={busy}
       onUpload={(formData) => onUpload(activity, formData)}
     />}
     <EvidenceList
@@ -530,33 +561,81 @@ export function ActivityReview({
       evidence={completionEvidence}
       token={token}
       canRemove={isDirector}
+      busy={busy}
       onRemove={(item) => onRemoveEvidence(activity, item)}
     />
+
+    {onDelete && <div className="button-row">
+      <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onDelete(activity)}>{t('action.delete')}</button>
+    </div>}
 
     <h3 className="form-section-title">{t('review.activityHistory')}</h3>
     {history.length
       ? <ul className="history-list">{history.map((entry) => <li key={entry.id}>
-        <strong>{entry.action}</strong>
+        <strong>{trailActionLabel(entry.action, t)}</strong>
         {entry.field && <span>
-          {' '}{labelForField(entry.field, t)}: {formatTrailValue(entry.field, entry.oldValue, userNames)} &rarr; {formatTrailValue(entry.field, entry.newValue, userNames)}
+          {' '}{labelForField(entry.field, t)}: {formatTrailValue(entry.field, entry.oldValue, userNames, t)} &rarr; {formatTrailValue(entry.field, entry.newValue, userNames, t)}
         </span>}
         <small>{entry.actorName || '\u2014'} · {formatDateTime(entry.createdAt)}</small>
-        {entry.note && <small className="justification">{t('approval.reason')}: {entry.note}</small>}
+        {entry.note && <small className="justification">{t('approval.reason')}: {trailNoteLabel(entry.note, t)}</small>}
       </li>)}</ul>
       : <div className="empty-state"><strong>{t('empty.noHistory')}</strong><span>{t('empty.noHistoryHint')}</span></div>}
   </section>;
 }
 
+// An audit trail entry names its action in the English the server recorded it
+// in. Known actions read in the viewer's language; anything else is shown as
+// recorded rather than as a missing-key placeholder.
+export function trailActionLabel(action, t) {
+  const key = `history.${action}`;
+  const label = t(key);
+  return label === key ? action : label;
+}
+
+// A category preset is stored in English (it is what the API validates and the
+// reports group by) and read in the viewer's language. A category typed under
+// "Other" has no translation and is shown as written.
+export function categoryLabel(category, t) {
+  if (!category) return '';
+  const key = `category.${category}`;
+  const label = t(key);
+  return label === key ? category : label;
+}
+
+// A value from the trail, in words: statuses and decisions in the reader's
+// language, everything else through the formatter below.
+function translatedTrailValue(field, value, t) {
+  if (value === null || value === undefined || value === '') return null;
+  const lookups = { status: 'status', approvalStatus: 'approval', evidenceStatus: 'estatus', category: 'category' };
+  if (lookups[field]) {
+    const key = `${lookups[field]}.${value}`;
+    const label = t(key);
+    return label === key ? null : label;
+  }
+  if (field === 'externallyVisible') return String(value) === 'true' ? t('visibility.visible') : t('visibility.hidden');
+  return null;
+}
+
+// Notes the server writes itself (rather than a person) read in the viewer's
+// language too.
+export function trailNoteLabel(note, t) {
+  const key = `approval.note.${note}`;
+  const label = t(key);
+  return label === key ? note : label;
+}
+
 // The audit trail records a column name; these are the words a reader needs.
-function labelForField(field, t) {
+export function labelForField(field, t) {
   const key = `trail.${field}`;
   const label = t(key);
   // translate() falls back to the key itself, which is not worth showing.
   return label === key ? field : label;
 }
 
-function formatTrailValue(field, value, userNames) {
+export function formatTrailValue(field, value, userNames, t) {
   if (value === null || value === undefined || value === '') return '—';
+  const translated = t ? translatedTrailValue(field, value, t) : null;
+  if (translated) return translated;
   if (field === 'approvedBudget' || field === 'requestedBudget') return formatUsd(value);
   // The trail stores the manager's id, which is not a name anyone reads.
   if (field === 'assignedTo' || field === 'approvalRequiredFrom') return userNames?.get(String(value)) || `#${value}`;
@@ -568,6 +647,67 @@ function formatTrailValue(field, value, userNames) {
 
 function Fact({ label, value }) {
   return <div className="fact"><span>{label}</span><strong>{value}</strong></div>;
+}
+
+// Statuses with an approved budget that can still be changed. Mirrors
+// BUDGET_CHANGEABLE_STATUSES in server/routes/activities.js.
+const BUDGET_CHANGEABLE_STATUSES = ['Approved', 'Budget Adjusted', 'In Progress', 'Needs Correction', 'On Hold', 'Completed'];
+
+function BudgetRequestPanel({ activity, requests, user, isDirector, monthOpen, busy, onRequest, onDecide }) {
+  const t = useT();
+  const currentBudget = activity.approvedBudget === null ? activity.requestedBudget : activity.approvedBudget;
+  const [form, setForm] = useState({ amount: '', reason: '' });
+  const pending = requests.find((request) => request.status === 'Pending');
+  const mayAsk = Boolean(onRequest) && monthOpen && !isDirector && user.role === 'manager'
+    && (Boolean(user.coversAllSectors) || user.sector === activity.sector)
+    && BUDGET_CHANGEABLE_STATUSES.includes(activity.status) && !pending;
+  const typed = Number(form.amount);
+  const valid = form.amount !== '' && Number.isFinite(typed) && typed >= 0
+    && Math.round(typed * 100) !== Math.round(currentBudget * 100) && form.reason.trim();
+
+  if (!requests.length && !mayAsk) return null;
+
+  return <section id="budget-requests">
+    <h3 className="form-section-title">{t('budget.title')}</h3>
+    {requests.length > 0 && <ul className="history-list">{requests.map((request) => <li key={request.id}>
+      <strong>
+        {formatUsd(request.currentBudget)} &rarr; {formatUsd(request.requestedAmount)}
+        {' '}<span className={`status-badge ${request.status === 'Approved' ? 'tone-done' : request.status === 'Declined' ? 'tone-stopped' : 'tone-waiting'}`}>
+          {request.status === 'Pending' ? t('budget.pending') : t(`budgetRequest.status.${request.status}`)}
+        </span>
+      </strong>
+      <span>{request.reason}</span>
+      <small>{request.requestedByName || '—'} · {formatDateTime(request.createdAt)}</small>
+      {request.decisionNote && <small className="justification">{request.decidedByName || '—'}: {request.decisionNote}</small>}
+      {isDirector && monthOpen && onDecide && request.status === 'Pending' && <div className="button-row">
+        <button className="primary-btn compact" type="button" disabled={busy} onClick={() => onDecide(request, 'Approved')}>{t('approval.approve')}</button>
+        <button className="danger-btn outlined compact" type="button" disabled={busy} onClick={() => onDecide(request, 'Declined')}>{t('action.decline')}</button>
+      </div>}
+    </li>)}</ul>}
+
+    {mayAsk && <form className="decision-form" onSubmit={(event) => {
+      event.preventDefault();
+      if (!valid) return;
+      Promise.resolve(onRequest({ amount: typed, reason: form.reason.trim() })).then((sent) => {
+        if (sent) setForm({ amount: '', reason: '' });
+      });
+    }}>
+      <p className="detail-notes">{t('budget.hint')}</p>
+      <div className="form-grid">
+        <label className="form-field"><span>{t('budget.currentBudget')}</span>
+          <input readOnly tabIndex={-1} value={formatUsd(currentBudget)} />
+        </label>
+        <label className="form-field"><span>{t('budget.newAmount')} (USD)</span>
+          <input required type="number" inputMode="decimal" min="0" step="0.01" value={form.amount} onChange={(event) => setForm({ ...form, amount: event.target.value })} />
+        </label>
+        <label className="form-field form-field-wide"><span>{t('field.reason')}</span>
+          <textarea required rows="2" value={form.reason} onChange={(event) => setForm({ ...form, reason: event.target.value })} />
+        </label>
+      </div>
+      <div className="form-submit-bar"><button className="secondary-btn" type="submit" disabled={busy || !valid}>{t('budget.request')}</button></div>
+    </form>}
+    {pending && !isDirector && <p className="decision-hint">{t('budget.waiting')}</p>}
+  </section>;
 }
 
 // Who has to approve this record, and what they decided. Shown at the top of
@@ -614,7 +754,7 @@ export function ApprovalPanel({ record, sectorLabel }) {
   </div>;
 }
 
-function EvidenceUpload({ onUpload, evidenceType = 'payment', expenses = [] }) {
+function EvidenceUpload({ onUpload, evidenceType = 'payment', expenses = [], busy = false }) {
   const t = useT();
   const [kind, setKind] = useState(evidenceType === 'activity' ? 'Photograph' : 'Receipt');
   const [expenseId, setExpenseId] = useState('');
@@ -635,8 +775,13 @@ function EvidenceUpload({ onUpload, evidenceType = 'payment', expenses = [] }) {
     // rather than merely counting files against the activity.
     if (evidenceType === 'payment' && expenseId) formData.append('expenseId', expenseId);
     Array.from(files).forEach((file) => formData.append('files', file));
-    onUpload(formData);
-    setAmount(''); setNote(''); setFiles(null); setExpenseId(''); setInputKey((current) => current + 1);
+    // Cleared only once the files are stored. A failed upload -- too large, the
+    // wrong type, a dropped connection -- keeps what was chosen, so it can be
+    // tried again without picking every file a second time.
+    Promise.resolve(onUpload(formData)).then((stored) => {
+      if (stored === false) return;
+      setAmount(''); setNote(''); setFiles(null); setExpenseId(''); setInputKey((current) => current + 1);
+    });
   };
 
   return <form className="inline-form" onSubmit={submit}>
@@ -662,30 +807,30 @@ function EvidenceUpload({ onUpload, evidenceType = 'payment', expenses = [] }) {
     <label className="form-field"><span>{t('field.files')}</span>
       <input key={inputKey} type="file" multiple accept="image/*,application/pdf" onChange={(event) => setFiles(event.target.files)} />
     </label>
-    <button className="secondary-btn" type="submit" disabled={!files?.length}>{t('action.uploadEvidence')}</button>
+    <button className="secondary-btn" type="submit" disabled={busy || !files?.length}>{t('action.uploadEvidence')}</button>
   </form>;
 }
 
-function EvidenceList({ activity, evidence, token, canRemove, onRemove }) {
+function EvidenceList({ activity, evidence, token, canRemove, busy = false, onRemove }) {
   const t = useT();
   if (!evidence.length) {
     return <div className="empty-state"><strong>{t('empty.noEvidence')}</strong><span>{t('empty.noEvidenceHint')}</span></div>;
   }
-  return <div className="table-wrap"><table>
-    <thead><tr><th>{t('field.type')}</th><th>{t('field.file')}</th><th>{t('field.amount')}</th><th>{t('field.note')}</th><th>{t('field.uploadedBy')}</th><th>{t('table.date')}</th><th>{t('table.actions')}</th></tr></thead>
+  return <div className="table-wrap"><table className="card-table">
+    <thead><tr><th>{t('field.file')}</th><th>{t('field.type')}</th><th>{t('field.amount')}</th><th>{t('field.note')}</th><th>{t('field.uploadedBy')}</th><th>{t('table.date')}</th><th>{t('table.actions')}</th></tr></thead>
     <tbody>{evidence.map((item) => <tr key={item.id}>
-      <td>{item.kind}</td>
-      <td><strong>{item.originalName}</strong><small>{(item.sizeBytes / 1024).toFixed(0)} KB · {item.mimeType}</small></td>
-      <td>{item.amount ? formatUsd(item.amount) : '—'}</td>
-      <td>{item.note || '—'}</td>
-      <td>{item.uploadedByName || '—'}</td>
-      <td>{formatDateTime(item.createdAt)}</td>
-      <td>
+      <td className="card-title-cell"><strong className="file-name">{item.originalName}</strong><small>{(item.sizeBytes / 1024).toFixed(0)} KB · {item.mimeType}</small></td>
+      <td data-label={t('field.type')}>{t(`ekind.${item.kind}`)}</td>
+      <td data-label={t('field.amount')}>{item.amount ? formatUsd(item.amount) : '—'}</td>
+      <td data-label={t('field.note')}>{item.note || '—'}</td>
+      <td data-label={t('field.uploadedBy')}>{item.uploadedByName || '—'}</td>
+      <td data-label={t('table.date')}>{formatDateTime(item.createdAt)}</td>
+      <td className="card-actions">
         {/* A plain link cannot carry an Authorization header, so the file route
             also accepts the token as a query parameter. */}
         <a className="text-btn" target="_blank" rel="noreferrer"
-          href={`/api/activities/${activity.id}/evidence/${item.id}/file?token=${encodeURIComponent(token)}`}>{t('action.view')}</a>
-        {canRemove && <button className="danger-btn" type="button" onClick={() => onRemove(item)}>{t('action.remove')}</button>}
+          href={`/api/activities/${encodeURIComponent(activity.id)}/evidence/${item.id}/file?token=${encodeURIComponent(token)}`}>{t('action.view')}</a>
+        {canRemove && <button className="danger-btn" type="button" disabled={busy} onClick={() => onRemove(item)}>{t('action.remove')}</button>}
       </td>
     </tr>)}</tbody>
   </table></div>;

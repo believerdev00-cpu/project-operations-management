@@ -1,9 +1,10 @@
 // Period reporting over the activity register.
 //
 // Everything here is read from the tables the rest of the API already writes --
-// activities, projects, users, activity_evidence, activity_budget_requests and
-// activity_history. A report stores nothing and creates no table of its own; it
-// is only ever a reading of the register at a moment in time.
+// activities, projects, users, activity_expenses, activity_evidence,
+// activity_budget_requests and activity_history. A report stores nothing and
+// creates no table of its own; it is only ever a reading of the register at a
+// moment in time.
 //
 // The three budget figures are kept apart at every stage, because collapsing
 // them is exactly what loses the history the Director needs:
@@ -11,7 +12,7 @@
 //               Director set when assigning. Never overwritten by a decision.
 //   revised  -- activities.approved_budget: the decided figure. NULL means "not
 //               decided yet", which is not the same as a decided zero.
-//   spent    -- the evidence actually filed against the activity.
+//   spent    -- activity_expenses: what was actually recorded as spent.
 
 import express from 'express';
 import ExcelJS from 'exceljs';
@@ -165,14 +166,20 @@ const SELECT_ROWS = `
          -- process's zone while the filter cast it in the database's.
          ${PERIOD_DAY} AS period_day,
          m.name AS assigned_to_name,
-         COALESCE(ev.spent, 0) AS actual_spending,
+         COALESCE(ex.spent, 0) AS actual_spending,
          COALESCE(ev.items, 0)::int AS evidence_count
   FROM activities a
   LEFT JOIN projects p ON p.id = a.project_id
   LEFT JOIN users m ON m.id = a.assigned_to
+  -- Spending is the expense ledger, the same figure the activity review and the
+  -- monthly plan show. It used to be the optional amount typed on an evidence
+  -- upload, which a multi-file upload wrote onto every file, so three receipts
+  -- for one purchase reported three times the spend.
   LEFT JOIN LATERAL (
-    SELECT SUM(e.amount) AS spent, COUNT(*) AS items
-    FROM activity_evidence e WHERE e.activity_id = a.id
+    SELECT SUM(x.amount) AS spent FROM activity_expenses x WHERE x.activity_id = a.id
+  ) ex ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT COUNT(*) AS items FROM activity_evidence e WHERE e.activity_id = a.id
   ) ev ON TRUE
 `;
 
