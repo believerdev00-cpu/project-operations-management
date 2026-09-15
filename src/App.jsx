@@ -1808,7 +1808,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       {creatingActivity && <DetailView onClose={closeActivity} label={isDirector ? t('action.assignActivity') : t('action.raiseActivity')}>
         <ActivityForm
           form={activityForm} setForm={setActivityForm} projects={projects} onChooseProject={chooseFormProject}
-          selectedProject={formProject} sectorOptions={sectorOptions} managers={managers}
+          selectedProject={formProject} managers={managers}
           isDirector={isDirector} usd={usd} rate={rate} busy={actionBusy}
           onCancel={closeActivity}
           onSubmit={(event) => {
@@ -2265,7 +2265,7 @@ function ProjectForm({ form, setForm, managers, busy, onSubmit }) {
 // needs, which the Director then decides; the Director fills it to hand work
 // out, and the three fields at the end -- who carries it out, by when, and on
 // what terms -- are theirs alone.
-function ActivityForm({ form, setForm, projects, selectedProject, sectorOptions, managers, isDirector, usd, rate, busy, onChooseProject, onSubmit, onCancel }) {
+function ActivityForm({ form, setForm, projects, selectedProject, managers, isDirector, usd, rate, busy, onChooseProject, onSubmit, onCancel }) {
   const t = useT();
   // A manager only ever reads their own working area, so only the managers who
   // cover the chosen area can be handed the work. The API refuses the rest.
@@ -2287,8 +2287,8 @@ function ActivityForm({ form, setForm, projects, selectedProject, sectorOptions,
     <div className="panel-header"><div>
       <h2>{isDirector ? t('form.assignAnActivity') : t('form.raiseAnActivity')}</h2>
       <span>
-        {selectedProject ? `${t('form.selectedProject')}: ${selectedProject.name}` : t('form.selectProjectFirst')}
-        {' '}{isDirector ? t('form.goesToManager') : t('form.submittedToDirector')}
+        {selectedProject ? `${t('form.selectedProject')}: ${selectedProject.name} · ` : `${t('form.selectProjectFirst')} `}
+        {isDirector ? t('form.goesToManager') : t('form.submittedToDirector')}
       </span>
     </div></div>
     {/* The four things every request needs first; where it belongs and the
@@ -2297,6 +2297,11 @@ function ActivityForm({ form, setForm, projects, selectedProject, sectorOptions,
     <div className="form-grid activity-grid">
       <Field label={t('field.activity')} wide>
         <input required maxLength="200" placeholder={t('form.activityPlaceholder')} value={form.activity} onChange={(event) => setForm({ ...form, activity: event.target.value })} />
+      </Field>
+      {/* What the work is for. It was moved under "More details" and people
+          missed it, so it is back among the first questions. */}
+      <Field label={t('field.description')} wide>
+        <textarea rows="2" placeholder={isDirector ? t('form.whatWorkInvolves') : t('form.whyWorkNeeded')} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
       </Field>
       <Field label={t('field.category')}>
         <select required value={form.categoryChoice} onChange={(event) => { const choice = event.target.value; setForm({ ...form, categoryChoice: choice, category: choice === OTHER_CATEGORY ? '' : choice }); }}>
@@ -2317,16 +2322,20 @@ function ActivityForm({ form, setForm, projects, selectedProject, sectorOptions,
       <Field label={t('field.quantity')}>
         <input required type="number" inputMode="decimal" min="0.01" step="0.01" value={form.quantity} onChange={(event) => setForm({ ...form, quantity: event.target.value })} />
       </Field>
+      {/* One question, not two: every project belongs to a business operation,
+          so choosing the project sets the operation, the categories offered and
+          the managers who can be given the work. The operation was a second
+          dropdown that repeated the project's own answer. */}
       {projects.length !== 1 && <Field label={t('field.project')}>
         <select required value={form.projectId} onChange={(event) => onChooseProject(event.target.value)}>
           <option value="">{t('form.selectProject')}</option>
-          {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+          {sectors.filter((sector) => projects.some((project) => project.sector === sector.id))
+            .map((sector) => <optgroup key={sector.id} label={sectorName(sector.id)}>
+              {projects.filter((project) => project.sector === sector.id)
+                .map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+            </optgroup>)}
         </select>
-      </Field>}
-      {sectorOptions.length > 1 && <Field label={t('field.workingArea')}>
-        <select required value={form.sector} onChange={(event) => setForm({ ...form, sector: event.target.value, categoryChoice: '', category: '', assignedTo: '' })}>
-          {sectorOptions.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}
-        </select>
+        {selectedProject && <small className="field-hint">{fill(t('form.projectOperation'), { operation: sectorName(selectedProject.sector) })}</small>}
       </Field>}
       {isDirector && <>
         <Field label={t('field.carriedOutBy')}>
@@ -2343,9 +2352,6 @@ function ActivityForm({ form, setForm, projects, selectedProject, sectorOptions,
     <details className="form-more">
       <summary>{t('form.moreDetails')}</summary>
       <div className="form-grid">
-        <Field label={t('field.description')} wide>
-          <textarea rows="2" placeholder={isDirector ? t('form.whatWorkInvolves') : t('form.whyWorkNeeded')} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
-        </Field>
         <Field label={isDirector ? t('form.materialsToBuy') : t('form.materialsRequested')} wide>
           <textarea rows="3" placeholder={t('form.onePerLine')} value={form.materials} onChange={(event) => setForm({ ...form, materials: event.target.value })} />
         </Field>

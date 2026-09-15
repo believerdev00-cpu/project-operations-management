@@ -281,6 +281,7 @@ const STRINGS = {
   'nav.shortTrips': { en: 'Trips', rw: 'Ingendo', fr: 'Trajets', sw: 'Safari' },
   'form.activityPlaceholder': { en: 'What needs doing? e.g. Buy fertilizer for plot 2', rw: 'Ni iki gikenewe? urugero: Kugura ifumbire y’umurima wa 2', fr: 'Que faut-il faire ? ex. Acheter de l’engrais pour la parcelle 2', sw: 'Nini kinahitajika? mfano Kununua mbolea kwa shamba la 2' },
   'form.moreDetails': { en: 'More details (optional)', rw: 'Ibindi bisobanuro (si ngombwa)', fr: 'Plus de détails (facultatif)', sw: 'Maelezo zaidi (si lazima)' },
+  'form.projectOperation': { en: 'Business operation: {operation}', rw: 'Igikorwa cy’ubucuruzi: {operation}', fr: 'Opération commerciale : {operation}', sw: 'Shughuli ya biashara: {operation}' },
   'activities.askedForAmount': { en: 'Asked for {amount}', rw: 'Hasabwe {amount}', fr: 'Demandé : {amount}', sw: 'Imeombwa {amount}' },
   'projects.doneOf': { en: '{done} of {total} done', rw: '{done} kuri {total} byarangiye', fr: '{done} sur {total} terminés', sw: '{done} kati ya {total} zimekamilika' },
   'projects.figuresAutomatic': { en: 'Budget, spending and progress fill in by themselves from the project\'s activities and expenses.', rw: 'Ingengo y’imari, ibyakoreshejwe n’aho bigeze byiyuzuza bishingiye ku bikorwa n’amafaranga yakoreshejwe mu mushinga.', fr: 'Le budget, les dépenses et l’avancement se remplissent d’eux-mêmes à partir des activités et dépenses du projet.', sw: 'Bajeti, matumizi na maendeleo hujaza zenyewe kutoka kwa shughuli na matumizi ya mradi.' },
