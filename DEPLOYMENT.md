@@ -2,7 +2,37 @@
 
 The whole system is one Node process and one Postgres database. The process
 serves the API and the built interface on the same port, and uploaded evidence
-is stored on its own disk in `server/uploads`. No external service is involved.
+is stored on its own disk in `server/uploads` (or wherever `UPLOADS_DIR` points).
+
+## On Render (the recommended host)
+
+`render.yaml` describes everything: the web service, a managed Postgres, and a
+5 GB disk for receipts and photos, all in Frankfurt (the closest region to
+Rwanda). Nothing needs to change in the code.
+
+1. Create a Render account at https://render.com and connect it to GitHub.
+2. **New -> Blueprint**, pick the `project-operations-management` repository.
+3. Render asks for **ADMIN_PASSWORD**: type a starting password for the `admin`
+   Director account. Everything else is filled in by the Blueprint
+   (`JWT_SECRET` is generated for you).
+4. **Apply**. The first deploy builds the interface, creates the database
+   tables on boot, and gives the service an address like
+   `https://gisuma-operations.onrender.com`.
+5. Open it, sign in as `admin` with that starting password, and choose your own
+   password when asked.
+
+Every push to `master` deploys again automatically. Cost at the time of
+writing: the Starter web service (needed for the disk) plus the smallest paid
+database, roughly US$13 a month. The free database is deleted after 30 days, so
+it is not used.
+
+Backups: Render keeps daily database backups on paid plans; download the disk's
+files from the service's Shell if you need a copy of the receipts.
+
+A custom domain (for example `ops.gisuma.rw`) is added under the service's
+**Settings -> Custom Domains**; Render issues the HTTPS certificate.
+
+## On your own machine or server
 
 ## 1. Postgres
 

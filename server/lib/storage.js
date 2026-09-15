@@ -11,7 +11,12 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-const diskRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads');
+// UPLOADS_DIR points it at a mounted disk on a host whose code folder is replaced
+// on every deploy (Render mounts one at /var/data/uploads). Left unset, files go
+// under server/uploads beside the code, as on an ordinary server.
+const diskRoot = process.env.UPLOADS_DIR
+  ? path.resolve(process.env.UPLOADS_DIR)
+  : path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads');
 
 // Created on first write rather than at import time, so merely loading the API
 // on a read-only filesystem does not crash it.
