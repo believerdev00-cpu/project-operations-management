@@ -48,9 +48,34 @@ function mapProject(row) {
     budget: Number(row.budget),
     spent: Number(row.spent),
     category: row.category,
+    // Worked out from the project's activities, never typed. The Budget and
+    // Spent a Director used to type by hand (in RWF) fed the dashboard and never
+    // matched the real approved budgets and recorded expenses (in USD).
+    approvedUsd: Number(row.approved_usd || 0),
+    spentUsd: Number(row.spent_usd || 0),
+    activityCount: Number(row.activity_count || 0),
+    completedCount: Number(row.completed_count || 0),
     updatedAt: row.updated_at
   };
 }
+
+// The money and progress of each project, from its live activities: approved
+// budgets of approved work, every expense recorded against it, and how much of
+// the work is done. Refused and cancelled work counts towards none of it.
+const PROJECT_FIGURES = `
+  LEFT JOIN LATERAL (
+    SELECT
+      COALESCE(SUM(a.approved_budget) FILTER (
+        WHERE a.approval_status = 'approved' AND a.status NOT IN ('Rejected', 'Cancelled')), 0) AS approved_usd,
+      COUNT(*) FILTER (WHERE a.status NOT IN ('Rejected', 'Cancelled')) AS activity_count,
+      COUNT(*) FILTER (WHERE a.status = 'Completed') AS completed_count
+    FROM activities a WHERE a.project_id = p.id
+  ) work ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT COALESCE(SUM(e.amount), 0) AS spent_usd
+    FROM activity_expenses e JOIN activities a ON a.id = e.activity_id
+    WHERE a.project_id = p.id
+  ) money ON TRUE`;
 
 function mapApproval(row) {
   return {
@@ -547,7 +572,11 @@ app.get('/api/projects', authMiddleware, asyncRoute(async (req, res) => {
   managerScope(req.user, 'p.sector', values, filters);
 
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
-  const result = await pool.query(`SELECT p.*, u.name AS manager_name FROM projects p LEFT JOIN users u ON u.id = p.manager_id ${where} ORDER BY p.updated_at DESC`, values);
+  const result = await pool.query(
+    `SELECT p.*, u.name AS manager_name, work.approved_usd, work.activity_count, work.completed_count, money.spent_usd
+     FROM projects p LEFT JOIN users u ON u.id = p.manager_id ${PROJECT_FIGURES} ${where} ORDER BY p.updated_at DESC`,
+    values
+  );
   res.json(result.rows.map(mapProject));
 }));
 

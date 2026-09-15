@@ -67,7 +67,9 @@ function sectorName(sectorId) {
   return operationName(sectorId, displayLanguage());
 }
 
-const emptyProject = { name: '', sector: 'agriculture', location: '', owner: '', status: 'On Track', progress: '', budget: '', spent: '', category: '', managerId: '' };
+// Budget, spent and progress are no longer typed: they come from the project's
+// activities (see PROJECT_FIGURES in server/index.js).
+const emptyProject = { name: '', sector: 'agriculture', location: '', owner: '', status: 'On Track', category: '', managerId: '' };
 // One form, two ways round. A manager raises an activity, which is born
 // awaiting the Director's review, so it carries no status and no "approved"
 // tick for the requester to set. The Director instead hands work out: the last
@@ -2124,22 +2126,23 @@ function StageBadge({ activity }) {
 // so a manager is no longer shown controls that could only ever fail.
 function ProjectTable({ projects, managers, isDirector, busy, onShowActivities, onAssign, onDelete, empty }) {
   const t = useT();
-  return projects.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('field.project')}</th><th>{t('app.businessOperation')}</th><th>{t('field.location')}</th><th>{t('field.organizationOwner')}</th><th>{t('field.manager')}</th><th>{t('field.status')}</th><th>{t('table.progress')}</th><th>{t('field.budget')}</th><th>{t('field.spent')}</th><th>{t('table.actions')}</th></tr></thead><tbody>
+  return projects.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('field.project')}</th><th>{t('app.businessOperation')}</th><th>{t('field.location')}</th><th>{t('field.organizationOwner')}</th><th>{t('field.manager')}</th><th>{t('field.status')}</th><th>{t('table.progress')}</th><th>{t('money.approved')} (USD)</th><th>{t('money.spent')} (USD)</th><th>{t('table.actions')}</th></tr></thead><tbody>
     {projects.map((project) => {
       // A project is managed by someone who works its own operation.
       const managerOptions = managers.filter((manager) => manager.coversAllSectors || manager.sector === project.sector || manager.id === project.managerId);
       return <tr key={project.id}>
-        <td className="card-title-cell"><strong>{project.name}</strong><small>{project.id}</small></td>
-        <td data-label={t('app.businessOperation')}>{sectorName(project.sector)}</td>
-        <td data-label={t('field.location')}>{project.location}</td>
-        <td data-label={t('field.organizationOwner')}>{project.owner}</td>
+        <td className="card-title-cell"><strong>{project.name}</strong><small>{sectorName(project.sector)} · {project.location}</small></td>
+        <td className="card-optional" data-label={t('app.businessOperation')}>{sectorName(project.sector)}</td>
+        <td className="card-optional" data-label={t('field.location')}>{project.location}</td>
+        <td className="card-optional" data-label={t('field.organizationOwner')}>{project.owner}</td>
         <td data-label={t('field.manager')}>{isDirector
           ? <select aria-label={`${t('field.manager')}: ${project.name}`} disabled={busy} value={project.managerId || ''} onChange={(event) => onAssign(project.id, event.target.value)}><option value="">{t('table.unassigned')}</option>{managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}</select>
           : (project.managerName || <span className="muted-cell">{t('table.unassigned')}</span>)}</td>
-        <td data-label={t('field.status')}><span className="status-badge">{t(`status.${project.status}`)}</span></td>
-        <td data-label={t('table.progress')}>{project.progress}%</td>
-        <td data-label={t('field.budget')}>{formatRwf(project.budget)}</td>
-        <td data-label={t('field.spent')}>{formatRwf(project.spent)}</td>
+        {/* Toned by meaning: "Delayed" used to be drawn in the same green as "On Track". */}
+        <td data-label={t('field.status')}><span className={`status-badge ${project.status === 'Delayed' ? 'tone-stopped' : project.status === 'In Review' ? 'tone-waiting' : 'tone-done'}`}>{t(`status.${project.status}`)}</span></td>
+        <td data-label={t('table.progress')}>{fill(t('projects.doneOf'), { done: project.completedCount, total: project.activityCount })}</td>
+        <td data-label={`${t('money.approved')} (USD)`}>{formatUsd(project.approvedUsd)}</td>
+        <td data-label={`${t('money.spent')} (USD)`}>{formatUsd(project.spentUsd)}</td>
         <td className="card-actions">
           <button className="text-btn" type="button" onClick={() => onShowActivities(project.id)}>{t('nav.activities')}</button>
           {isDirector && <button className="danger-btn" disabled={busy} onClick={() => onDelete(project)} type="button">{t('action.delete')}</button>}
@@ -2247,12 +2250,10 @@ function ProjectForm({ form, setForm, managers, busy, onSubmit }) {
       <Field label={t('field.location')}><input required maxLength="200" value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} /></Field>
       <Field label={t('field.organizationOwner')}><input required maxLength="200" value={form.owner} onChange={(event) => setForm({ ...form, owner: event.target.value })} /></Field>
       <Field label={t('field.status')}><select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}>{PROJECT_STATUSES.map((option) => <option key={option} value={option}>{t(`status.${option}`)}</option>)}</select></Field>
-      <Field label={t('table.progress')}><input required type="number" inputMode="numeric" min="0" max="100" step="1" value={form.progress} onChange={(event) => setForm({ ...form, progress: event.target.value })} /></Field>
       <Field label={t('field.category')}><input required maxLength="100" value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} /></Field>
       <Field label={t('field.manager')}><select value={form.managerId} onChange={(event) => setForm({ ...form, managerId: event.target.value })}><option value="">{t('table.unassigned')}</option>{managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}</select></Field>
-      <Field label={t('field.budget')}><input required type="number" inputMode="decimal" min="0" value={form.budget} onChange={(event) => setForm({ ...form, budget: event.target.value })} /></Field>
-      <Field label={t('field.spent')}><input required type="number" inputMode="decimal" min="0" value={form.spent} onChange={(event) => setForm({ ...form, spent: event.target.value })} /></Field>
     </div>
+    <p className="field-hint">{t('projects.figuresAutomatic')}</p>
     <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('form.addProject')}</button></div>
   </form>;
 }

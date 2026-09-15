@@ -105,6 +105,10 @@ try {
   const workCount = (await api(farming.token, '/api/summary')).body.summary.myOpenWork;
   check('  it is in the manager\'s "Your work" list', workList.body.some((item) => item.id === request.body.id));
   check('  and the home count matches that list', workCount === workList.body.length, `${workCount} vs ${workList.body.length}`);
+  // Project money is read from the work, not typed in.
+  const project = (await api(admin, '/api/projects')).body.find((item) => item.id === 'PRJ-GISUMA');
+  check('the project\'s spending includes the recorded expense', project && project.spentUsd >= 40, JSON.stringify(project && { spent: project.spentUsd }));
+  check('  and its approved budget includes the approved request', project && project.approvedUsd >= 100, JSON.stringify(project && { approved: project.approvedUsd }));
   const deleteWithMoney = await api(admin, `/api/activities/${request.body.id}`, { method: 'DELETE' });
   check('an activity with expenses cannot be deleted', deleteWithMoney.status === 409, `${deleteWithMoney.status} ${deleteWithMoney.body.message}`);
 
