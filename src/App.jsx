@@ -13,7 +13,7 @@ import {
   DetailView, DialogProvider, ErrorBoundary, MINIMUM_PASSWORD_LENGTH, PHONE_QUERY, buildHash, trapFocus, useBusy, useDialog,
   useHashRoute, useMediaQuery, useScrollLock
 } from './ui.jsx';
-import { activityJourney, journeyLabel, journeyTone } from './journey.jsx';
+import { activityJourney, formatLocal, journeyLabel, journeyTone } from './journey.jsx';
 import Home, { DecisionList } from './Home.jsx';
 
 // The category presets offered per business operation. Keep in step with
@@ -2121,6 +2121,22 @@ function Panel({ title, subtitle, action, onAction, children }) { return <sectio
 function EmptyState({ children }) { return <div className="empty-state"><strong>{children}</strong></div>; }
 
 // Where an activity is, in the same words as its journey on the record screen.
+// A USD amount written in Rwandan and Congolese francs, for the readers who
+// think in those. `rates` is either a record's own frozen rate or today's.
+function localPair(amount, rates) {
+  if (!rates?.rwfPerUsd || !rates?.cdfPerUsd) return null;
+  return `${formatLocal(Number(amount || 0) * rates.rwfPerUsd, 'RWF')} · ${formatLocal(Number(amount || 0) * rates.cdfPerUsd, 'CDF')}`;
+}
+
+// The rate an activity was created at, kept on the row as its equivalents.
+function ratesOf(activity) {
+  if (!(activity.requestedBudget > 0) || !activity.requestedEquivalent) return null;
+  return {
+    rwfPerUsd: activity.requestedEquivalent.rwf / activity.requestedBudget,
+    cdfPerUsd: activity.requestedEquivalent.cdf / activity.requestedBudget
+  };
+}
+
 function StageBadge({ activity }) {
   const t = useT();
   const journey = activityJourney(activity);
@@ -2169,7 +2185,10 @@ function ActivityTable({ activities, isDirector, openId, onOpen, empty }) {
         <td className="card-title-cell"><strong>{activity.activity}</strong><small>{activity.description || t('review.noDescription')}</small></td>
         <td className="card-optional" data-label={t('table.category')}>{categoryLabel(activity.category, t)}</td>
         <td className="card-optional" data-label={t('activities.originalBudget')}>{formatUsd(activity.requestedBudget)}</td>
-        <td data-label={t('approval.approved')}>{activity.approvedBudget === null ? <span className="muted-cell">{fill(t('activities.askedForAmount'), { amount: formatUsd(activity.requestedBudget) })}</span> : formatUsd(activity.approvedBudget)}</td>
+        {/* In the local currencies as well, at the rate the record carries. */}
+        <td data-label={t('approval.approved')}>{activity.approvedBudget === null
+          ? <span className="muted-cell">{fill(t('activities.askedForAmount'), { amount: formatUsd(activity.requestedBudget) })}</span>
+          : <>{formatUsd(activity.approvedBudget)}<small>{localPair(activity.approvedBudget, ratesOf(activity))}</small></>}</td>
         <td data-label={t('activities.adjustment')} className={activity.budgetAdjustment ? 'card-optional over-budget' : 'card-optional'}>
           {activity.budgetAdjustment ? `${activity.budgetAdjustment > 0 ? '+' : ''}${formatUsd(activity.budgetAdjustment)}` : <span className="muted-cell">&mdash;</span>}
         </td>
@@ -2489,14 +2508,18 @@ function ReportBody({ report, busy, sectorLabel, onExport, onPrint, onClose }) {
 
         <h3 className="form-section-title">{t('report.budgetSummary')}</h3>
         <div className="budget-strip budget-strip-4">
+          {/* Each figure in the local currencies too, at the rate the report
+              was generated with (it carries that rate with it). */}
           <div className="budget-block">
             <span>{t('report.totalAssignedBudget')}</span>
             <strong>{formatUsd(budget.assigned)}</strong>
+            <small className="money-equivalent">{localPair(budget.assigned, report.rate)}</small>
             <small>{t('report.assignedHint')}</small>
           </div>
           <div className={`budget-block${budget.revised !== budget.assigned ? ' budget-adjusted' : ''}`}>
             <span>{t('report.totalRevisedBudget')}</span>
             <strong>{formatUsd(budget.revised)}</strong>
+            <small className="money-equivalent">{localPair(budget.revised, report.rate)}</small>
             <small>{budget.revised === budget.assigned
               ? t('report.unchangedOnReview')
               : fill(t('report.againstOriginal'), { change: `${budget.revised > budget.assigned ? '+' : ''}${formatUsd(budget.revised - budget.assigned)}` })}</small>
@@ -2504,14 +2527,19 @@ function ReportBody({ report, busy, sectorLabel, onExport, onPrint, onClose }) {
           <div className="budget-block">
             <span>{t('report.totalActualSpending')}</span>
             <strong>{formatUsd(budget.spent)}</strong>
+            <small className="money-equivalent">{localPair(budget.spent, report.rate)}</small>
             <small>{fill(t('report.utilisationHint'), { percent: budget.utilisation })}</small>
           </div>
           <div className={`budget-block${budget.remaining < 0 ? ' budget-adjusted' : ''}`}>
             <span>{t('report.remainingBudget')}</span>
             <strong>{formatUsd(budget.remaining)}</strong>
+            <small className="money-equivalent">{localPair(budget.remaining, report.rate)}</small>
             <small>{budget.remaining < 0 ? t('report.overspent') : t('report.releasedNotSpent')}</small>
           </div>
         </div>
+        {report.rate?.rwfPerUsd > 0 && <p className="field-hint">
+          {t('money.todayRate')}: 1 USD = {formatLocal(report.rate.rwfPerUsd, 'RWF')} = {formatLocal(report.rate.cdfPerUsd, 'CDF')}
+        </p>}
 
         <h3 className="form-section-title">{t('report.managerPerformance')}</h3>
         <div className="table-wrap"><table className="card-table">

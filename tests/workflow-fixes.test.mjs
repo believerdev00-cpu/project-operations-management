@@ -105,6 +105,17 @@ try {
   const workCount = (await api(farming.token, '/api/summary')).body.summary.myOpenWork;
   check('  it is in the manager\'s "Your work" list', workList.body.some((item) => item.id === request.body.id));
   check('  and the home count matches that list', workCount === workList.body.length, `${workCount} vs ${workList.body.length}`);
+  // Reports carry the rate they were built with, so the same figures can be
+  // read in Rwandan and Congolese francs.
+  const month = new Date().toISOString().slice(0, 7);
+  const activityReport = await api(admin, `/api/reports/activities?period=monthly&month=${month}`);
+  check('a report carries today\'s exchange rate', activityReport.status === 200 && activityReport.body.rate?.rwfPerUsd > 0 && activityReport.body.rate?.cdfPerUsd > 0,
+    JSON.stringify(activityReport.body.rate));
+  const exported = await fetch(`${API}/api/reports/activities/export?period=monthly&month=${month}&format=xlsx`, {
+    headers: { Authorization: `Bearer ${admin}` }
+  });
+  check('  and exports as a spreadsheet', exported.status === 200 && (await exported.arrayBuffer()).byteLength > 1000, String(exported.status));
+
   // Project money is read from the work, not typed in.
   const project = (await api(admin, '/api/projects')).body.find((item) => item.id === 'PRJ-GISUMA');
   check('the project\'s spending includes the recorded expense', project && project.spentUsd >= 40, JSON.stringify(project && { spent: project.spentUsd }));

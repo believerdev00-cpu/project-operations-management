@@ -20,7 +20,7 @@ import PDFDocument from 'pdfkit';
 import { pool } from '../db/database.js';
 import { sectors } from '../data/seedData.js';
 import { asyncRoute, hasFullScope, isAdmin, managerScope } from '../lib/http.js';
-import { round2 } from '../lib/rates.js';
+import { getCurrentRate, round2 } from '../lib/rates.js';
 
 const router = express.Router();
 
@@ -355,8 +355,14 @@ export async function buildReport(user, period) {
   const managers = [...byManager.values()].sort((left, right) => right.assigned - left.assigned
     || left.managerName.localeCompare(right.managerName));
 
+  // Budgets are kept in USD, but the people reading a report work in Rwandan
+  // and Congolese francs. The report carries today's reference rate and says
+  // so, rather than leaving every reader to convert the figures themselves.
+  const rate = await getCurrentRate(pool);
+
   return {
     period,
+    rate: { rwfPerUsd: rate.rwfPerUsd, cdfPerUsd: rate.cdfPerUsd, recordedAt: rate.recordedAt || null },
     generatedAt: new Date().toISOString(),
     scope: {
       // isDirector stays a question about authority -- it drives what the report
@@ -444,7 +450,7 @@ async function buildWorkbook(report) {
   workbook.created = new Date();
 
   const summary = workbook.addWorksheet('Summary');
-  summary.columns = [{ width: 32 }, { width: 20 }];
+  summary.columns = [{ width: 32 }, { width: 18 }, { width: 18 }, { width: 18 }];
   summary.addRow(['Activity report', report.period.label]);
   summary.addRow(['Period', `${report.period.start} to ${report.period.end}`]);
   summary.addRow(['Working area', report.scope.sectorName]);
@@ -459,15 +465,24 @@ async function buildWorkbook(report) {
   summary.addRow(['Overdue', report.activitySummary.overdue]);
   summary.addRow(['Cancelled', report.activitySummary.cancelled]);
   summary.addRow([]);
-  summary.addRow(['BUDGET SUMMARY (USD)']);
+  summary.addRow(['BUDGET SUMMARY']);
+  headerRow(summary, summary.rowCount);
+  summary.addRow(['', 'USD', 'RWF', 'CDF']);
   headerRow(summary, summary.rowCount);
   const budgetFrom = summary.rowCount + 1;
-  summary.addRow(['Total assigned budget', report.budgetSummary.assigned]);
-  summary.addRow(['Total revised budget', report.budgetSummary.revised]);
-  summary.addRow(['Total actual spending', report.budgetSummary.spent]);
-  summary.addRow(['Remaining budget', report.budgetSummary.remaining]);
-  for (let index = budgetFrom; index <= summary.rowCount; index += 1) {
+  const inLocal = (amount) => [
+    round2(amount * report.rate.rwfPerUsd),
+    round2(amount * report.rate.cdfPerUsd)
+  ];
+  summary.addRow(['Total assigned budget', report.budgetSummary.assigned, ...inLocal(report.budgetSummary.assigned)]);
+  summary.addRow(['Total revised budget', report.budgetSummary.revised, ...inLocal(report.budgetSummary.revised)]);
+  summary.addRow(['Total actual spending', report.budgetSummary.spent, ...inLocal(report.budgetSummary.spent)]);
+  summary.addRow(['Remaining budget', report.budgetSummary.remaining, ...inLocal(report.budgetSummary.remaining)]);
+  summary.addRow([`At today's rate: 1 USD = ${report.rate.rwfPerUsd} RWF = ${report.rate.cdfPerUsd} CDF`]);
+  for (let index = budgetFrom; index <= budgetFrom + 3; index += 1) {
     summary.getCell(`B${index}`).numFmt = MONEY;
+    summary.getCell(`C${index}`).numFmt = MONEY;
+    summary.getCell(`D${index}`).numFmt = MONEY;
   }
   summary.getRow(1).font = { bold: true, size: 14 };
 
@@ -594,6 +609,18 @@ function writePdf(report, stream) {
   const budget = report.budgetSummary;
   doc.text(`Total assigned: ${usd(budget.assigned)}      Total revised: ${usd(budget.revised)}`
     + `      Actual spending: ${usd(budget.spent)}      Remaining: ${usd(budget.remaining)}`);
+  const local = (amount, perUsd) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(amount * perUsd);
+  doc.moveDown(0.3);
+  doc.fontSize(8).fillColor('#555555').text(
+    `In RWF: assigned ${local(budget.assigned, report.rate.rwfPerUsd)}      revised ${local(budget.revised, report.rate.rwfPerUsd)}`
+    + `      spent ${local(budget.spent, report.rate.rwfPerUsd)}      remaining ${local(budget.remaining, report.rate.rwfPerUsd)}`
+  );
+  doc.text(
+    `In CDF: assigned ${local(budget.assigned, report.rate.cdfPerUsd)}      revised ${local(budget.revised, report.rate.cdfPerUsd)}`
+    + `      spent ${local(budget.spent, report.rate.cdfPerUsd)}      remaining ${local(budget.remaining, report.rate.cdfPerUsd)}`
+  );
+  doc.text(`At today's rate: 1 USD = ${report.rate.rwfPerUsd} RWF = ${report.rate.cdfPerUsd} CDF`);
+  doc.fillColor('#000000').fontSize(10);
   doc.moveDown(0.8);
 
   // One shared row painter for both tables. Widths are fractions of the text
