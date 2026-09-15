@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { displayLanguage, fill, translate, useI18n, useT } from './i18n.js';
 import { ExpensePanel } from './MonthlyPlans.jsx';
+import { FilePicker, Journey, MoneyBar, NextStep, Section, activityJourney, goToSection } from './journey.jsx';
 
 // The Director's review screen for one activity, and the same record as the
 // manager sees it -- whether they raised it themselves or the Director handed
@@ -157,7 +158,8 @@ export function canApproveRecord(user, record) {
 export function ActivityReview({
   detail, user, onOpenFile, sectorLabel, managers = [], busy = false,
   onClose, onDecision, onStatus, onAssign, onUpload, onRemoveEvidence, onSubmitCompletion, onApprove, onReject,
-  onVisibility, onRecordExpense, onRemoveExpense, onRequestBudget, onDecideBudget, onDelete, onSendDraft
+  onVisibility, onRecordExpense, onRemoveExpense, onRequestBudget, onDecideBudget, onDelete, onSendDraft,
+  onFinish, onSendBack, onReopen
 }) {
   const { language, t } = useI18n();
   const { activity, evidence, history, expenses = [], expenseSummary = null, budgetRequests = [] } = detail;
@@ -188,7 +190,6 @@ export function ActivityReview({
     deadline: activity.deadline || '',
     instructions: activity.instructions || ''
   });
-  const [completionNote, setCompletionNote] = useState('');
 
   // Reopening a different activity must not leave the previous decision in the
   // form, and a saved decision should read back what was actually stored.
@@ -207,7 +208,6 @@ export function ActivityReview({
       deadline: activity.deadline || '',
       instructions: activity.instructions || ''
     });
-    setCompletionNote('');
   }, [
     activity.id, activity.approvedBudget, activity.status, activity.adminNote, activity.requestedBudget,
     activity.assignedTo, activity.deadline, activity.instructions
@@ -306,78 +306,131 @@ export function ActivityReview({
     return names;
   }, [managers, activity.assignedTo, activity.assignedToName]);
 
-  return <section className="panel detail-panel activity-review">
-    <div className="panel-header">
+  const journey = activityJourney(activity);
+  const handedBack = Boolean(activity.completionSubmittedAt) && activity.status !== 'Completed';
+  const assigneeName = activity.assignedToName || t('form.nobodyYet');
+  const spentSoFar = expenseSummary ? expenseSummary.totalSpent : expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
+  const hasProof = evidence.length > 0;
+  const canReopen = isDirector && monthOpen && ['Rejected', 'Cancelled'].includes(activity.status);
+  const reopenButton = canReopen && <button className="secondary-btn" type="button" disabled={busy} onClick={() => onReopen(activity)}>{t('action.reopen')}</button>;
+
+  // What happens next, and whether it is this reader who does it. Worked out
+  // from the same permissions as the buttons further down, so the box never
+  // offers a step the API would refuse.
+  let next;
+  if (!monthOpen) {
+    next = { tone: 'muted', title: t('next.monthClosedTitle'), text: t('next.monthClosedText') };
+  } else if (activity.status === 'Draft') {
+    next = canSendDraft
+      ? { tone: 'action', title: t('journey.draft'), text: t('next.draftText'),
+        actions: <button className="primary-btn" type="button" disabled={busy} onClick={() => onSendDraft(activity)}>{t('action.submitForApproval')}</button> }
+      : { tone: 'info', title: t('journey.draft'), text: t('next.draftOther') };
+  } else if (activity.status === 'Rejected') {
+    next = { tone: 'stopped', title: t('journey.refused'), text: activity.rejectionReason || activity.adminNote || '', actions: reopenButton };
+  } else if (activity.status === 'Cancelled') {
+    next = { tone: 'stopped', title: t('journey.cancelled'), text: activity.adminNote || '', actions: reopenButton };
+  } else if (activity.status === 'On Hold') {
+    next = { tone: 'muted', title: t('journey.paused'), text: t('next.pausedText') };
+  } else if (waitingForDecision) {
+    next = iAmApprover
+      ? { tone: 'action', title: t('next.decideTitle'), text: t('next.decideText'),
+        actions: <button className="primary-btn" type="button" onClick={() => goToSection('decision')}>{t('next.goDecide')}</button> }
+      : { tone: 'info', title: fill(t('next.waitingFor'), { name: approverName(activity, sectorLabel, t) }), text: t('next.waitingForText') };
+  } else if (activity.status === 'Completed') {
+    next = { tone: 'done', title: t('journey.done'), text: activity.completedAt ? fill(t('next.doneOn'), { date: formatDateTime(activity.completedAt) }) : '' };
+  } else if (handedBack) {
+    next = isDirector
+      ? { tone: 'action', title: t('next.finalCheckTitle'), text: t('next.finalCheckText'),
+        actions: <>
+          <button className="primary-btn" type="button" disabled={busy} onClick={() => onFinish(activity)}>{t('action.markDone')}</button>
+          <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onSendBack(activity)}>{t('action.sendBack')}</button>
+        </> }
+      : { tone: 'info', title: t('next.withDirectorTitle'), text: t('review.completionWithDirector') };
+  } else if (!monthConfirmed) {
+    next = { tone: 'muted', title: t('next.monthNotConfirmedTitle'), text: t('review.monthNotConfirmed') };
+  } else if (['Approved', 'Budget Adjusted'].includes(activity.status)) {
+    next = managerCanStart
+      ? { tone: 'action', title: t('next.readyTitle'), text: t('next.readyText'),
+        actions: <button className="primary-btn" type="button" disabled={busy} onClick={() => onStatus(activity, 'In Progress')}>{t('action.startWork')}</button> }
+      : { tone: 'info', title: fill(t('next.readyOther'), { name: assigneeName }), text: '' };
+  } else if (carriesIt || (isDirector && canSubmitCompletion)) {
+    const sentBack = activity.status === 'Needs Correction';
+    next = {
+      tone: sentBack ? 'warning' : 'action',
+      title: sentBack ? t('journey.sentBack') : t('next.underwayTitle'),
+      text: sentBack ? (activity.adminNote || t('review.sentBackToYou')) : t('next.underwayText'),
+      actions: <>
+        {canRecordExpense && <button className="secondary-btn" type="button" onClick={() => goToSection('money')}>{t('expense.record')}</button>}
+        {canAttach && <button className="secondary-btn" type="button" onClick={() => goToSection('proof')}>{t('next.addProof')}</button>}
+        {canSubmitCompletion && (hasProof
+          ? <button className="primary-btn" type="button" disabled={busy} onClick={() => onSubmitCompletion(activity)}>{t('action.submitCompleted')}</button>
+          : <span className="next-step-note">{t('next.proofFirst')}</span>)}
+      </>
+    };
+  } else {
+    next = { tone: 'info', title: fill(t('next.underwayOther'), { name: assigneeName }), text: '' };
+  }
+
+  const peopleLine = [
+    `${t('people.requestedBy')}: ${activity.createdByName || '—'}`,
+    `${t('people.assignedTo')}: ${activity.assignedToName || t('form.nobodyYet')}`,
+    activity.deadline ? `${t('table.deadline')}: ${formatDate(activity.deadline)}` : null
+  ].filter(Boolean).join(' · ');
+
+  return <section className="panel detail-panel activity-review record">
+    <div className="panel-header record-header">
       <div>
-        <span className="eyebrow">{wasAssigned ? t('review.assignedActivity') : t('review.activityReview')}</span>
-        <h2>{sectorLabel(activity.sector)} &mdash; {activity.activity}</h2>
-        <span>
-          {wasAssigned
-            ? `${t('review.assignedBy')} ${activity.createdByName || t('review.theDirector')} ${t('review.toWhom')} ${activity.assignedToName || t('form.nobodyYet')}`
-            : `${t('review.submittedBy')} ${activity.createdByName || '\u2014'}`} · {sectorLabel(activity.sector)} ·
-          {' '}{formatDateTime(activity.createdAt)} · {activity.projectName || activity.projectId}
-        </span>
+        <span className="eyebrow">{sectorLabel(activity.sector)} · {wasAssigned ? t('review.assignedActivity') : t('review.activityReview')}</span>
+        <h2>{activity.activity}</h2>
+        <span>{peopleLine}{due && due.tone !== 'ok' && <small className={`deadline-flag deadline-${due.tone}`}>{due.text}</small>}</span>
       </div>
       <button className="text-btn hide-on-sheet" type="button" onClick={onClose}>{t('action.close')}</button>
     </div>
 
-    <ApprovalPanel record={activity} sectorLabel={sectorLabel} />
+    <Journey journey={journey} />
 
-    <div className="detail-facts">
-      <Fact label={t('table.status')} value={<span className={`status-badge ${statusTone(activity.status)}`}>{t(`status.${activity.status}`)}</span>} />
-      <Fact label={t('table.department')} value={sectorLabel(activity.department || activity.sector)} />
-      <Fact label={t('table.category')} value={categoryLabel(activity.category, t)} />
-      <Fact label={t('field.quantity')} value={activity.quantity} />
-      <Fact label={t('table.createdBy')} value={activity.createdByName || <span className="muted-cell">&mdash;</span>} />
-      <Fact label={t('field.carriedOutBy')} value={activity.assignedToName || <span className="muted-cell">{t('review.notAssigned')}</span>} />
-      <Fact label={t('table.deadline')} value={activity.deadline
-        ? <>{formatDate(activity.deadline)}{due && due.tone !== 'ok' && <small className={`deadline-flag deadline-${due.tone}`}>{due.text}</small>}</>
-        : <span className="muted-cell">{t('review.noDeadline')}</span>} />
-      <Fact label={t('field.evidence')} value={<span className={`status-badge ${activity.evidenceStatus === 'Complete' ? 'tone-done' : 'tone-waiting'}`}>{t(`estatus.${activity.evidenceStatus}`)}</span>} />
-      <Fact label={t('review.reviewedBy')} value={activity.reviewedByName ? `${activity.reviewedByName} · ${formatDateTime(activity.reviewedAt)}` : t('review.notReviewed')} />
-      <Fact label={t('review.completionSubmitted')} value={activity.completionSubmittedAt ? formatDateTime(activity.completionSubmittedAt) : t('review.notSubmitted')} />
-    </div>
+    <NextStep tone={next.tone} title={next.title} actions={next.actions}>{next.text}</NextStep>
 
-    {activity.instructions && <>
-      <h3 className="form-section-title">{t('review.instructionsFromDirector')}</h3>
-      <p className="detail-notes admin-note">{activity.instructions}</p>
-    </>}
+    <MoneyBar
+      approved={activity.approvedBudget}
+      requested={activity.requestedBudget}
+      spent={spentSoFar}
+      format={formatUsd}
+      extra={<p className="money-note">
+        {activity.approvedBudget === null
+          ? null
+          : activity.budgetAdjustment
+            ? fill(t('money.changedFrom'), { amount: formatUsd(activity.requestedBudget), change: `${activity.budgetAdjustment > 0 ? '+' : ''}${formatUsd(activity.budgetAdjustment)}` })
+            : null}
+      </p>}
+    />
 
-    <h3 className="form-section-title">{wasAssigned ? t('review.activityDetails') : t('review.requestDetails')}</h3>
-    <p className="detail-notes">{activity.description || t('review.noDescription')}</p>
-    {items.length
-      ? <ul className="material-list">{items.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul>
-      : <p className="detail-notes muted-cell">{t('review.noMaterials')}</p>}
-
-    <div className="budget-strip">
-      <div className="budget-block">
-        <span>{wasAssigned ? t('review.budgetSetAtAssignment') : t('review.requestedBudget')}</span>
-        <strong>{formatUsd(activity.requestedBudget)}</strong>
-        <small>{formatLocal(activity.requestedEquivalent.rwf, 'RWF')} · {formatLocal(activity.requestedEquivalent.cdf, 'CDF')}</small>
+    <Section id="details" title={t('section.details')} defaultOpen>
+      <div className="detail-facts">
+        <Fact label={t('field.project')} value={activity.projectName || activity.projectId} />
+        <Fact label={t('table.category')} value={categoryLabel(activity.category, t)} />
+        <Fact label={t('field.quantity')} value={activity.quantity} />
+        <Fact label={t('table.deadline')} value={activity.deadline
+          ? <>{formatDate(activity.deadline)}{due && due.tone !== 'ok' && <small className={`deadline-flag deadline-${due.tone}`}>{due.text}</small>}</>
+          : <span className="muted-cell">{t('review.noDeadline')}</span>} />
+        <Fact label={t('people.requestedBy')} value={activity.createdByName || '—'} />
+        <Fact label={t('people.assignedTo')} value={activity.assignedToName || <span className="muted-cell">{t('review.notAssigned')}</span>} />
       </div>
-      <div className="budget-block">
-        <span>{t('review.approvedBudget')}</span>
-        <strong>{activity.approvedBudget === null ? t('activities.notDecided') : formatUsd(activity.approvedBudget)}</strong>
-        <small>{activity.approvedEquivalent
-          ? `${formatLocal(activity.approvedEquivalent.rwf, 'RWF')} · ${formatLocal(activity.approvedEquivalent.cdf, 'CDF')}`
-          : t('review.awaitingDirector')}</small>
-      </div>
-      <div className={`budget-block${activity.budgetAdjustment ? ' budget-adjusted' : ''}`}>
-        <span>{t('review.budgetAdjustment')}</span>
-        <strong>{activity.budgetAdjustment === null
-          ? '—'
-          : `${activity.budgetAdjustment > 0 ? '+' : ''}${formatUsd(activity.budgetAdjustment)}`}</strong>
-        <small>{activity.budgetAdjustment
-          ? t('review.changedOnReview')
-          : (wasAssigned ? t('review.unchangedSinceAssigned') : t('review.unchangedSinceRequested'))}</small>
-      </div>
-    </div>
+      {activity.instructions && <>
+        <h3 className="form-section-title">{t('review.instructionsFromDirector')}</h3>
+        <p className="detail-notes admin-note">{activity.instructions}</p>
+      </>}
+      <h3 className="form-section-title">{wasAssigned ? t('review.activityDetails') : t('review.requestDetails')}</h3>
+      <p className="detail-notes">{activity.description || t('review.noDescription')}</p>
+      {items.length > 0 && <ul className="material-list">{items.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul>}
+      {activity.adminNote && <p className="detail-notes admin-note"><strong>{t('review.directorNote')}:</strong> &ldquo;{activity.adminNote}&rdquo;</p>}
+      <ApprovalPanel record={activity} sectorLabel={sectorLabel} />
+    </Section>
 
     {/* The decision this record is waiting on, taken by the person it names.
         Drawn only for that person; the API refuses anybody else regardless. It
-        sits after the details and the budget, which are what is being decided --
-        above them, the approver was asked to decide before reading. */}
-    {iAmApprover && <form className="decision-form approval-form" onSubmit={(event) => {
+        comes after the details and the money, which are what is being decided. */}
+    {iAmApprover && <form id="decision" className="decision-form approval-form" onSubmit={(event) => {
       event.preventDefault();
       onApprove(activity, {
         action: 'approve',
@@ -388,12 +441,12 @@ export function ActivityReview({
       <h3 className="form-section-title">{t('approval.yourDecision')}</h3>
       <div className="form-grid">
         {canChangeBudget && <label className="form-field"><span>{t('review.approvedBudgetUsd')}</span>
-          <input type="number" min="0" step="0.01" value={approval.approvedBudget}
+          <input type="number" inputMode="decimal" min="0" step="0.01" value={approval.approvedBudget}
             onChange={(event) => setApproval({ ...approval, approvedBudget: event.target.value })} />
         </label>}
         <label className="form-field form-field-wide">
           <span>{isDirector ? t('review.directorNote') : t('field.note')} ({approvalBudgetChanged ? t('field.required') : t('field.optional')})</span>
-          <textarea rows="2"
+          <textarea rows="2" required={approvalBudgetChanged}
             value={approval.adminNote} onChange={(event) => setApproval({ ...approval, adminNote: event.target.value })} />
         </label>
       </div>
@@ -402,19 +455,85 @@ export function ActivityReview({
         {' '}({typedApprovalBudget - activity.requestedBudget > 0 ? '+' : ''}
         {formatUsd(typedApprovalBudget - activity.requestedBudget)})
       </p>}
-      <div className="button-row">
+      <div className="form-submit-bar">
         <button className="primary-btn" type="submit" disabled={busy}>{t('approval.approve')}</button>
         {/* The reason is asked for in its own dialog, the same one the queue uses. */}
-        <button className="danger-btn outlined" type="button"
-          disabled={busy}
-          onClick={() => onReject(activity)}>
-          {t('approval.reject')}
-        </button>
+        <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onReject(activity)}>{t('approval.reject')}</button>
       </div>
     </form>}
 
-    {isDirector && monthOpen
-      ? <form className="decision-form" onSubmit={(event) => {
+    {/* What was actually spent against this activity, and asking for more. */}
+    {onRecordExpense && <Section id="money" title={t('section.money')} count={expenses.length || null}
+      defaultOpen={canRecordExpense || expenses.length > 0}>
+      <ExpensePanel
+        activity={activity}
+        expenses={expenses}
+        summary={expenseSummary}
+        showSummary={false}
+        canRecord={canRecordExpense}
+        canRemove={isDirector && monthOpen}
+        busy={busy}
+        // The panel hands back only the expense; the handlers also need to know
+        // which activity it belongs to, exactly like the evidence handlers below.
+        onRecord={(expense, reset, receipts) => onRecordExpense(activity, expense, reset, receipts)}
+        onRemoveExpense={(expense) => onRemoveExpense(activity, expense)}
+      />
+      <BudgetRequestPanel
+        activity={activity}
+        requests={budgetRequests}
+        user={user}
+        isDirector={isDirector}
+        monthOpen={monthOpen}
+        busy={busy}
+        onRequest={onRequestBudget ? (body) => onRequestBudget(activity, body) : null}
+        onDecide={onDecideBudget ? (request, status) => onDecideBudget(activity, request, status) : null}
+      />
+    </Section>}
+
+    {/* Proof money was spent, and proof the work was done: different things,
+        uploaded and listed separately. */}
+    <Section id="proof" title={t('section.proof')} count={evidence.length || null}
+      defaultOpen={canAttach && ['In Progress', 'Needs Correction'].includes(activity.status)}>
+      <h3 className="form-section-title">{t('evidence.payment')}</h3>
+      <p className="detail-notes muted-cell">{t('evidence.paymentHint')}</p>
+      {canAttach && <EvidenceUpload
+        evidenceType="payment"
+        expenses={expenses}
+        busy={busy}
+        onUpload={(formData) => onUpload(activity, formData)}
+      />}
+      <EvidenceList
+        activity={activity}
+        evidence={paymentEvidence}
+        onOpenFile={onOpenFile}
+        canRemove={isDirector && monthOpen}
+        busy={busy}
+        onRemove={(item) => onRemoveEvidence(activity, item)}
+      />
+
+      <h3 className="form-section-title">{t('evidence.activity')}</h3>
+      <p className="detail-notes muted-cell">{t('evidence.activityHint')}</p>
+      {canAttach && <EvidenceUpload
+        evidenceType="activity"
+        expenses={[]}
+        busy={busy}
+        onUpload={(formData) => onUpload(activity, formData)}
+      />}
+      <EvidenceList
+        activity={activity}
+        evidence={completionEvidence}
+        onOpenFile={onOpenFile}
+        canRemove={isDirector && monthOpen}
+        busy={busy}
+        onRemove={(item) => onRemoveEvidence(activity, item)}
+      />
+    </Section>
+
+    {/* The Director's wider controls, folded away: changing status or budget
+        outside the normal steps, handing the work to someone else, what
+        partners see, and deleting. */}
+    {isDirector && monthOpen && <Section id="director-tools" title={t('section.directorTools')}>
+      <form className="decision-form" onSubmit={(event) => {
         event.preventDefault();
         // Only what actually changed travels, so an untouched budget is never
         // mistaken for a budget change that needs its own reason.
@@ -427,7 +546,7 @@ export function ActivityReview({
         <h3 className="form-section-title">{t('review.adminDecision')}</h3>
         <div className="form-grid">
           <label className="form-field"><span>{t('review.approvedBudgetUsd')}</span>
-            <input type="number" min="0" step="0.01" value={decision.approvedBudget} disabled={waitingForDecision}
+            <input type="number" inputMode="decimal" min="0" step="0.01" value={decision.approvedBudget} disabled={waitingForDecision}
               onChange={(event) => setDecision({ ...decision, approvedBudget: event.target.value })} />
           </label>
           <label className="form-field"><span>{t('table.status')}</span>
@@ -440,182 +559,88 @@ export function ActivityReview({
               value={decision.adminNote} onChange={(event) => setDecision({ ...decision, adminNote: event.target.value })} />
           </label>
         </div>
-        {activity.adminNote && <p className="detail-notes admin-note">&ldquo;{activity.adminNote}&rdquo;</p>}
         {typedBudget !== activity.requestedBudget && <p className="decision-hint">
           {formatUsd(activity.requestedBudget)} &rarr; {formatUsd(typedBudget)}
           {' '}({typedAdjustment > 0 ? '+' : ''}{formatUsd(typedAdjustment)}).
         </p>}
         {waitingForDecision && <p className="decision-hint">{t('review.decisionFirst')}</p>}
         {decision.status === 'Needs Correction' && <p className="decision-hint">{t('review.needsCorrectionHint')}</p>}
-        <button className="primary-btn" type="submit" disabled={busy || !decisionHasChanges}>{t('action.saveDecision')}</button>
+        <div className="form-submit-bar">
+          <button className="primary-btn" type="submit" disabled={busy || !decisionHasChanges}>{t('action.saveDecision')}</button>
+        </div>
       </form>
-      : <div className="decision-readout">
-        <h3 className="form-section-title">{t('review.adminDecision')}</h3>
-        {activity.approvedBudget === null
-          ? <p className="detail-notes">{t('review.notDecidedYet')}</p>
-          : <>
-            <p className="detail-notes"><strong>{t('review.approvedBudget')}:</strong> {formatUsd(activity.approvedBudget)}
-              {activity.budgetAdjustment ? ` (${fill(t(wasAssigned ? 'review.changeAgainstOriginal' : 'review.changeAgainstRequest'), { change: `${activity.budgetAdjustment > 0 ? '+' : ''}${formatUsd(activity.budgetAdjustment)}` })})` : ''}</p>
-            {activity.adminNote && <p className="detail-notes admin-note">&ldquo;{activity.adminNote}&rdquo;</p>}
-          </>}
+
+      {/* Who carries the work out, by when, and on what terms. */}
+      <form className="decision-form assignment-form" onSubmit={(event) => {
+        event.preventDefault();
+        onAssign(activity, assignmentChanges);
+      }}>
+        <h3 className="form-section-title">{t('review.assignment')}</h3>
+        <div className="form-grid">
+          <label className="form-field"><span>{t('people.assignedTo')}</span>
+            <select value={assignment.assignedTo} onChange={(event) => setAssignment({ ...assignment, assignedTo: event.target.value })}>
+              <option value="">{t('form.nobodyYet')}</option>
+              {managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}
+            </select>
+          </label>
+          <label className="form-field"><span>{t('field.deadline')}</span>
+            <input type="date" value={assignment.deadline}
+              onChange={(event) => setAssignment({ ...assignment, deadline: event.target.value })} />
+          </label>
+          <label className="form-field form-field-wide"><span>{t('field.instructions')}</span>
+            <textarea rows="3"
+              value={assignment.instructions} onChange={(event) => setAssignment({ ...assignment, instructions: event.target.value })} />
+          </label>
+        </div>
+        {!managerOptions.length && <p className="decision-hint">{t('review.noManagerCoversArea')}</p>}
+        {/* Only an undecided hand-over moves to the new manager's queue; work
+            already accepted simply changes hands. */}
+        {assignmentChanges.assignedTo !== undefined && waitingForDecision && activity.approvalRequiredRole === 'manager' && <p className="decision-hint">{t('review.reassignClearsAcceptance')}</p>}
+        <div className="form-submit-bar">
+          <button className="secondary-btn" type="submit" disabled={busy || !hasAssignmentChanges}>{t('action.saveAssignment')}</button>
+        </div>
+      </form>
+
+      {/* What leaves the organisation. An external partner assigned to this
+          business operation sees an approved record unless it is switched off
+          here; evidence, internal notes and the trail are never shared. */}
+      {onVisibility && <div className="visibility-control">
+        <div>
+          <span className="eyebrow">{t('review.externalVisibility')}</span>
+          <strong className={activity.externallyVisible ? 'tone-done' : 'tone-stopped'}>
+            {activity.externallyVisible ? t('visibility.visible') : t('visibility.hidden')}
+          </strong>
+          <small>{activity.approvalStatus === 'approved' ? t('visibility.note') : t('visibility.notApprovedYet')}</small>
+        </div>
+        <button
+          className={activity.externallyVisible ? 'danger-btn outlined' : 'secondary-btn'}
+          type="button"
+          disabled={busy}
+          onClick={() => onVisibility(activity, !activity.externallyVisible)}
+        >{activity.externallyVisible ? t('visibility.hide') : t('visibility.show')}</button>
       </div>}
 
-    {/* Who carries the work out, by when, and on what terms. The budget is not
-        reachable here; that is the decision above. */}
-    {isDirector && monthOpen && <form className="decision-form assignment-form" onSubmit={(event) => {
-      event.preventDefault();
-      onAssign(activity, assignmentChanges);
-    }}>
-      <h3 className="form-section-title">{t('review.assignment')}</h3>
-      <div className="form-grid">
-        <label className="form-field"><span>{t('field.carriedOutBy')}</span>
-          <select value={assignment.assignedTo} onChange={(event) => setAssignment({ ...assignment, assignedTo: event.target.value })}>
-            <option value="">{t('form.nobodyYet')}</option>
-            {managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}
-          </select>
-        </label>
-        <label className="form-field"><span>{t('field.deadline')}</span>
-          <input type="date" value={assignment.deadline}
-            onChange={(event) => setAssignment({ ...assignment, deadline: event.target.value })} />
-        </label>
-        <label className="form-field form-field-wide"><span>{t('field.instructions')}</span>
-          <textarea rows="3"
-            value={assignment.instructions} onChange={(event) => setAssignment({ ...assignment, instructions: event.target.value })} />
-        </label>
-      </div>
-      {!managerOptions.length && <p className="decision-hint">{t('review.noManagerCoversArea')}</p>}
-      {/* Only an undecided hand-over moves to the new manager's queue; work
-          already accepted simply changes hands. */}
-      {assignmentChanges.assignedTo !== undefined && waitingForDecision && activity.approvalRequiredRole === 'manager' && <p className="decision-hint">{t('review.reassignClearsAcceptance')}</p>}
-      <button className="secondary-btn" type="submit" disabled={busy || !hasAssignmentChanges}>{t('action.saveAssignment')}</button>
-    </form>}
+      {canDelete && <div className="button-row danger-zone">
+        <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onDelete(activity)}>{t('action.delete')}</button>
+      </div>}
+    </Section>}
 
-    {canSendDraft && onSendDraft && <div className="workflow-actions button-row">
-      <button className="primary-btn" type="button" disabled={busy} onClick={() => onSendDraft(activity)}>{t('action.submitForApproval')}</button>
-    </div>}
-    {!monthConfirmed && !isDirector && carriesIt && <p className="decision-hint">{t('review.monthNotConfirmed')}</p>}
-    {(managerCanStart || canSubmitCompletion) && <div className="workflow-actions button-row">
-      {managerCanStart && <button className="secondary-btn" type="button" disabled={busy} onClick={() => onStatus(activity, 'In Progress')}>{t('action.startWork')}</button>}
-      {canSubmitCompletion && <>
-        <label className="sr-only" htmlFor={`completion-note-${activity.id}`}>{t('review.noteForDirector')}</label>
-        <input id={`completion-note-${activity.id}`} className="completion-note" placeholder={t('review.noteForDirector')}
-          value={completionNote} onChange={(event) => setCompletionNote(event.target.value)} />
-        <button className="secondary-btn" type="button" disabled={busy} onClick={() => onSubmitCompletion(activity, completionNote)}>
-          {t('action.submitCompleted')}
-        </button>
-      </>}
-    </div>}
-    {iAmApprover && <p className="decision-hint">{t('review.waitingOnYou')}</p>}
-    {!iAmApprover && activity.approvalStatus === 'pending' && activity.approvalRequired && activity.status !== 'Draft' && <p className="decision-hint">
-      {t('approval.waitingFor')} {approverName(activity, sectorLabel, t)} {t('review.waitingOnOther')}
-    </p>}
-    {activity.status === 'Needs Correction' && !isDirector && <p className="decision-hint">{t('review.sentBackToYou')}</p>}
-    {activity.completionSubmittedAt && activity.status !== 'Completed' && <p className="decision-hint">
-      {isDirector ? t('review.completionAwaiting') : t('review.completionWithDirector')}
-    </p>}
-
-    {/* What leaves the organisation. An external partner assigned to this
-        business operation sees an approved record unless it is switched off
-        here; evidence, internal notes and the trail below are never shared. */}
-    {isDirector && onVisibility && <div className="visibility-control">
-      <div>
-        <span className="eyebrow">{t('review.externalVisibility')}</span>
-        <strong className={activity.externallyVisible ? 'tone-done' : 'tone-stopped'}>
-          {activity.externallyVisible ? t('visibility.visible') : t('visibility.hidden')}
-        </strong>
-        <small>
-          {activity.approvalStatus === 'approved' ? t('visibility.note') : t('visibility.notApprovedYet')}
-        </small>
-      </div>
-      <button
-        className={activity.externallyVisible ? 'danger-btn outlined' : 'secondary-btn'}
-        type="button"
-        disabled={busy}
-        onClick={() => onVisibility(activity, !activity.externallyVisible)}
-      >{activity.externallyVisible ? t('visibility.hide') : t('visibility.show')}</button>
+    {canDelete && !isDirector && <div className="button-row danger-zone">
+      <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onDelete(activity)}>{t('action.withdrawRequest')}</button>
     </div>}
 
-    {/* Sections 5, 6 and 8: what was actually spent against this activity, and
-        what is left of its approved budget. */}
-    {onRecordExpense && <ExpensePanel
-      activity={activity}
-      expenses={expenses}
-      summary={expenseSummary}
-      canRecord={canRecordExpense}
-      canRemove={isDirector && monthOpen}
-      busy={busy}
-      // The panel hands back only the expense; the handlers also need to know
-      // which activity it belongs to, exactly like the evidence handlers below.
-      onRecord={(expense, reset) => onRecordExpense(activity, expense, reset)}
-      onRemoveExpense={(expense) => onRemoveExpense(activity, expense)}
-    />}
-
-    {/* When a spend will not fit, the answer is a budget change request -- the
-        over-budget message says so -- and this is where it is made and decided. */}
-    <BudgetRequestPanel
-      activity={activity}
-      requests={budgetRequests}
-      user={user}
-      isDirector={isDirector}
-      monthOpen={monthOpen}
-      busy={busy}
-      onRequest={onRequestBudget ? (body) => onRequestBudget(activity, body) : null}
-      onDecide={onDecideBudget ? (request, status) => onDecideBudget(activity, request, status) : null}
-    />
-
-    {/* Section 7: proof money was spent, and proof the work was done. They are
-        different things, so they are uploaded and listed separately. */}
-    <h3 className="form-section-title">{t('evidence.payment')}</h3>
-    <p className="detail-notes muted-cell">{t('evidence.paymentHint')}</p>
-    {canAttach && <EvidenceUpload
-      evidenceType="payment"
-      expenses={expenses}
-      busy={busy}
-      onUpload={(formData) => onUpload(activity, formData)}
-    />}
-    <EvidenceList
-      activity={activity}
-      evidence={paymentEvidence}
-      onOpenFile={onOpenFile}
-      canRemove={isDirector && monthOpen}
-      busy={busy}
-      onRemove={(item) => onRemoveEvidence(activity, item)}
-    />
-
-    <h3 className="form-section-title">{t('evidence.activity')}</h3>
-    <p className="detail-notes muted-cell">{t('evidence.activityHint')}</p>
-    {canAttach && <EvidenceUpload
-      evidenceType="activity"
-      expenses={[]}
-      busy={busy}
-      onUpload={(formData) => onUpload(activity, formData)}
-    />}
-    <EvidenceList
-      activity={activity}
-      evidence={completionEvidence}
-      onOpenFile={onOpenFile}
-      canRemove={isDirector && monthOpen}
-      busy={busy}
-      onRemove={(item) => onRemoveEvidence(activity, item)}
-    />
-
-    {canDelete && <div className="button-row">
-      <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onDelete(activity)}>
-        {isDirector ? t('action.delete') : t('action.withdrawRequest')}
-      </button>
-    </div>}
-
-    <h3 className="form-section-title">{t('review.activityHistory')}</h3>
-    {history.length
-      ? <ul className="history-list">{history.map((entry) => <li key={entry.id}>
-        <strong>{trailActionLabel(entry.action, t)}</strong>
-        {entry.field && <span>
-          {' '}{labelForField(entry.field, t)}: {formatTrailValue(entry.field, entry.oldValue, userNames, t)} &rarr; {formatTrailValue(entry.field, entry.newValue, userNames, t)}
-        </span>}
-        <small>{entry.actorName || '\u2014'} · {formatDateTime(entry.createdAt)}</small>
-        {entry.note && <small className="justification">{t('approval.reason')}: {trailNoteLabel(entry.note, t)}</small>}
-      </li>)}</ul>
-      : <div className="empty-state"><strong>{t('empty.noHistory')}</strong><span>{t('empty.noHistoryHint')}</span></div>}
+    <Section id="history" title={t('review.activityHistory')} count={history.length || null}>
+      {history.length
+        ? <ul className="history-list">{history.map((entry) => <li key={entry.id}>
+          <strong>{trailActionLabel(entry.action, t)}</strong>
+          {entry.field && <span>
+            {' '}{labelForField(entry.field, t)}: {formatTrailValue(entry.field, entry.oldValue, userNames, t)} &rarr; {formatTrailValue(entry.field, entry.newValue, userNames, t)}
+          </span>}
+          <small>{entry.actorName || '—'} · {formatDateTime(entry.createdAt)}</small>
+          {entry.note && <small className="justification">{t('approval.reason')}: {trailNoteLabel(entry.note, t)}</small>}
+        </li>)}</ul>
+        : <div className="empty-state"><strong>{t('empty.noHistory')}</strong><span>{t('empty.noHistoryHint')}</span></div>}
+    </Section>
   </section>;
 }
 
@@ -790,60 +815,64 @@ export function ApprovalPanel({ record, sectorLabel }) {
   </div>;
 }
 
+// Adding receipts or photographs. The amount field that used to sit here is
+// gone: it was stored on the first file only and never fed the budget, while
+// the expense itself carries the amount. A receipt is linked to an expense --
+// the most recent one without a receipt is suggested -- so the month's review
+// can count expenses that have their paperwork.
 function EvidenceUpload({ onUpload, evidenceType = 'payment', expenses = [], busy = false }) {
   const t = useT();
   const [kind, setKind] = useState(evidenceType === 'activity' ? 'Photograph' : 'Receipt');
-  const [expenseId, setExpenseId] = useState('');
-  const [amount, setAmount] = useState('');
+  const suggestedId = expenses.find((expense) => !expense.evidenceCount)?.id;
+  const [expenseId, setExpenseId] = useState(suggestedId ? String(suggestedId) : '');
   const [note, setNote] = useState('');
-  const [files, setFiles] = useState(null);
-  const [inputKey, setInputKey] = useState(0);
+  const [files, setFiles] = useState([]);
+  // Once the reader has picked an expense -- or "not for an expense" -- a newly
+  // recorded expense no longer moves the choice under them.
+  const [picked, setPicked] = useState(false);
+
+  useEffect(() => {
+    if (!picked) setExpenseId(suggestedId ? String(suggestedId) : '');
+  }, [suggestedId, picked]);
 
   const submit = (event) => {
     event.preventDefault();
-    if (!files?.length) return;
+    if (!files.length) return;
     const formData = new FormData();
     formData.append('kind', kind);
-    formData.append('amount', amount || '0');
     formData.append('note', note);
     formData.append('evidenceType', evidenceType);
-    // Naming the expense is what lets the review say "3 of 3 documented"
-    // rather than merely counting files against the activity.
     if (evidenceType === 'payment' && expenseId) formData.append('expenseId', expenseId);
-    Array.from(files).forEach((file) => formData.append('files', file));
-    // Cleared only once the files are stored. A failed upload -- too large, the
-    // wrong type, a dropped connection -- keeps what was chosen, so it can be
-    // tried again without picking every file a second time.
+    files.forEach((file) => formData.append('files', file));
+    // Cleared only once the files are stored. A failed upload keeps what was
+    // chosen, so it can be tried again without picking every file a second time.
     Promise.resolve(onUpload(formData)).then((stored) => {
       if (stored === false) return;
-      setAmount(''); setNote(''); setFiles(null); setExpenseId(''); setInputKey((current) => current + 1);
+      setNote(''); setFiles([]); setPicked(false);
     });
   };
 
-  return <form className="inline-form" onSubmit={submit}>
-    <label className="form-field"><span>{t('field.evidenceType')}</span>
-      <select value={kind} onChange={(event) => setKind(event.target.value)}>{EVIDENCE_KINDS.map((option) => <option key={option} value={option}>{t(`ekind.${option}`)}</option>)}</select>
-    </label>
-    {/* Which spend this receipt is for. Naming it is what turns a pile of
-        files into "3 of 3 expenses documented" on the Director's review. */}
-    {evidenceType === 'payment' && expenses.length > 0 && <label className="form-field"><span>{t('expense.attachEvidence')}</span>
-      <select value={expenseId} onChange={(event) => setExpenseId(event.target.value)}>
-        <option value="">&mdash;</option>
-        {expenses.map((expense) => <option key={expense.id} value={expense.id}>
-          {expense.spentOn} · {formatUsd(expense.amount)} · {expense.description.slice(0, 40)}
-        </option>)}
-      </select>
-    </label>}
-    <label className="form-field"><span>{t('field.amount')} (USD)</span>
-      <input type="number" min="0" step="0.01" placeholder="0" value={amount} onChange={(event) => setAmount(event.target.value)} />
-    </label>
-    <label className="form-field"><span>{t('field.note')}</span>
-      <input placeholder={t('evidence.notePlaceholder')} value={note} onChange={(event) => setNote(event.target.value)} />
-    </label>
-    <label className="form-field"><span>{t('field.files')}</span>
-      <input key={inputKey} type="file" multiple accept="image/*,application/pdf" onChange={(event) => setFiles(event.target.files)} />
-    </label>
-    <button className="secondary-btn" type="submit" disabled={busy || !files?.length}>{t('action.uploadEvidence')}</button>
+  return <form className="decision-form evidence-upload" onSubmit={submit}>
+    <FilePicker files={files} onChange={setFiles} disabled={busy} />
+    <div className="form-grid">
+      <label className="form-field"><span>{t('field.evidenceType')}</span>
+        <select value={kind} onChange={(event) => setKind(event.target.value)}>{EVIDENCE_KINDS.map((option) => <option key={option} value={option}>{t(`ekind.${option}`)}</option>)}</select>
+      </label>
+      {evidenceType === 'payment' && expenses.length > 0 && <label className="form-field"><span>{t('expense.attachEvidence')}</span>
+        <select value={expenseId} onChange={(event) => { setPicked(true); setExpenseId(event.target.value); }}>
+          <option value="">{t('evidence.notForExpense')}</option>
+          {expenses.map((expense) => <option key={expense.id} value={expense.id}>
+            {expense.spentOn} · {formatUsd(expense.amount)} · {expense.description.slice(0, 40)}
+          </option>)}
+        </select>
+      </label>}
+      <label className="form-field form-field-wide"><span>{t('field.note')} ({t('field.optional')})</span>
+        <input placeholder={t('evidence.notePlaceholder')} value={note} onChange={(event) => setNote(event.target.value)} />
+      </label>
+    </div>
+    <div className="form-submit-bar">
+      <button className="primary-btn" type="submit" disabled={busy || !files.length}>{t('action.uploadEvidence')}</button>
+    </div>
   </form>;
 }
 

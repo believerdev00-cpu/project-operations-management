@@ -401,6 +401,81 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .queue-actions > * + * { margin-left: 8px; }
 .primary-btn.compact, .danger-btn.outlined.compact, .secondary-btn.compact { padding: 6px 11px; font-size: .78rem; }
 
+/* ---- record screens: journey, next step, money, sections, files ----------- */
+
+/* Where the record is: five steps, the current one ringed. Numbers as well as
+   colour, so the state never depends on telling colours apart. */
+.journey { margin-top: 16px; }
+.journey-steps { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; margin: 0; padding: 0; list-style: none; counter-reset: none; }
+.journey-step { position: relative; display: grid; justify-items: center; gap: 6px; min-width: 0; text-align: center; }
+.journey-step::before { content: ''; position: absolute; top: 15px; right: 50%; left: -50%; height: 3px; background: var(--line); }
+.journey-step:first-child::before { display: none; }
+.journey-done::before, .journey-current::before { background: var(--green); }
+.journey-dot { position: relative; z-index: 1; display: grid; place-items: center; width: 32px; height: 32px; color: var(--muted); background: var(--surface); border: 2px solid var(--line); border-radius: 50%; font-size: .82rem; font-weight: 800; }
+.journey-done .journey-dot { color: white; background: var(--green); border-color: var(--green); }
+.journey-current .journey-dot { color: white; background: var(--blue); border-color: var(--blue); box-shadow: 0 0 0 4px rgba(21, 101, 192, .18); }
+.journey-label { max-width: 100%; color: var(--muted); font-size: .76rem; font-weight: 650; line-height: 1.25; overflow-wrap: anywhere; }
+.journey-current .journey-label { color: var(--navy); font-weight: 800; }
+.journey-stopped .journey-current .journey-dot { background: var(--muted); border-color: var(--muted); box-shadow: none; }
+.journey-side { display: inline-flex; margin: 12px 0 0; padding: 5px 10px; border-radius: 999px; font-size: .8rem; font-weight: 800; }
+.journey-side-refused, .journey-side-cancelled { color: var(--red); background: #fdf0f0; }
+.journey-side-sentBack, .journey-side-paused, .journey-side-draft { color: #7a5416; background: #fff6dd; }
+
+/* The one box that says what happens next, and holds the button for it. */
+.next-step { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 18px; margin-top: 16px; padding: 16px 18px; border: 1px solid var(--line); border-left-width: 5px; border-radius: 8px; background: #f7fafc; }
+.next-step-text { flex: 1 1 280px; min-width: 0; }
+.next-step-text strong { display: block; color: var(--navy); font-size: 1.02rem; }
+.next-step-text p { margin: 5px 0 0; color: #3e5064; font-size: .88rem; line-height: 1.5; overflow-wrap: anywhere; }
+.next-step-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.next-step-note { color: #7a5416; font-size: .84rem; font-weight: 650; }
+.next-step-action { border-left-color: var(--blue); background: var(--blue-soft); }
+.next-step-warning { border-left-color: #c9962c; background: #fdf8ee; }
+.next-step-done { border-left-color: var(--green); background: #f1f9f4; }
+.next-step-stopped { border-left-color: var(--red); background: #fdf4f4; }
+.next-step-muted { border-left-color: var(--muted); }
+
+/* Approved, spent and left, with a bar that fills as money is used. */
+.money-bar { margin-top: 16px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.money-title { display: block; margin-bottom: 8px; color: var(--navy); font-size: .9rem; font-weight: 800; }
+.money-figures { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.money-figures span { display: block; color: var(--muted); font-size: .76rem; font-weight: 700; }
+.money-figures strong { display: block; margin-top: 3px; overflow-wrap: anywhere; color: var(--navy); font-size: 1.15rem; }
+.money-left strong { color: var(--green); }
+.money-over .money-left strong { color: var(--red); }
+.money-track { height: 8px; margin-top: 12px; overflow: hidden; background: #e7edf4; border-radius: 999px; }
+.money-track span { display: block; height: 100%; background: var(--blue); border-radius: inherit; }
+.money-over .money-track span { background: var(--red); }
+.money-note { margin: 8px 0 0; color: var(--muted); font-size: .82rem; }
+.money-note:empty { display: none; }
+
+/* A part of a record that folds away. */
+.record-section { margin-top: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.record-section > summary { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 12px 16px; color: var(--navy); cursor: pointer; font-size: .95rem; font-weight: 800; list-style: none; }
+.record-section > summary::-webkit-details-marker { display: none; }
+.record-section > summary::after { content: ''; flex: none; width: 9px; height: 9px; margin-left: auto; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(45deg); transition: transform .15s ease; }
+.record-section[open] > summary::after { transform: rotate(-135deg); }
+.record-section > summary:hover { background: #f7fafc; }
+.record-section-count { min-width: 24px; padding: 2px 8px; color: var(--navy); background: var(--blue-soft); border-radius: 999px; font-size: .78rem; text-align: center; }
+.record-section-body { padding: 0 16px 16px; border-top: 1px solid var(--line); }
+.record-section-body > .form-section-title:first-child, .record-section-body > .detail-facts:first-child { margin-top: 16px; }
+.record .approval-panel { margin-top: 16px; }
+.danger-zone { justify-content: flex-end; }
+
+/* Choosing photos and files: a camera button, a files button, and previews. */
+.file-picker { display: grid; gap: 8px; }
+.file-picker-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.camera-btn span { font-size: 1.1rem; }
+.file-previews { display: grid; gap: 8px; margin: 4px 0 0; padding: 0; list-style: none; }
+.file-previews li { display: flex; align-items: center; gap: 10px; padding: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
+.file-previews img, .file-icon { flex: none; width: 48px; height: 48px; object-fit: cover; border-radius: 4px; }
+.file-icon { display: grid; place-items: center; color: var(--navy); background: var(--blue-soft); font-size: .72rem; font-weight: 800; }
+.file-preview-name { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--ink); font-size: .85rem; font-weight: 600; }
+.file-preview-name small { display: block; color: var(--muted); font-weight: 500; }
+.evidence-upload { margin-bottom: 14px; }
+.evidence-upload .form-grid { margin-top: 12px; }
+.receipt-field { display: grid; gap: 8px; margin-top: 14px; }
+.receipt-label { color: var(--muted); font-size: .75rem; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+
 /* ---- language, external partners, partner portal ------------------------- */
 
 .language-picker { display: grid; gap: 6px; margin-bottom: 16px; color: inherit; font-size: .68rem; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
@@ -531,6 +606,17 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 /* ---- phones: one column, and records as cards ---------------------------------- */
 
 @media (max-width: 640px) {
+  /* The journey keeps all five steps on one row; the labels shrink to fit. */
+  .journey-dot { width: 28px; height: 28px; font-size: .74rem; }
+  .journey-step::before { top: 13px; }
+  .journey-label { font-size: .68rem; }
+  .next-step { padding: 14px; }
+  .next-step-actions { flex: 1 1 100%; }
+  .next-step-actions > button { flex: 1 1 auto; }
+  .money-figures strong { font-size: 1rem; }
+  .record-section-body { padding: 0 12px 12px; }
+  .file-picker-buttons > button { flex: 1 1 0; min-height: 52px; }
+
   .login-card { padding: 26px 20px; }
   .login-card h1 { font-size: 1.8rem; }
 

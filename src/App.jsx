@@ -13,6 +13,7 @@ import {
   DetailView, DialogProvider, ErrorBoundary, MINIMUM_PASSWORD_LENGTH, PHONE_QUERY, buildHash, trapFocus, useBusy, useDialog,
   useHashRoute, useMediaQuery, useScrollLock
 } from './ui.jsx';
+import { activityJourney, journeyLabel, journeyTone } from './journey.jsx';
 
 // The category presets offered per business operation. Keep in step with
 // CATEGORIES in server/data/seedData.js, which is what the API validates
@@ -1133,16 +1134,36 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // Section 5: the manager records what was really spent. The API checks it
   // against the remaining approved budget and refuses anything over it, so an
   // over-budget attempt comes back as the message the workflow specifies.
-  const recordExpense = act(async (activity, expense, reset) => {
+  // The expense first, then its receipt linked to it. If the expense is saved
+  // but the receipt is not, the reader is told exactly that -- the money is
+  // recorded, and the receipt can be added again under Receipts and proof.
+  const recordExpense = act(async (activity, expense, reset, receipts = []) => {
     setError('');
+    let result;
     try {
-      const result = await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/expenses`, {
+      result = await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/expenses`, {
         method: 'POST', body: JSON.stringify(expense)
       });
-      reset?.();
-      notify(fill(t('msg.expenseRecorded'), { amount: formatUsd(result.expense.amount), remaining: formatUsd(result.remaining) }));
-      await refreshActivity(activity.id);
-    } catch (expenseError) { fail(expenseError.message); }
+    } catch (expenseError) { fail(expenseError.message); return; }
+    reset?.();
+    const recorded = fill(t('msg.expenseRecorded'), { amount: formatUsd(result.expense.amount), remaining: formatUsd(result.remaining) });
+    if (receipts.length) {
+      const formData = new FormData();
+      formData.append('kind', 'Receipt');
+      formData.append('evidenceType', 'payment');
+      formData.append('expenseId', String(result.expense.id));
+      formData.append('note', expense.description || '');
+      receipts.forEach((file) => formData.append('files', file));
+      try {
+        await upload(`/api/activities/${encodeURIComponent(activity.id)}/evidence`, formData);
+        notify(`${recorded} ${t('msg.receiptAttached')}`);
+      } catch (uploadError) {
+        fail(fill(t('msg.expenseSavedReceiptFailed'), { reason: uploadError.message }));
+      }
+    } else {
+      notify(recorded);
+    }
+    await refreshActivity(activity.id);
   });
 
   // Section 13: only the Director removes a financial record, and the API
@@ -1232,7 +1253,15 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     } catch (actionError) { fail(actionError.message); }
   });
 
-  const submitCompletion = act(async (activity, note) => {
+  const submitCompletion = act(async (activity) => {
+    const note = await dialog.prompt({
+      title: t('action.submitCompleted'),
+      message: activity.activity,
+      label: t('review.noteForDirector'),
+      multiline: true,
+      confirmLabel: t('action.submitCompleted')
+    });
+    if (note === null) return;
     setError('');
     try {
       await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/completion`, { method: 'POST', body: JSON.stringify({ note }) });
@@ -1304,6 +1333,66 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
 
   // The review stays open until the deletion is confirmed and done; cancelling
   // leaves the reader exactly where they were.
+  // The Director's final check, in the words of the step rather than a status
+  // dropdown: done, or back to the manager with what to fix.
+  const finishActivity = act(async (activity) => {
+    const confirmed = await dialog.confirm({
+      title: t('action.markDone'),
+      message: `${activity.activity}. ${t('msg.markDoneBody')}`,
+      confirmLabel: t('action.markDone')
+    });
+    if (!confirmed) return;
+    setError('');
+    try {
+      await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/decision`, { method: 'PATCH', body: JSON.stringify({ status: 'Completed' }) });
+      notify(t('msg.markedDone'));
+      await refreshActivity(activity.id);
+    } catch (finishError) { fail(finishError.message); }
+  });
+
+  const sendBackActivity = act(async (activity) => {
+    const reason = await dialog.prompt({
+      title: t('action.sendBack'),
+      message: activity.activity,
+      label: t('msg.sendBackReason'),
+      required: true,
+      multiline: true,
+      confirmLabel: t('action.sendBack')
+    });
+    if (reason === null) return;
+    setError('');
+    try {
+      await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/decision`, {
+        method: 'PATCH', body: JSON.stringify({ status: 'Needs Correction', adminNote: reason })
+      });
+      notify(t('msg.sentBack'));
+      await refreshActivity(activity.id);
+    } catch (sendBackError) { fail(sendBackError.message); }
+  });
+
+  // Refused or cancelled work comes back for a decision -- or, when it never
+  // needed one, straight back to Approved.
+  const reopenActivity = act(async (activity) => {
+    const reason = await dialog.prompt({
+      title: t('action.reopen'),
+      message: activity.activity,
+      label: t('field.reason'),
+      required: true,
+      multiline: true,
+      confirmLabel: t('action.reopen')
+    });
+    if (reason === null) return;
+    setError('');
+    try {
+      await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/decision`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: activity.approvalRequired ? 'Pending Approval' : 'Approved', adminNote: reason })
+      });
+      notify(t('msg.reopened'));
+      await refreshActivity(activity.id);
+    } catch (reopenError) { fail(reopenError.message); }
+  });
+
   const sendDraft = act(async (activity) => {
     setError('');
     try {
@@ -1707,6 +1796,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
           onDecideBudget={decideBudgetRequest}
           onDelete={deleteActivity}
           onSendDraft={sendDraft}
+          onFinish={finishActivity}
+          onSendBack={sendBackActivity}
+          onReopen={reopenActivity}
         />
       </DetailView>}
 
@@ -2080,7 +2172,17 @@ function SectorBoard({ rows, onSelect }) {
 }
 
 function Panel({ title, subtitle, action, onAction, children }) { return <section className="panel"><div className="panel-header"><div><h2>{title}</h2>{subtitle && <span>{subtitle}</span>}</div>{action && <button className="text-btn" onClick={onAction} type="button">{action} &rarr;</button>}</div>{children}</section>; }
-function EmptyState({ children }) { const t = useT(); return <div className="empty-state"><strong>{children}</strong><span>{t('table.noData')}</span></div>; }
+// The empty-state message on its own. It used to add "There is no data to
+// display yet." under every one, which contradicted "No activities match the
+// current filters" when there were activities, just not these.
+function EmptyState({ children }) { return <div className="empty-state"><strong>{children}</strong></div>; }
+
+// Where an activity is, in the same words as its journey on the record screen.
+function StageBadge({ activity }) {
+  const t = useT();
+  const journey = activityJourney(activity);
+  return <span className={`status-badge ${journeyTone(journey)}`}>{journeyLabel(journey, t)}</span>;
+}
 function ProjectPreview({ projects, empty }) { const t = useT(); return projects.length ? <div className="preview-list">{projects.map((project) => <div className="preview-row" key={project.id}><div><strong>{project.name}</strong><span>{project.location} &middot; {project.category || t('activities.notDecided')}</span></div><span className="status-badge">{t(`status.${project.status}`)}</span></div>)}</div> : <EmptyState>{empty}</EmptyState>; }
 function ApprovalPreview({ approvals, empty }) { const t = useT(); return approvals.length ? <div className="preview-list">{approvals.map((approval) => <div className="preview-row" key={approval.id}><div><strong>{approval.title}</strong><span>{approval.owner} &middot; {formatRwf(approval.amount)}</span></div><span className="priority-badge">{t(`form.priority${approval.priority}`)}</span></div>)}</div> : <EmptyState>{empty}</EmptyState>; }
 
@@ -2131,7 +2233,7 @@ function ActivityTable({ activities, isDirector, openId, onOpen, empty }) {
         </td>
         {/* A pending record always names the person it is pending on, so the
             register never presents "Pending" as if anyone could act on it. */}
-        <td data-label={t('table.status')}><span className={`status-badge ${statusTone(activity.status)}`}>{t(`status.${activity.status}`)}</span>
+        <td data-label={t('table.status')}><StageBadge activity={activity} />
           {activity.approvalRequired && activity.approvalStatus === 'pending' && !['Draft', 'Cancelled', 'On Hold'].includes(activity.status)
             ? <small className="awaiting-flag">{t('approval.waitingFor')} {approverName(activity, sectorName, t)}</small>
             : awaiting && <small className="awaiting-flag">{t('activities.completionSubmitted')}</small>}</td>

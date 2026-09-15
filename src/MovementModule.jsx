@@ -3,6 +3,7 @@ import { ApprovalPanel, approverName, canApproveRecord, decisionIsOpen, formatTr
 import { displayLanguage, fill, translate, useT } from './i18n.js';
 import { operationName } from '../shared/businessOperations.js';
 import { DetailView, useBusy, useDialog } from './ui.jsx';
+import { FilePicker, Journey, MoneyBar, NextStep, Section, goToSection, journeyLabel, journeyTone, movementJourney } from './journey.jsx';
 
 // Logistics & Facilitation module.
 // Implements the "Movement_and_Facilitation_Side_Mockup" document: the
@@ -606,7 +607,7 @@ function MovementTable({ movements, selectedId, onSelect }) {
       <td data-label={t('movement.route')}>{movement.origin || '—'} &rarr; {movement.destination}</td>
       <td data-label={t('movement.departure')}>{formatDate(movement.departureDate)}<small>{t('movement.return')} {formatDate(movement.returnDate)}</small></td>
       <td data-label={t('movement.personTeam')}>{movement.personTeam || '—'}</td>
-      <td data-label={t('table.status')}><span className={`status-badge ${statusTone(movement.status)}`}>{t(`status.${movement.status}`)}</span></td>
+      <td data-label={t('table.status')}><span className={`status-badge ${journeyTone(movementJourney(movement))}`}>{journeyLabel(movementJourney(movement), t)}</span></td>
       <td data-label={t('movement.estimated')}>{formatMoney(movement.estimatedTotal, movement.currency)}</td>
       <td data-label={t('movement.released')}>{formatMoney(movement.fundsReleased, movement.currency)}</td>
       <td data-label={t('movement.actual')}>{formatMoney(movement.actualExpense, movement.currency)}</td>
@@ -806,6 +807,73 @@ function MovementDetail({ detail, user, onOpenFile, isDirector, busy = false, on
     return movement.createdBy === user.id && SELF_MOVES.some(([from, to]) => movement.status === from && status === to);
   });
   const canRecordFigures = isDirector && FINANCE_STATUSES.includes(movement.status);
+  const journey = movementJourney(movement);
+  const moveTo = (status) => onStatus(movement, status, {
+    ...(status === 'Funds Released' ? { fundsReleased: Number(finance.fundsReleased) || Number(movement.estimatedTotal) } : {}),
+    ...(status === 'Completed' ? { actualExpense: Number(finance.actualExpense) || 0 } : {})
+  });
+  const statusButtonLabel = (status) => {
+    if (status === 'Pending Approval' && movement.status === 'Draft') return t('action.submitForApproval');
+    if (status === 'Draft' && !isDirector) return t('action.takeBackToEdit');
+    if (status === 'Funds Released') return t('action.markMoneyHandedOver');
+    if (status === 'In Progress') return t('action.markUnderway');
+    if (status === 'Completed') return t('action.markDone');
+    if (status === 'Pending Approval') return t('action.reopen');
+    return `${t('action.markAs')} ${t(`status.${status}`)}`;
+  };
+  const canMove = (status) => nextStatuses.includes(status);
+  const stepButton = (status, primary = true) => canMove(status) && <button key={status}
+    className={primary ? 'primary-btn' : 'secondary-btn'} type="button" disabled={busy} onClick={() => moveTo(status)}>
+    {statusButtonLabel(status)}
+  </button>;
+
+  let next;
+  switch (movement.status) {
+    case 'Draft':
+      next = canMove('Pending Approval')
+        ? { tone: 'action', title: t('journey.draft'), text: t('next.draftText'), actions: <>
+          {stepButton('Pending Approval')}
+          {canEdit && <button className="secondary-btn" type="button" disabled={busy} onClick={() => onEdit(movement)}>{t('action.editMovement')}</button>}
+        </> }
+        : { tone: 'info', title: t('journey.draft'), text: t('next.draftOther') };
+      break;
+    case 'Pending Approval':
+      next = iAmApprover
+        ? { tone: 'action', title: t('next.decideTitle'), text: t('next.decideText'),
+          actions: <button className="primary-btn" type="button" onClick={() => goToSection('movement-decision')}>{t('next.goDecide')}</button> }
+        : { tone: 'info', title: fill(t('next.waitingFor'), { name: approverName(movement, areaLabel, t) }), text: t('next.waitingForText'),
+          actions: !isDirector && stepButton('Draft', false) };
+      break;
+    case 'Rejected':
+      next = { tone: 'stopped', title: t('journey.refused'), text: movement.rejectionReason || '',
+        actions: stepButton(isDirector ? 'Pending Approval' : 'Draft', false) };
+      break;
+    case 'Cancelled':
+      next = { tone: 'stopped', title: t('journey.cancelled'), text: movement.rejectionReason || '', actions: stepButton('Pending Approval', false) };
+      break;
+    case 'Approved':
+      next = isDirector
+        ? { tone: 'action', title: t('next.tripApprovedTitle'), text: t('next.tripApprovedText'), actions: <>{stepButton('Funds Released')}{stepButton('In Progress', false)}</> }
+        : { tone: 'info', title: t('next.tripApprovedTitle'), text: t('next.tripWithDirector') };
+      break;
+    case 'Funds Released':
+      next = isDirector
+        ? { tone: 'action', title: t('journey.fundsOut'), text: t('next.tripFundedText'), actions: stepButton('In Progress') }
+        : { tone: 'info', title: t('journey.fundsOut'), text: t('next.tripAddReceipts'),
+          actions: canAttach && <button className="secondary-btn" type="button" onClick={() => goToSection('movement-proof')}>{t('next.addReceipts')}</button> };
+      break;
+    case 'In Progress':
+      next = isDirector
+        ? { tone: 'action', title: t('journey.underway'), text: t('next.tripUnderwayText'), actions: <>
+          <button className="secondary-btn" type="button" onClick={() => goToSection('movement-tools')}>{t('action.recordFigures')}</button>
+          {stepButton('Completed')}
+        </> }
+        : { tone: 'info', title: t('journey.underway'), text: t('next.tripAddReceipts'),
+          actions: canAttach && <button className="secondary-btn" type="button" onClick={() => goToSection('movement-proof')}>{t('next.addReceipts')}</button> };
+      break;
+    default:
+      next = { tone: 'done', title: t('journey.done'), text: movement.completedAt ? fill(t('next.doneOn'), { date: formatDateTime(movement.completedAt) }) : '' };
+  }
   const canDelete = isDirector && DELETABLE_STATUSES.includes(movement.status)
     && !Number(movement.fundsReleased) && !Number(movement.actualExpense);
   // An approval that changed the budget moves the total but not the lines it was
@@ -826,26 +894,55 @@ function MovementDetail({ detail, user, onOpenFile, isDirector, busy = false, on
       <button className="text-btn hide-on-sheet" type="button" onClick={onClose}>{t('action.close')}</button>
     </div>
 
-    <ApprovalPanel record={movement} sectorLabel={areaLabel} />
+    <Journey journey={journey} />
 
-    <div className="detail-facts">
-      <Fact label={t('table.status')} value={<span className={`status-badge ${statusTone(movement.status)}`}>{t(`status.${movement.status}`)}</span>} />
-      <Fact label={t('table.department')} value={areaLabel(movement.department)} />
-      <Fact label={t('movement.departure')} value={formatDate(movement.departureDate)} />
-      <Fact label={t('movement.return')} value={formatDate(movement.returnDate)} />
-      <Fact label={t('movement.personTeam')} value={movement.personTeam || '—'} />
-      <Fact label={t('table.assignedTo')} value={movement.assignedToName || <span className="muted-cell">{t('review.notAssigned')}</span>} />
-      <Fact label={t('movement.transport')} value={movement.transportType || '—'} />
-      <Fact label={t('movement.vehicleDriverShort')} value={movement.vehicleDriver || '—'} />
-      <Fact label={t('field.currency')} value={movement.currency} />
-      <Fact label={t('approval.approvedBy')} value={movement.approvedByName ? `${movement.approvedByName} · ${formatDateTime(movement.approvedAt)}` : t('review.notReviewed')} />
-    </div>
-    {movement.notes && <p className="detail-notes">{movement.notes}</p>}
-    {movement.adminNote && <p className="detail-notes admin-note">&ldquo;{movement.adminNote}&rdquo;</p>}
+    <NextStep tone={next.tone} title={next.title} actions={next.actions}>{next.text}</NextStep>
+
+    <MoneyBar
+      approved={movement.estimatedTotal}
+      spent={movement.actualExpense}
+      format={(amount) => formatMoney(amount, movement.currency)}
+      extra={<p className="money-note">
+        {fill(t('money.handedOver'), { amount: formatMoney(movement.fundsReleased, movement.currency) })}
+        {Number(movement.fundsReleased) > 0 && ` · ${fill(t('money.toGiveBack'), { amount: formatMoney(movement.balanceReturn, movement.currency) })}`}
+      </p>}
+    />
+
+    <Section id="movement-details" title={t('section.details')} defaultOpen>
+      <div className="detail-facts">
+        <Fact label={t('table.department')} value={areaLabel(movement.department)} />
+        <Fact label={t('movement.departure')} value={formatDate(movement.departureDate)} />
+        <Fact label={t('movement.return')} value={formatDate(movement.returnDate)} />
+        <Fact label={t('movement.personTeam')} value={movement.personTeam || '—'} />
+        <Fact label={t('movement.transport')} value={movement.transportType || '—'} />
+        <Fact label={t('movement.vehicleDriverShort')} value={movement.vehicleDriver || '—'} />
+      </div>
+      {movement.notes && <p className="detail-notes">{movement.notes}</p>}
+      {movement.adminNote && <p className="detail-notes admin-note"><strong>{t('review.directorNote')}:</strong> &ldquo;{movement.adminNote}&rdquo;</p>}
+
+      <h3 className="form-section-title">{t('movement.costBreakdown')}</h3>
+      <div className="table-wrap"><table className="cost-table">
+        <thead><tr><th>{t('movement.costItem')}</th><th>{t('field.amount')}</th></tr></thead>
+        <tbody>
+          {COST_LINES.map(([key, labelKey]) => <tr key={key}><td>{t(labelKey)}</td><td>{formatMoney(movement.costs[key], movement.currency)}</td></tr>)}
+          {approvedDiffers && <tr><td>{t('movement.estimatedLines')}</td><td>{formatMoney(linesTotal, movement.currency)}</td></tr>}
+          <tr className="total-row"><td><strong>{approvedDiffers ? t('movement.approvedTotal') : t('field.total')}</strong></td><td><strong>{formatMoney(movement.estimatedTotal, movement.currency)}</strong></td></tr>
+        </tbody>
+      </table></div>
+      {movement.converted && <p className="detail-notes">
+        {t('movement.equivalentAt')} ({Number(movement.rate.rwfPerUsd).toLocaleString()} RWF / {Number(movement.rate.cdfPerUsd).toLocaleString()} CDF / USD,
+        {' '}{movement.rate.source === 'actual' ? t('movement.actualRate') : t('movement.refRate')}, {formatDateTime(movement.rate.recordedAt)}):
+        {' '}{formatMoney(movement.converted.estimatedTotal.rwf, 'RWF')} · {formatMoney(movement.converted.estimatedTotal.usd, 'USD')} · {formatMoney(movement.converted.estimatedTotal.cdf, 'CDF')}
+      </p>}
+      <ApprovalPanel record={movement} sectorLabel={areaLabel} />
+      {canEdit && !['Draft'].includes(movement.status) && <div className="button-row">
+        <button className="secondary-btn" type="button" disabled={busy} onClick={() => onEdit(movement)}>{t('action.editMovement')}</button>
+      </div>}
+    </Section>
 
     {/* The decision this record is waiting on, drawn only for the person it
         names. The API refuses anybody else regardless of what is on screen. */}
-    {iAmApprover && <form className="decision-form approval-form" onSubmit={(event) => {
+    {iAmApprover && <form id="movement-decision" className="decision-form approval-form" onSubmit={(event) => {
       event.preventDefault();
       onApprove(movement, {
         action: 'approve',
@@ -856,141 +953,113 @@ function MovementDetail({ detail, user, onOpenFile, isDirector, busy = false, on
       <h3 className="form-section-title">{t('approval.yourDecision')}</h3>
       <div className="form-grid">
         {canChangeBudget && <label className="form-field"><span>{t('review.approvedBudget')} ({movement.currency})</span>
-          <input type="number" min="0" step="0.01" value={approval.approvedBudget}
+          <input type="number" inputMode="decimal" min="0" step="0.01" value={approval.approvedBudget}
             onChange={(event) => setApproval({ ...approval, approvedBudget: event.target.value })} />
         </label>}
         <label className="form-field form-field-wide">
           <span>{t('review.directorNote')} ({budgetChanged ? t('field.required') : t('field.optional')})</span>
-          <textarea rows="2"
+          <textarea rows="2" required={budgetChanged}
             value={approval.adminNote} onChange={(event) => setApproval({ ...approval, adminNote: event.target.value })} />
         </label>
       </div>
       {budgetChanged && <p className="decision-hint">
         {formatMoney(movement.estimatedTotal, movement.currency)} &rarr; {formatMoney(typedBudget, movement.currency)}
       </p>}
-      <div className="button-row">
+      <div className="form-submit-bar">
         <button className="primary-btn" type="submit" disabled={busy}>{t('approval.approve')}</button>
-        <button className="danger-btn outlined" type="button"
-          disabled={busy}
-          onClick={() => onReject(movement)}>
-          {t('approval.reject')}
-        </button>
+        <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onReject(movement)}>{t('approval.reject')}</button>
       </div>
     </form>}
-    {!iAmApprover && movement.approvalRequired && movement.approvalStatus === 'pending' && movement.status !== 'Draft' && <p className="decision-hint">
-      {t('approval.waitingFor')} {approverName(movement, areaLabel, t)} {t('review.waitingOnOther')}
-    </p>}
 
-    <h3 className="form-section-title">{t('movement.costBreakdown')}</h3>
-    <div className="table-wrap"><table className="cost-table">
-      <thead><tr><th>{t('movement.costItem')}</th><th>{t('field.amount')}</th></tr></thead>
-      <tbody>
-        {COST_LINES.map(([key, labelKey]) => <tr key={key}><td>{t(labelKey)}</td><td>{formatMoney(movement.costs[key], movement.currency)}</td></tr>)}
-        {approvedDiffers && <tr><td>{t('movement.estimatedLines')}</td><td>{formatMoney(linesTotal, movement.currency)}</td></tr>}
-        <tr className="total-row"><td><strong>{approvedDiffers ? t('movement.approvedTotal') : t('field.total')}</strong></td><td><strong>{formatMoney(movement.estimatedTotal, movement.currency)}</strong></td></tr>
-      </tbody>
-    </table></div>
-    {movement.converted && <p className="detail-notes">
-      {t('movement.equivalentAt')} ({Number(movement.rate.rwfPerUsd).toLocaleString()} RWF / {Number(movement.rate.cdfPerUsd).toLocaleString()} CDF / USD,
-      {' '}{movement.rate.source === 'actual' ? t('movement.actualRate') : t('movement.refRate')}, {formatDateTime(movement.rate.recordedAt)}):
-      {' '}{formatMoney(movement.converted.estimatedTotal.rwf, 'RWF')} · {formatMoney(movement.converted.estimatedTotal.usd, 'USD')} · {formatMoney(movement.converted.estimatedTotal.cdf, 'CDF')}
-    </p>}
+    <Section id="movement-proof" title={t('section.receipts')} count={evidence.length || null}
+      defaultOpen={canAttach && ['Funds Released', 'In Progress'].includes(movement.status)}>
+      {canAttach && <EvidenceUpload movement={movement} busy={busy} onUpload={onUpload} />}
+      <EvidenceList
+        movement={movement}
+        evidence={evidence}
+        onOpenFile={onOpenFile}
+        canRemove={isDirector}
+        busy={busy}
+        onRemove={(item) => onRemoveEvidence(movement, item)}
+      />
+    </Section>
 
-    <h3 className="form-section-title">{t('movement.evidenceAccountability')}</h3>
-    <div className="accountability-grid">
-      <Fact label={t('movement.estimatedFacilitation')} value={formatMoney(movement.estimatedTotal, movement.currency)} />
-      <Fact label={t('movement.fundsReleased')} value={formatMoney(movement.fundsReleased, movement.currency)} />
-      <Fact label={t('movement.actualExpense')} value={formatMoney(movement.actualExpense, movement.currency)} />
-      <Fact label={t('movement.balanceReturn')} value={formatMoney(movement.balanceReturn, movement.currency)} />
-      <Fact label={t('movement.evidenceStatus')} value={<span className={`status-badge ${movement.evidenceStatus === 'Complete' ? 'tone-done' : 'tone-waiting'}`}>{t(`estatus.${movement.evidenceStatus}`)}</span>} />
-    </div>
+    {isDirector && <Section id="movement-tools" title={t('section.directorTools')}
+      defaultOpen={movement.status === 'In Progress'}>
+      {canRecordFigures && <form className="decision-form" onSubmit={(event) => {
+        event.preventDefault();
+        onFinance(movement, {
+          fundsReleased: Number(finance.fundsReleased) || 0,
+          actualExpense: Number(finance.actualExpense) || 0,
+          evidenceStatus: finance.evidenceStatus
+        });
+      }}>
+        <h3 className="form-section-title">{t('action.recordFigures')}</h3>
+        <div className="form-grid">
+          <label className="form-field"><span>{t('movement.fundsReleased')} ({movement.currency})</span>
+            <input type="number" inputMode="decimal" min="0" step="0.01" value={finance.fundsReleased} onChange={(event) => setFinance({ ...finance, fundsReleased: event.target.value })} />
+          </label>
+          <label className="form-field"><span>{t('movement.actualExpense')} ({movement.currency})</span>
+            <input type="number" inputMode="decimal" min="0" step="0.01" value={finance.actualExpense} onChange={(event) => setFinance({ ...finance, actualExpense: event.target.value })} />
+          </label>
+          <label className="form-field"><span>{t('movement.evidenceStatus')}</span>
+            <select value={finance.evidenceStatus} onChange={(event) => setFinance({ ...finance, evidenceStatus: event.target.value })}>
+              {EVIDENCE_STATUSES.map((status) => <option key={status} value={status}>{t(`estatus.${status}`)}</option>)}
+            </select>
+          </label>
+        </div>
+        <div className="form-submit-bar">
+          <button className="secondary-btn" type="submit" disabled={busy}>{t('action.recordFigures')}</button>
+        </div>
+      </form>}
 
-    {canRecordFigures && <form className="inline-form" onSubmit={(event) => {
-      event.preventDefault();
-      onFinance(movement, {
-        fundsReleased: Number(finance.fundsReleased) || 0,
-        actualExpense: Number(finance.actualExpense) || 0,
-        evidenceStatus: finance.evidenceStatus
-      });
-    }}>
-      <label className="form-field"><span>{t('movement.fundsReleased')} ({movement.currency})</span>
-        <input type="number" min="0" step="0.01" value={finance.fundsReleased} onChange={(event) => setFinance({ ...finance, fundsReleased: event.target.value })} />
-      </label>
-      <label className="form-field"><span>{t('movement.actualExpense')} ({movement.currency})</span>
-        <input type="number" min="0" step="0.01" value={finance.actualExpense} onChange={(event) => setFinance({ ...finance, actualExpense: event.target.value })} />
-      </label>
-      <label className="form-field"><span>{t('movement.evidenceStatus')}</span>
-        <select value={finance.evidenceStatus} onChange={(event) => setFinance({ ...finance, evidenceStatus: event.target.value })}>
-          {EVIDENCE_STATUSES.map((status) => <option key={status} value={status}>{t(`estatus.${status}`)}</option>)}
-        </select>
-      </label>
-      <button className="secondary-btn" type="submit" disabled={busy}>{t('action.recordFigures')}</button>
-    </form>}
-
-    {/* The Director's switch for what an external partner may see, as on an
-        activity. It publishes nothing that has not been approved. */}
-    {isDirector && onVisibility && <div className="visibility-control">
-      <div>
-        <span className="eyebrow">{t('review.externalVisibility')}</span>
-        <strong className={movement.externallyVisible ? 'tone-done' : 'tone-stopped'}>
-          {movement.externallyVisible ? t('visibility.visible') : t('visibility.hidden')}
-        </strong>
-        <small>{movement.approvalStatus === 'approved' ? t('visibility.note') : t('visibility.notApprovedYet')}</small>
-      </div>
-      <button className={movement.externallyVisible ? 'danger-btn outlined' : 'secondary-btn'} type="button" disabled={busy}
-        onClick={() => onVisibility(movement, !movement.externallyVisible)}>
-        {movement.externallyVisible ? t('visibility.hide') : t('visibility.show')}
-      </button>
-    </div>}
-
-    {canAttach && <EvidenceUpload movement={movement} busy={busy} onUpload={onUpload} />}
-    <EvidenceList
-      movement={movement}
-      evidence={evidence}
-      onOpenFile={onOpenFile}
-      canRemove={isDirector}
-      busy={busy}
-      onRemove={(item) => onRemoveEvidence(movement, item)}
-    />
-
-    <h3 className="form-section-title">{t('movement.workflow')}</h3>
-    <p className="workflow-trail">{t('movement.workflowTrail')}</p>
-    {nextStatuses.length
-      ? <div className="button-row workflow-actions">
+      {nextStatuses.length > 0 && <>
+        <h3 className="form-section-title">{t('movement.workflow')}</h3>
+        <div className="button-row workflow-actions">
           {nextStatuses.map((status) => <button
             key={status}
             className={['Rejected', 'Cancelled'].includes(status) ? 'danger-btn outlined' : 'secondary-btn'}
             type="button"
             disabled={busy}
-            onClick={() => onStatus(movement, status, {
-              ...(status === 'Funds Released' ? { fundsReleased: Number(finance.fundsReleased) || Number(movement.estimatedTotal) } : {}),
-              ...(status === 'Completed' ? { actualExpense: Number(finance.actualExpense) || 0 } : {})
-            })}
-          >{status === 'Pending Approval' && movement.status === 'Draft'
-            ? t('action.submitForApproval')
-            : status === 'Draft' && !isDirector
-              ? t('action.takeBackToEdit')
-              : `${t('action.markAs')} ${t(`status.${status}`)}`}</button>)}
+            onClick={() => moveTo(status)}
+          >{statusButtonLabel(status)}</button>)}
         </div>
-      : <p className="detail-notes">{t('movement.noFurtherStatus')}</p>}
+      </>}
 
-    <div className="button-row">
-      {canEdit && <button className="secondary-btn" type="button" disabled={busy} onClick={() => onEdit(movement)}>{t('action.editMovement')}</button>}
-      {canDelete && <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onDelete(movement)}>{t('action.deleteMovement')}</button>}
-    </div>
+      {/* The Director's switch for what an external partner may see, as on an
+          activity. It publishes nothing that has not been approved. */}
+      {onVisibility && <div className="visibility-control">
+        <div>
+          <span className="eyebrow">{t('review.externalVisibility')}</span>
+          <strong className={movement.externallyVisible ? 'tone-done' : 'tone-stopped'}>
+            {movement.externallyVisible ? t('visibility.visible') : t('visibility.hidden')}
+          </strong>
+          <small>{movement.approvalStatus === 'approved' ? t('visibility.note') : t('visibility.notApprovedYet')}</small>
+        </div>
+        <button className={movement.externallyVisible ? 'danger-btn outlined' : 'secondary-btn'} type="button" disabled={busy}
+          onClick={() => onVisibility(movement, !movement.externallyVisible)}>
+          {movement.externallyVisible ? t('visibility.hide') : t('visibility.show')}
+        </button>
+      </div>}
 
-    <h3 className="form-section-title">{t('movement.historyTitle')}</h3>
-    {history.length
-      ? <ul className="history-list">{history.map((entry) => <li key={entry.id}>
-          <strong>{trailActionLabel(entry.action, t)}</strong>
-          <span>
-            {entry.field ? `${labelForField(entry.field, t)}: ` : ''}
-            {entry.oldValue !== null && entry.oldValue !== undefined && entry.oldValue !== '' ? `${formatTrailValue(entry.field, entry.oldValue, null, t)} → ` : ''}
-            {formatTrailValue(entry.field, entry.newValue, null, t)}
-          </span>
-          <small>{entry.actorName} · {formatDateTime(entry.createdAt)}</small>
-        </li>)}</ul>
-      : <div className="empty-state"><strong>{t('empty.noHistory')}</strong><span>{t('empty.historyBlurb')}</span></div>}
+      {canDelete && <div className="button-row danger-zone">
+        <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onDelete(movement)}>{t('action.deleteMovement')}</button>
+      </div>}
+    </Section>}
+
+    <Section id="movement-history" title={t('movement.historyTitle')} count={history.length || null}>
+      {history.length
+        ? <ul className="history-list">{history.map((entry) => <li key={entry.id}>
+            <strong>{trailActionLabel(entry.action, t)}</strong>
+            <span>
+              {entry.field ? `${labelForField(entry.field, t)}: ` : ''}
+              {entry.oldValue !== null && entry.oldValue !== undefined && entry.oldValue !== '' ? `${formatTrailValue(entry.field, entry.oldValue, null, t)} → ` : ''}
+              {formatTrailValue(entry.field, entry.newValue, null, t)}
+            </span>
+            <small>{entry.actorName} · {formatDateTime(entry.createdAt)}</small>
+          </li>)}</ul>
+        : <div className="empty-state"><strong>{t('empty.noHistory')}</strong><span>{t('empty.historyBlurb')}</span></div>}
+    </Section>
   </section>;
 }
 
@@ -998,43 +1067,42 @@ function Fact({ label, value }) {
   return <div className="fact"><span>{label}</span><strong>{value}</strong></div>;
 }
 
+// Receipts and photographs for a trip, taken with the camera or picked from
+// files. The amount box that used to sit here was stored on the first file only
+// and never counted towards what was spent, so it is gone.
 function EvidenceUpload({ movement, busy = false, onUpload }) {
   const t = useT();
   const [kind, setKind] = useState('Receipt');
-  const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
-  const [files, setFiles] = useState(null);
-  const [inputKey, setInputKey] = useState(0);
+  const [files, setFiles] = useState([]);
 
   const submit = (event) => {
     event.preventDefault();
-    if (!files?.length) return;
+    if (!files.length) return;
     const formData = new FormData();
     formData.append('kind', kind);
-    formData.append('amount', amount || '0');
     formData.append('note', note);
-    Array.from(files).forEach((file) => formData.append('files', file));
+    files.forEach((file) => formData.append('files', file));
     // Cleared only once stored, so a failed upload keeps the chosen files.
     Promise.resolve(onUpload(movement, formData)).then((stored) => {
       if (stored === false) return;
-      setAmount(''); setNote(''); setFiles(null); setInputKey((current) => current + 1);
+      setNote(''); setFiles([]);
     });
   };
 
-  return <form className="inline-form" onSubmit={submit}>
-    <label className="form-field"><span>{t('field.evidenceType')}</span>
-      <select value={kind} onChange={(event) => setKind(event.target.value)}>{EVIDENCE_KINDS.map((option) => <option key={option} value={option}>{t(`ekind.${option}`)}</option>)}</select>
-    </label>
-    <label className="form-field"><span>{t('field.amount')} ({movement.currency})</span>
-      <input type="number" inputMode="decimal" min="0" step="0.01" placeholder="0" value={amount} onChange={(event) => setAmount(event.target.value)} />
-    </label>
-    <label className="form-field"><span>{t('field.note')}</span>
-      <input placeholder={t('evidence.fuelNotePlaceholder')} value={note} onChange={(event) => setNote(event.target.value)} />
-    </label>
-    <label className="form-field"><span>{t('field.files')}</span>
-      <input key={inputKey} type="file" multiple accept="image/*,application/pdf" onChange={(event) => setFiles(event.target.files)} />
-    </label>
-    <button className="secondary-btn" type="submit" disabled={busy || !files?.length}>{t('action.uploadEvidence')}</button>
+  return <form className="decision-form evidence-upload" onSubmit={submit}>
+    <FilePicker files={files} onChange={setFiles} disabled={busy} />
+    <div className="form-grid">
+      <label className="form-field"><span>{t('field.evidenceType')}</span>
+        <select value={kind} onChange={(event) => setKind(event.target.value)}>{EVIDENCE_KINDS.map((option) => <option key={option} value={option}>{t(`ekind.${option}`)}</option>)}</select>
+      </label>
+      <label className="form-field"><span>{t('field.note')} ({t('field.optional')})</span>
+        <input placeholder={t('evidence.fuelNotePlaceholder')} value={note} onChange={(event) => setNote(event.target.value)} />
+      </label>
+    </div>
+    <div className="form-submit-bar">
+      <button className="primary-btn" type="submit" disabled={busy || !files.length}>{t('action.uploadEvidence')}</button>
+    </div>
   </form>;
 }
 

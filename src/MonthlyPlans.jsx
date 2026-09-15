@@ -3,6 +3,7 @@ import { BUSINESS_OPERATIONS, operationName } from '../shared/businessOperations
 import { fill, useI18n } from './i18n.js';
 import { categoryLabel, trailActionLabel } from './ActivityReview.jsx';
 import { DetailView, useBusy, useDialog } from './ui.jsx';
+import { FilePicker, activityJourney, journeyLabel, journeyTone } from './journey.jsx';
 
 // Monthly planning, allocation and month-end review.
 //
@@ -521,8 +522,8 @@ function PlanDetail({
         <td data-label={t('monthly.totalSpent')}>{formatUsd(item.spent)}</td>
         <td data-label={t('expense.remainingOnActivity')} className={item.remaining < 0 ? 'over-budget' : undefined}>{formatUsd(item.remaining)}</td>
         <td data-label={t('monthly.expectedCompletion')}>{formatDate(item.deadline, language)}</td>
-        <td data-label={t('table.status')}><span className={`status-badge ${item.status === 'Completed' ? 'tone-done' : 'tone-waiting'}`}>
-          {t(`status.${item.status}`)}
+        <td data-label={t('table.status')}><span className={`status-badge ${journeyTone(activityJourney(item))}`}>
+          {journeyLabel(activityJourney(item), t)}
         </span></td>
         <td data-label={t('evidence.payment')} className={item.expensesWithoutEvidence ? 'over-budget' : undefined}>
           {item.expenseCount - item.expensesWithoutEvidence}/{item.expenseCount}
@@ -703,12 +704,18 @@ function Fact({ label, value }) {
 // Section 5, 6 and 8, as it appears on the activity review screen. The remaining
 // balance is shown before the manager types, and the block is explained in the
 // same words the API uses when it refuses.
-export function ExpensePanel({ expenses, summary, canRecord, onRecord, onRemoveExpense, canRemove, busy = false }) {
+//
+// The receipt is taken with the expense, in the same form: a photo from the
+// camera or a file. Recording the spend and then scrolling to a separate upload
+// form, and linking the two by hand, took two screens and most receipts were
+// left unlinked.
+export function ExpensePanel({ expenses, summary, canRecord, onRecord, onRemoveExpense, canRemove, busy = false, showSummary = true }) {
   const { language, t } = useI18n();
   const [form, setForm] = useState({
     amount: '', spentOn: todayLocal(),
     paymentMethod: 'Cash', description: ''
   });
+  const [receipts, setReceipts] = useState([]);
 
   // A failed summary is not a zero balance: without one nothing is presumed
   // over budget, and the API remains the judge of the spend.
@@ -719,13 +726,15 @@ export function ExpensePanel({ expenses, summary, canRecord, onRecord, onRemoveE
   const overBudget = known && typed > 0 && Math.round(typed * 100) > Math.round(remaining * 100);
 
   return <>
-    <h3 className="form-section-title">{t('expense.title')}</h3>
-    <div className="detail-facts">
-      <Fact label={t('monthly.approvedAllocation')} value={known ? formatUsd(summary.approvedBudget) : '—'} />
-      <Fact label={t('monthly.totalSpent')} value={known ? formatUsd(summary.totalSpent) : '—'} />
-      <Fact label={t('expense.remainingOnActivity')}
-        value={known ? <span className={remaining < 0 ? 'over-budget' : undefined}>{formatUsd(remaining)}</span> : '—'} />
-    </div>
+    {showSummary && <>
+      <h3 className="form-section-title">{t('expense.title')}</h3>
+      <div className="detail-facts">
+        <Fact label={t('monthly.approvedAllocation')} value={known ? formatUsd(summary.approvedBudget) : '—'} />
+        <Fact label={t('monthly.totalSpent')} value={known ? formatUsd(summary.totalSpent) : '—'} />
+        <Fact label={t('expense.remainingOnActivity')}
+          value={known ? <span className={remaining < 0 ? 'over-budget' : undefined}>{formatUsd(remaining)}</span> : '—'} />
+      </div>
+    </>}
 
     {expenses.length ? <div className="table-wrap"><table className="card-table">
       <thead><tr>
@@ -753,13 +762,20 @@ export function ExpensePanel({ expenses, summary, canRecord, onRecord, onRemoveE
 
     {canRecord && <form className="decision-form" onSubmit={(event) => {
       event.preventDefault();
-      onRecord({ ...form, amount: Number(form.amount || 0) }, () => setForm((current) => ({ ...current, amount: '', description: '' })));
+      onRecord({ ...form, amount: Number(form.amount || 0) }, () => {
+        setForm((current) => ({ ...current, amount: '', description: '' }));
+        setReceipts([]);
+      }, receipts);
     }}>
       <h3 className="form-section-title">{t('expense.record')}</h3>
+      {known && <p className="field-hint">{fill(t('expense.leftToSpend'), { amount: formatUsd(remaining) })}</p>}
       <div className="form-grid">
         <label className="form-field"><span>{t('expense.amountSpent')} (USD)</span>
           <input required type="number" inputMode="decimal" min="0.01" step="0.01" value={form.amount}
             onChange={(event) => setForm({ ...form, amount: event.target.value })} />
+        </label>
+        <label className="form-field"><span>{t('field.description')}</span>
+          <input required value={form.description} placeholder={t('expense.descriptionPlaceholder')} onChange={(event) => setForm({ ...form, description: event.target.value })} />
         </label>
         <label className="form-field"><span>{t('expense.dateSpent')}</span>
           <input required type="date" max={todayLocal()} value={form.spentOn} onChange={(event) => setForm({ ...form, spentOn: event.target.value })} />
@@ -769,9 +785,10 @@ export function ExpensePanel({ expenses, summary, canRecord, onRecord, onRemoveE
             {PAYMENT_METHODS.map((method) => <option key={method} value={method}>{t(`pmethod.${method}`)}</option>)}
           </select>
         </label>
-        <label className="form-field form-field-wide"><span>{t('field.description')}</span>
-          <input required value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
-        </label>
+      </div>
+      <div className="receipt-field">
+        <span className="receipt-label">{t('expense.receipt')} ({t('field.optional')})</span>
+        <FilePicker files={receipts} onChange={setReceipts} disabled={busy} />
       </div>
       {overBudget && <p className="decision-hint over-budget">{t('expense.overBudget')} <a href="#budget-requests" onClick={(event) => { event.preventDefault(); document.getElementById('budget-requests')?.scrollIntoView({ behavior: 'smooth' }); }}>{t('budget.request')}</a></p>}
       <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy || overBudget}>{t('expense.record')}</button></div>
