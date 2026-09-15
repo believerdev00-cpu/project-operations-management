@@ -62,7 +62,7 @@ const STRINGS = {
 
   // ---- workflow statuses ---------------------------------------------------
   'status.Draft': { en: 'Draft', rw: 'Umushinga', fr: 'Brouillon', sw: 'Rasimu' },
-  'status.Pending Approval': { en: 'Pending Approval', rw: 'Bitegereje Kwemezwa', fr: 'En attente d’approbation', sw: 'Inasubiri Idhini' },
+  'status.Pending Approval': { en: 'Waiting for approval', rw: 'Bitegereje kwemezwa', fr: 'En attente d’approbation', sw: 'Inasubiri idhini' },
   'status.Approved': { en: 'Approved', rw: 'Byemejwe', fr: 'Approuvé', sw: 'Imeidhinishwa' },
   'status.Rejected': { en: 'Rejected', rw: 'Byanzwe', fr: 'Rejeté', sw: 'Imekataliwa' },
   'status.In Progress': { en: 'In Progress', rw: 'Biragenda', fr: 'En cours', sw: 'Inaendelea' },
@@ -78,7 +78,7 @@ const STRINGS = {
   'status.Healthy': { en: 'Healthy', rw: 'Bimeze neza', fr: 'Sain', sw: 'Nzuri' },
 
   // ---- approval workflow ---------------------------------------------------
-  'approval.pending': { en: 'Pending Approval', rw: 'Bitegereje Kwemezwa', fr: 'En attente d’approbation', sw: 'Inasubiri Idhini' },
+  'approval.pending': { en: 'Waiting for a decision', rw: 'Bitegereje icyemezo', fr: 'En attente de décision', sw: 'Inasubiri uamuzi' },
   'approval.approved': { en: 'Approved', rw: 'Byemejwe', fr: 'Approuvé', sw: 'Imeidhinishwa' },
   'approval.rejected': { en: 'Rejected', rw: 'Byanzwe', fr: 'Rejeté', sw: 'Imekataliwa' },
   'approval.required': { en: 'Who decides', rw: 'Ufata icyemezo', fr: 'Qui décide', sw: 'Anayeamua' },
