@@ -205,7 +205,7 @@ const ACCOUNT_COLUMNS = 'id, username, name, role, sector, email, status, access
 app.post('/api/auth/login', addressLimiter, accountLimiter, asyncRoute(async (req, res) => {
   const { username, password } = req.body || {};
   const result = await pool.query(
-    `SELECT ${ACCOUNT_COLUMNS}, password_hash FROM users WHERE username = $1`,
+    `SELECT ${ACCOUNT_COLUMNS}, password_hash, password_changed_at FROM users WHERE username = $1`,
     [typeof username === 'string' ? username.trim() : '']
   );
   const user = result.rows[0];
@@ -226,7 +226,12 @@ app.post('/api/auth/login', addressLimiter, accountLimiter, asyncRoute(async (re
     });
   }
 
-  res.json({ token: sessionToken(user), user: publicAccount(user) });
+  // authMiddleware refuses tokens issued before the second a password changed,
+  // rounded up. Signing in during that same second -- straight after a reset --
+  // produced a token already refused, so the issue time is never earlier.
+  const changedAt = user.password_changed_at ? Math.ceil(new Date(user.password_changed_at).getTime() / 1000) : 0;
+  const issuedAt = Math.max(Math.floor(Date.now() / 1000), changedAt);
+  res.json({ token: sessionToken(user, issuedAt), user: publicAccount(user) });
 }));
 
 app.get('/api/auth/session', authMiddleware, asyncRoute(async (req, res) => {
