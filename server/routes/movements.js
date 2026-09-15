@@ -595,7 +595,7 @@ router.get('/:id', asyncRoute(async (req, res) => {
 
 router.post('/', asyncRoute(async (req, res) => {
   if (!canCreate(req.user)) {
-    return res.status(403).json({ message: 'Only the Director or a Logistics & Facilitation officer can create a movement.' });
+    return res.status(403).json({ message: 'Only the Director or a Movements & Facilitation manager can create a trip.' });
   }
   const payload = readMovementPayload(req.body || {});
 

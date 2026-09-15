@@ -442,7 +442,8 @@ export default function MovementModule({ user, onOpenFile, fetchJson, upload, op
     <section className="context-strip">
       <div>
         <span className="eyebrow">{t('movement.eyebrow')}</span>
-        <h2>{isDirector ? t('role.super-admin') : coversMovements ? t('movement.movementOfficer') : `${areaLabel(user.sector)} — ${t('movement.linkedMovements')}`}</h2>
+        {/* The page's subject, not the reader's job title: the heading used to read "Director". */}
+        <h2>{isDirector || coversMovements ? operationName('movement', displayLanguage()) : `${areaLabel(user.sector)} — ${t('movement.linkedMovements')}`}</h2>
         <p>{t('movement.blurb')}</p>
       </div>
       {canCreate && <button className="primary-btn" type="button" onClick={() => setFormState({ mode: 'create', values: emptyForm })}>

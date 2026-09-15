@@ -247,7 +247,7 @@ app.post('/api/auth/login', addressLimiter, accountLimiter, asyncRoute(async (re
       code: 'ACCOUNT_INACTIVE',
       status: user.status,
       message: user.status === 'suspended'
-        ? 'This account is suspended. Contact the administrator.'
+        ? 'This account is suspended. Contact the Director.'
         : 'Access to this account has been revoked.'
     });
   }
@@ -673,14 +673,14 @@ app.put('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
   // Authorize against the sector the project is in now, not the one the caller
   // sent, and refuse to let a manager move a project out of their own sector.
   if (!isAdmin(req.user) && (req.user.role !== 'manager' || !withinScope(req.user, current.sector))) {
-    return res.status(403).json({ message: 'Managers can only update projects in their assigned sector.' });
+    return res.status(403).json({ message: 'Managers can only update projects in their own business operation.' });
   }
   // Anything left out of the body keeps its current value. Defaulting a missing
   // sector to 'agriculture' silently moved projects the Director edited.
   const { project, error } = readProjectPayload(payload, current);
   if (error) return res.status(400).json({ message: error });
   if (!withinScope(req.user, project.sector)) {
-    return res.status(403).json({ message: 'Managers cannot move a project to another sector.' });
+    return res.status(403).json({ message: 'Managers cannot move a project to another business operation.' });
   }
 
   // Who manages a project is the Director's call, exactly as on PATCH /manager.
@@ -774,12 +774,12 @@ app.post('/api/approvals', authMiddleware, asyncRoute(async (req, res) => {
   // member works under a manager and goes through them; the Director has nobody
   // above them to decide their own request, since self-decisions are refused.
   if (req.user.role !== 'manager') {
-    return res.status(403).json({ message: 'Only a sector manager can raise a request for approval.' });
+    return res.status(403).json({ message: 'Only a manager can make a request for approval.' });
   }
   const sector = validateSector(payload.sector, req.user.sector);
-  if (sector && !withinScope(req.user, sector)) return res.status(403).json({ message: 'Managers can only submit approvals in their assigned sector.' });
+  if (sector && !withinScope(req.user, sector)) return res.status(403).json({ message: 'Managers can only make requests in their own business operation.' });
   if (!sector || !requiredText(payload.title) || !requiredText(payload.owner)) {
-    return res.status(400).json({ message: 'Approval title, sector, and owner are required.' });
+    return res.status(400).json({ message: 'What is needed, the business operation and the owner are required.' });
   }
   if (!validNumber(payload.amount)) return res.status(400).json({ message: 'Approval amount must be a valid non-negative number.' });
   if (!['Low', 'Medium', 'High'].includes(payload.priority || 'Medium')) return res.status(400).json({ message: 'Approval priority is invalid.' });
@@ -846,7 +846,7 @@ app.patch('/api/approvals/:id', authMiddleware, asyncRoute(async (req, res) => {
     return res.status(403).json({ message: 'You cannot approve or reject an approval you requested yourself.' });
   }
   if (!withinScope(req.user, sector)) {
-    return res.status(403).json({ message: 'Managers cannot move an approval to another sector.' });
+    return res.status(403).json({ message: 'Managers cannot move a request to another business operation.' });
   }
 
   // Reopening a request to Pending clears the previous decision, so a stale

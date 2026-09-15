@@ -23,7 +23,7 @@ export const PARTNER_STATUSES = ['active', 'suspended', 'revoked'];
 router.use((req, res, next) => {
   if (!req.user) return res.status(401).json({ message: 'Authentication required.' });
   if (!isAdmin(req.user)) {
-    return res.status(403).json({ message: 'Only the administrator can manage external partner access.' });
+    return res.status(403).json({ message: 'Only the Director can manage external partner access.' });
   }
   next();
 });

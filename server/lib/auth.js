@@ -120,7 +120,7 @@ export async function authMiddleware(req, res, next) {
         code: 'ACCOUNT_INACTIVE',
         status: accountStatus,
         message: accountStatus === 'suspended'
-          ? 'This account is suspended. Contact the administrator.'
+          ? 'This account is suspended. Contact the Director.'
           : 'Access to this account has been revoked.'
       });
     }

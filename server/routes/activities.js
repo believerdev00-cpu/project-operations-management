@@ -503,9 +503,9 @@ router.post('/', asyncRoute(async (req, res) => {
   if (!projectResult.rowCount) return res.status(404).json({ message: 'Select an existing project before assigning an activity.' });
 
   const sector = validateSector(payload.sector, projectResult.rows[0].sector);
-  if (!sector) return res.status(400).json({ message: 'Activity sector is invalid.' });
+  if (!sector) return res.status(400).json({ message: 'Choose a valid business operation.' });
   if (!withinScope(req.user, sector)) {
-    return res.status(403).json({ message: 'You can only record activities in your own sector.' });
+    return res.status(403).json({ message: 'You can only add work in your own business operation.' });
   }
 
   // Two ways in, one table. The Director assigns work to a manager, and that
@@ -537,7 +537,7 @@ router.post('/', asyncRoute(async (req, res) => {
     // work outside those would leave them assigned to a record they cannot open.
     // A manager who covers every area can be handed anything.
     if (!withinScope(manager.rows[0], sector)) {
-      return res.status(400).json({ message: 'That manager works in a different area. Pick a manager from the same working area.' });
+      return res.status(400).json({ message: 'That manager works in a different business operation. Pick a manager from this one.' });
     }
     deadline = payload.deadline ? String(payload.deadline).slice(0, 10) : null;
     if (deadline && !isValidDate(deadline)) {
@@ -678,9 +678,9 @@ router.put('/:id', asyncRoute(async (req, res) => {
   if (!projectResult.rowCount) return res.status(404).json({ message: 'Select an existing project before assigning an activity.' });
 
   const sector = validateSector(payload.sector, projectResult.rows[0].sector);
-  if (!sector) return res.status(400).json({ message: 'Activity sector is invalid.' });
+  if (!sector) return res.status(400).json({ message: 'Choose a valid business operation.' });
   if (!withinScope(req.user, sector)) {
-    return res.status(403).json({ message: 'You can only record activities in your own sector.' });
+    return res.status(403).json({ message: 'You can only add work in your own business operation.' });
   }
 
   const requestedBudget = round2(payload.costUsd || 0);
@@ -1309,7 +1309,7 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
       );
       if (!manager.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
       if (!withinScope(manager.rows[0], existing.sector)) {
-        return res.status(400).json({ message: 'That manager works in a different area. Pick a manager from the same working area.' });
+        return res.status(400).json({ message: 'That manager works in a different business operation. Pick a manager from this one.' });
       }
     }
   }
@@ -1378,7 +1378,7 @@ const BUDGET_CHANGEABLE_STATUSES = ['Approved', 'Budget Adjusted', 'In Progress'
 router.post('/:id/budget-requests', asyncRoute(async (req, res) => {
   const existing = await loadActivity(req.params.id, req.user);
   if (!isAdmin(req.user) && (!withinScope(req.user, existing.sector) || req.user.role !== 'manager')) {
-    return res.status(403).json({ message: 'Only a manager in this working area can ask for a budget change.' });
+    return res.status(403).json({ message: 'Only a manager in this business operation can ask for a different budget.' });
   }
   assertPlanOpen(existing);
   if (!BUDGET_CHANGEABLE_STATUSES.includes(existing.status)) {

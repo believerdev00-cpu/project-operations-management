@@ -84,7 +84,7 @@ function translateConstraintError(error) {
 
 // The full account register, for the Director only: every user, their role, the
 // manager they report to, and the working area they cover.
-router.get('/', adminOnly('Only the administrator can view the account register.'), asyncRoute(async (req, res) => {
+router.get('/', adminOnly('Only the Director can view the account register.'), asyncRoute(async (req, res) => {
   // External partners are managed from their own register, with their own
   // controls; listed here they were offered a manager and a working area that
   // mean nothing for an outside, view-only account.
@@ -102,7 +102,7 @@ router.get('/', adminOnly('Only the administrator can view the account register.
   });
 }));
 
-router.post('/', adminOnly('Only the administrator can create accounts.'), asyncRoute(async (req, res) => {
+router.post('/', adminOnly('Only the Director can create accounts.'), asyncRoute(async (req, res) => {
   const { username, name, password, role, sector } = req.body || {};
 
   if (!requiredText(username) || !requiredText(name)) {
@@ -111,14 +111,14 @@ router.post('/', adminOnly('Only the administrator can create accounts.'), async
   const weak = passwordProblem(password, { username });
   if (weak) return res.status(400).json({ message: weak });
   if (!assignableRoles.has(role)) {
-    return res.status(400).json({ message: 'Choose a role: sector manager or team member.' });
+    return res.status(400).json({ message: 'Choose a role: manager or team member.' });
   }
   // Every non-Director account is scoped to one sector; without it their own
   // sector-scoped queries would read back nothing. The one exception is a
   // manager marked as covering all of them, which is scoped by the flag instead.
   const coversAll = role === 'manager' && sector === ALL_OPERATIONS;
   if (!coversAll && !sectorIds.has(sector)) {
-    return res.status(400).json({ message: 'A valid working area is required.' });
+    return res.status(400).json({ message: 'Choose a business operation.' });
   }
   const storedSector = coversAll ? null : sector;
 
@@ -132,7 +132,7 @@ router.post('/', adminOnly('Only the administrator can create accounts.'), async
     if (!manager.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
     // A manager covering every operation may hold staff from any of them.
     if (!coversAll && !withinScope(manager.rows[0], sector)) {
-      return res.status(400).json({ message: 'The manager works in a different area. Pick a manager from the same working area.' });
+      return res.status(400).json({ message: 'That manager works in a different business operation. Pick a manager from the same one.' });
     }
   }
 
@@ -154,7 +154,7 @@ router.post('/', adminOnly('Only the administrator can create accounts.'), async
 
 // Reset only. The stored value is a bcrypt hash and is never read back, so a
 // forgotten password is replaced rather than recovered.
-router.patch('/:id/password', adminOnly('Only the administrator can change a password.'), asyncRoute(async (req, res) => {
+router.patch('/:id/password', adminOnly('Only the Director can change a password.'), asyncRoute(async (req, res) => {
   const { password } = req.body || {};
   const weak = passwordProblem(password);
   if (weak) return res.status(400).json({ message: weak });
@@ -223,7 +223,7 @@ router.patch('/:id/status', adminOnly('Only the Director can suspend or reactiva
 // working areas. Both travel on this route because the pair has to stay
 // consistent -- a user parked under a manager who covers another sector would
 // be listed on a team whose records they cannot see.
-router.patch('/:id/assignment', adminOnly('Only the administrator can change an assignment.'), asyncRoute(async (req, res) => {
+router.patch('/:id/assignment', adminOnly('Only the Director can change an assignment.'), asyncRoute(async (req, res) => {
   const payload = req.body || {};
   const existing = await pool.query('SELECT id, role, sector, manager_id, covers_all_sectors FROM users WHERE id = $1', [req.params.id]);
   if (!existing.rowCount) return res.status(404).json({ message: 'Account not found.' });
@@ -240,7 +240,7 @@ router.patch('/:id/assignment', adminOnly('Only the administrator can change an 
   const sectorGiven = Object.prototype.hasOwnProperty.call(payload, 'sector');
   const managerGiven = Object.prototype.hasOwnProperty.call(payload, 'managerId');
   if (!sectorGiven && !managerGiven) {
-    return res.status(400).json({ message: 'Provide a working area, a manager, or both.' });
+    return res.status(400).json({ message: 'Choose a business operation, a manager, or both.' });
   }
 
   // 'all' is only meaningful for a manager. Left unspecified, an account that
@@ -251,7 +251,7 @@ router.patch('/:id/assignment', adminOnly('Only the administrator can change an 
     : (target.covers_all_sectors ? ALL_OPERATIONS : target.sector);
   const coversAll = target.role === 'manager' && requestedSector === ALL_OPERATIONS;
   if (!coversAll && !sectorIds.has(requestedSector)) {
-    return res.status(400).json({ message: 'A valid working area is required.' });
+    return res.status(400).json({ message: 'Choose a business operation.' });
   }
   const sector = coversAll ? null : requestedSector;
 
