@@ -16,8 +16,9 @@ const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
   throw new Error('DATABASE_URL is required. Configure PostgreSQL before starting the API.');
 }
-// Supabase requires TLS. A local Postgres used for development usually has none,
-// and says so in its URL with sslmode=disable (or DATABASE_SSL=false).
+// TLS is on unless the URL opts out. A Postgres on this machine has no
+// certificate and says so with sslmode=disable (or
+// DATABASE_SSL=false); a database reached over a network should keep TLS.
 const sslDisabled = /[?&]sslmode=disable\b/.test(connectionString) || process.env.DATABASE_SSL === 'false';
 
 export const pool = new Pool({
@@ -25,7 +26,8 @@ export const pool = new Pool({
   ssl: sslDisabled ? false : {
     rejectUnauthorized: false
   },
-  // Supabase drops idle connections, and a pooled socket that died while idle
+  // Idle connections get dropped (by the network, a firewall, a restarted
+  // database), and a pooled socket that died while idle
   // surfaces as ECONNRESET on the next query -- which looked to users like
   // "Server or database error" on the login screen. Keepalives hold the socket
   // open, and a short idle timeout retires it before the far end does.
@@ -33,10 +35,7 @@ export const pool = new Pool({
   keepAliveInitialDelayMillis: 10000,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
-  // A serverless instance handles one request at a time, so it needs one
-  // connection. Ten per instance would exhaust Postgres the moment a handful of
-  // instances went warm at once; a long-running server still wants the pool.
-  max: process.env.VERCEL ? 1 : 10
+  max: 10
 });
 
 // Without a listener, an error raised on an *idle* client is an unhandled
@@ -48,7 +47,7 @@ pool.on('error', (error) => {
 // The pool's own 'error' event only covers clients sitting idle in the pool. A
 // client checked out with pool.connect() -- which every transaction in this API
 // uses -- emits 'error' on the client itself, and an EventEmitter with no
-// listener for 'error' throws. Supabase drops connections routinely, so a
+// listener for 'error' throws. Connections do get dropped, so a
 // dropped socket mid-transaction was taking the whole process down with an
 // unhandled 'error' event rather than failing the one request.
 //

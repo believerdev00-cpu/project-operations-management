@@ -1,0 +1,35 @@
+# The database, on this machine.
+#
+# Nothing in this project needs a hosted Postgres: the server talks to it with
+# plain `pg` and plain SQL, the schema uses no extension and no row level
+# security, and accounts are this application's own table with its own bcrypt
+# hashes. Point DATABASE_URL at the container below and the whole system --
+# API, interface, files -- runs on one machine with no external service.
+#
+#   docker compose up -d     start it (the data outlives the container)
+#   docker compose down      stop it
+#   docker compose down -v   stop it and delete the data
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ops-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ops
+      POSTGRES_PASSWORD: ops_local_dev
+      POSTGRES_DB: project_ops
+    ports:
+      # Host 5433, so a Postgres already installed on 5432 keeps working.
+      - '5433:5432'
+    volumes:
+      - ops-db-data:/var/lib/postgresql/data
+    healthcheck:
+      # `npm run migrate` on a container that is still starting fails on a
+      # connection refused, so wait for the server to actually accept queries.
+      test: ['CMD-SHELL', 'pg_isready -U ops -d project_ops']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  ops-db-data:

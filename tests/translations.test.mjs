@@ -21,7 +21,9 @@ const check = (label, ok, detail = '') => {
   else { failed += 1; console.log(`  FAIL  ${label}${detail ? `\n        ${detail}` : ''}`); }
 };
 
-const FILES = ['App.jsx', 'MovementModule.jsx', 'ActivityReview.jsx', 'PartnerPortal.jsx', 'ExternalPartners.jsx', 'MonthlyPlans.jsx']
+// ui.jsx holds the shared error boundary and dialogs; left off this list, every
+// key only they use was reported as unused, and their JSX went unchecked.
+const FILES = ['App.jsx', 'ui.jsx', 'MovementModule.jsx', 'ActivityReview.jsx', 'PartnerPortal.jsx', 'ExternalPartners.jsx', 'MonthlyPlans.jsx']
   .map((name) => path.join(root, 'src', name));
 
 const sources = Object.fromEntries(FILES.map((file) => [path.basename(file), fs.readFileSync(file, 'utf8')]));

@@ -1,85 +1,69 @@
-# Deploying to Vercel
+# Deploying
 
-The frontend and the API deploy together as one Vercel project. The Vite build
-is served as static files; the whole Express app runs as a single serverless
-function at `api/index.js`, and `vercel.json` rewrites every `/api/...` path to
-it (Express still sees the original URL). The browser keeps calling `/api/...`
-on the same origin and there is no CORS to configure.
+The whole system is one Node process and one Postgres database. The process
+serves the API and the built interface on the same port, and uploaded evidence
+is stored on its own disk in `server/uploads`. No external service is involved.
 
-## 1. Create a Supabase Storage bucket
+## 1. Postgres
 
-Uploaded evidence used to be written to `server/uploads` on local disk. Vercel
-has no disk that survives a request, so on Vercel those files go to Supabase
-Storage instead.
+**Windows (what this machine uses):** PostgreSQL 16 installed as the Windows
+service `postgresql-x64-16`, listening on port **5433**. It starts with Windows.
 
-1. Supabase dashboard -> **Storage** -> **New bucket**
-2. Name it `evidence`
-3. Leave it **private**. Files are served through the API, which already checks
-   that the caller may see the record they belong to.
+```
+winget install --id PostgreSQL.PostgreSQL.16 -e --override "--mode unattended --superpassword <choose one> --serverport 5433"
+```
 
-## 2. Set the environment variables
+Then create the application's own login and database (the `postgres` superuser
+is only for administration; the app never uses it):
 
-In Vercel: **Project -> Settings -> Environment Variables**. Add these for
-Production (and Preview, if you use preview deployments):
+```
+"C:\Program Files\PostgreSQL\16\bin\psql.exe" -U postgres -p 5433 -h localhost
+CREATE ROLE ops LOGIN PASSWORD '<app password>';
+CREATE DATABASE project_ops OWNER ops;
+```
+
+**Anywhere with Docker:** `docker compose up -d` runs the same thing on the same
+port, with the credentials in `docker-compose.yml`.
+
+## 2. Configure
+
+Copy `.env.example` to `.env.local` and set at least:
 
 | Variable | Value |
 | --- | --- |
-| `DATABASE_URL` | Supabase **transaction pooler** string, port **6543** |
-| `JWT_SECRET` | a long random string |
-| `SUPABASE_URL` | `https://<project-ref>.supabase.co` |
-| `SUPABASE_SERVICE_ROLE_KEY` | from Supabase -> Settings -> API |
-| `SUPABASE_STORAGE_BUCKET` | `evidence` |
-| `ADMIN_PASSWORD` | only needed for the very first migration |
+| `DATABASE_URL` | `postgresql://ops:<app password>@localhost:5433/project_ops?sslmode=disable` |
+| `JWT_SECRET` | a long random string (changing it signs everybody out) |
+| `ADMIN_PASSWORD` | only needed for the very first migration, which creates `admin` |
+| `PORT` | defaults to 5000 |
 
-Two things that will bite if you skip them:
+Keep `?sslmode=disable` only for a Postgres on the same machine. `CORS_ORIGIN`
+is not needed in production: the page and the API share one origin.
 
-- **Use the pooler, not port 5432.** Every warm function instance holds its own
-  connection, and direct Postgres connections run out fast. Copy the string from
-  Supabase -> Project Settings -> Database -> Connection pooling.
-- **`SUPABASE_SERVICE_ROLE_KEY` must not have a `VITE_` prefix.** Anything
-  prefixed `VITE_` is compiled into the browser bundle. This key bypasses row
-  level security and is read only by server code.
-
-`CORS_ORIGIN` is not needed: the API is served from the same origin as the page.
-
-## 3. Run the migrations once
-
-The API does **not** migrate on boot when running on Vercel. A serverless module
-is evaluated again on every cold start, and several instances racing each other
-through `ALTER TABLE` is a good way to corrupt a schema.
-
-Run it once from your machine, against the same database:
+## 3. Build and run
 
 ```
-npm run migrate
+npm ci
+npm run build        # writes dist/
+npm start            # migrates the schema, then serves API + interface on PORT
 ```
 
-Repeat this after any deploy that adds a migration. It is safe to run again --
-every statement is `IF NOT EXISTS` or an idempotent update.
+Migrations run on every boot and are idempotent. `npm run migrate` does the same
+without starting the server. Keep the process alive with whatever the host uses
+(pm2, NSSM or a scheduled task on Windows, a systemd unit on Linux), and put a
+reverse proxy with HTTPS in front of it for anything reachable beyond your own
+network.
 
-## 4. Deploy
+## 4. Back up
 
-Push the branch and import the repository in Vercel, or run `vercel --prod`.
-`vercel.json` already sets the build command, the output directory, the function
-limits and the SPA fallback, so no build settings need to be filled in by hand.
+Two things hold the data, and they must be backed up together:
 
-## 5. Attach a custom domain
-
-**This step is not optional for everyone.** Some ISPs blackhole `*.vercel.app`
-because it is heavily abused for phishing, and from such a connection the
-deployment simply times out (`ERR_CONNECTION_TIMED_OUT`) no matter how healthy
-it is. Vercel-hosted sites on custom domains are reached normally.
-
-Vercel -> **Project -> Settings -> Domains** -> add your domain and follow the
-DNS instructions. To check whether you are affected, open any
-`https://<anything>.vercel.app` URL: if a name that certainly does not exist
-times out instead of returning a 404 page, `*.vercel.app` is blocked for you.
+- **The database:**
+  `"C:\Program Files\PostgreSQL\16\bin\pg_dump.exe" -U ops -h localhost -p 5433 -Fc project_ops -f backup.dump`
+  (restore with `pg_restore -U ops -h localhost -p 5433 -d project_ops --clean backup.dump`)
+- **`server/uploads`**: the evidence files. The database only records their
+  names; losing this folder leaves every evidence link answering 404.
 
 ## Running locally
-
-Unchanged. Without `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` the storage
-adapter writes to `server/uploads` exactly as before, and `npm run dev:server`
-still migrates on boot and listens on port 5000.
 
 ```
 npm run dev          # API on :5000 and the Vite client on :5173
@@ -87,30 +71,6 @@ npm run dev          # API on :5000 and the Vite client on :5173
 
 ## What is not solved by this
 
-- **Rate limiting is per instance.** `express-rate-limit` keeps its counters in
-  memory, so on serverless each instance counts separately and the limit is
-  effectively looser than it looks. A shared store is needed for it to mean
-  anything under load.
-- **Cold starts.** The first request after an idle period pays for the function
-  booting and opening a database connection.
-- **Existing local uploads are not migrated.** Any evidence already sitting in
-  `server/uploads` stays on your machine; it is not copied into the bucket.
-
-## A note on deleted evidence and Supabase's CDN
-
-Supabase Storage sits behind a CDN that caches an object once it has been read,
-and it keeps serving that copy for a while after the object is deleted. This was
-measured, not assumed: a delete returns `Successfully deleted` and the next read
-still answers `200` with `CF-Cache-Status: HIT` for at least 16 seconds. No
-`cache-control` value avoids it -- Supabase prefixes `public, ` to whatever the
-upload sends, so `no-store` arrives as `public, no-store` and is cached anyway.
-
-This is not visible to anyone using the application. The storage URL is never
-handed out; evidence is only ever read through
-`/api/activities/:id/evidence/:evidenceId/file`, which looks the row up in the
-database first and returns 404 as soon as the row is gone. The stale copy can
-only be reached by someone who already holds the service role key and the exact
-object path.
-
-What follows from it: **treat the service role key as the thing that protects
-deleted files**, and rotate it if it is ever exposed.
+- **Rate limiting is per process.** `express-rate-limit` keeps its counters in
+  memory, so they reset on restart and are not shared between several copies of
+  the server.

@@ -1,6 +1,5 @@
 // Logistics & Facilitation module migration.
-// Mirrors the trailing section of supabase/schema.sql so a plain PostgreSQL
-// target reaches the same shape without anyone running the Supabase editor.
+// Brings any PostgreSQL database to the movement module's current shape.
 
 // The same workflow vocabulary the activity register uses, plus the one state
 // this module needs on its own: money handed over before the trip. There is no

@@ -36,8 +36,7 @@ const STATUS_FLOW = {
   Cancelled: ['Pending Approval']
 };
 
-// Where the bytes go is the storage adapter's business: the local disk on a
-// server, Supabase Storage on a host without one.
+// Where the bytes go is the storage adapter's business (server/uploads).
 const EVIDENCE_FOLDER = 'movements';
 
 const ALLOWED_MIME = new Set([
@@ -1163,7 +1162,7 @@ router.post('/:id/evidence', authorizeEvidenceUpload, upload.array('files', 10),
   try {
     for (const file of req.files) {
       const storedName = storedFileName(file.originalname);
-      await saveFile(EVIDENCE_FOLDER, storedName, file.buffer, file.mimetype);
+      await saveFile(EVIDENCE_FOLDER, storedName, file.buffer);
       stored.push({ file, storedName });
     }
   } catch (error) {
@@ -1228,8 +1227,6 @@ router.get('/:id/evidence/:evidenceId/file', asyncRoute(async (req, res) => {
   // Who may read this file is decided per request, so no shared cache and no
   // browser may keep a copy that outlives the check.
   res.setHeader('Cache-Control', 'private, no-store');
-  // The disk gives back a stream, remote storage a buffer already in hand.
-  if (Buffer.isBuffer(file)) return res.send(file);
   // A read that fails part-way ends this response instead of leaving it hanging.
   file.once('error', () => (res.headersSent ? res.destroy() : res.status(500).json({ message: 'The stored file could not be read.' })));
   return file.pipe(res);

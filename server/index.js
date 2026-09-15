@@ -4,7 +4,9 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import { pathToFileURL } from 'node:url';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { initDatabase, pool } from './db/database.js';
 import { sectors } from './data/seedData.js';
 import { authMiddleware, jwtSecret } from './lib/auth.js';
@@ -73,7 +75,24 @@ function mapApproval(row) {
 // mistyped passwords anywhere locked everybody out.
 app.set('trust proxy', 1);
 
-app.use(helmet());
+// Until this process also served the built client, helmet's policy only ever
+// applied to JSON and the content policy did nothing. It now applies to the
+// document itself. Every script, stylesheet, font and image the interface loads
+// is same-origin, which the defaults already allow; the one default that has to
+// go is below.
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      // upgrade-insecure-requests only means anything behind HTTPS, where this
+      // app has no http subresources for it to fix. On plain http it is
+      // actively harmful: it rewrites same-origin asset requests to https, so a
+      // LAN address opened on a phone, or a host that terminates TLS in front of
+      // this process, loads a blank page.
+      'upgrade-insecure-requests': null
+    }
+  }
+}));
 app.use(cors({ origin: allowedOrigins, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
 
@@ -768,6 +787,54 @@ app.use('/api/partners', authMiddleware, partnersRouter);
 // confirmed allocation is handed over outside it, and these records exist for
 // accountability.
 app.use('/api/monthly-plans', authMiddleware, monthlyPlanRouter);
+
+// An /api path nothing matched is answered in JSON, not by the SPA fallback
+// below. Handing back index.html would give the client an HTML page where it
+// parses a response body, so a mistyped route would surface as a parse error
+// rather than a 404.
+app.use('/api', (req, res) => {
+  res.status(404).json({ message: 'Endpoint not found.' });
+});
+
+// ---------------------------------------------------------------------------
+// The built interface, served by this same process.
+//
+// This is what makes one server on one port the whole deployment: `npm run
+// build` writes dist/, and `node server/index.js` then answers both the API and
+// the interface on PORT. Nothing else changes -- development still runs Vite on
+// :5173 proxying /api here. When dist/ has not been built none of this is mounted,
+// and the process behaves exactly as it did before.
+const clientDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist');
+const clientIndex = path.join(clientDir, 'index.html');
+
+if (fs.existsSync(clientIndex)) {
+  app.use(express.static(clientDir, {
+    // index.html is served by the fallback below, which has to run for every
+    // address the hash router can produce, not just '/'.
+    index: false,
+    setHeaders(response, filePath) {
+      // Vite writes a content hash into every filename under dist/assets, so
+      // those are safe to cache forever. Everything copied from public/ -- the
+      // logos, the icons, the manifest -- keeps its name across releases, so a
+      // long cache there would keep serving the previous logo until the browser
+      // gave it up on its own.
+      const hashed = filePath.includes(`${path.sep}assets${path.sep}`);
+      response.setHeader('Cache-Control', hashed ? 'public, max-age=31536000, immutable' : 'no-cache');
+    }
+  }));
+
+  app.use((req, res, next) => {
+    // Only a document request can be the SPA. A POST or PUT that matched no
+    // route is a genuine 404, and answering it with the page would hide it.
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    // Never cached: this is the file that names the current bundle, and a cached
+    // copy pins the browser to the release before last.
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(clientIndex, (error) => {
+      if (error) next(error);
+    });
+  });
+}
 
 
 // What the caller did wrong is told to the caller; only what went wrong on this
