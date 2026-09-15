@@ -16,6 +16,7 @@ running is left alone.
 | `translations.test.mjs` | every key translated into all four languages, every key used, no hard-coded English left in the JSX |
 | `account-security.test.mjs` | temporary passwords, choosing and changing your own, suspending accounts, team members raising nothing, short-lived evidence links |
 | `approval-workflow.test.mjs` | who must approve a record, and that nobody else can |
+| `workflow-fixes.test.mjs` | the dead ends and lost-money cases from the usability audit stay fixed |
 | `partner-access.test.mjs` | an external partner sees one business operation and nothing else |
 | `monthly-workflow.test.mjs` | planning, the approved allocation, expenses, the budget block, evidence, month-end |
 

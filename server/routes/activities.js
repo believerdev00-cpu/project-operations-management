@@ -55,10 +55,23 @@ const STATUS_FLOW = {
   'In Progress': ['Completed', 'Needs Correction', 'Budget Adjusted', 'On Hold', 'Rejected', 'Cancelled'],
   'Needs Correction': ['In Progress', 'Completed', 'Budget Adjusted', 'On Hold', 'Rejected', 'Cancelled'],
   Completed: ['In Progress', 'Needs Correction'],
-  Rejected: ['Pending Approval', 'Draft'],
-  Cancelled: ['Pending Approval', 'Draft'],
+  // Reopened straight to a decision. Draft used to be offered here too, but no
+  // screen can send a draft on, so it was a dead end only the Director could clear.
+  Rejected: ['Pending Approval'],
+  Cancelled: ['Pending Approval'],
   'On Hold': ['Pending Approval', 'Approved', 'Budget Adjusted', 'In Progress', 'Rejected', 'Cancelled']
 };
+
+// Where a record may move to, for this record. Work that never needed anybody's
+// approval -- a planned activity, pre-approved when the month was planned --
+// cannot be sent back for one: it would name no approver, sit in nobody's queue
+// and be impossible to decide. Reopened, it goes straight back to Approved.
+function allowedNextStatuses(row) {
+  const flow = STATUS_FLOW[row.status] || [];
+  if (row.approval_required) return flow;
+  return flow.filter((status) => status !== 'Pending Approval')
+    .concat(['Rejected', 'Cancelled'].includes(row.status) ? ['Approved'] : []);
+}
 
 // Where the bytes go is the storage adapter's business (server/uploads).
 const EVIDENCE_FOLDER = 'activities';
@@ -499,9 +512,14 @@ router.post('/', asyncRoute(async (req, res) => {
   // approver at the moment it is created; neither is left generically pending.
   const assigning = isAdmin(req.user);
   const budget = round2(payload.costUsd || 0);
-  const id = payload.id || `ACT-${Date.now()}`;
+  // Always minted here. Taking an id from the request let a caller choose the
+  // record's key, which nothing else in the API allows.
+  const id = `ACT-${Date.now()}`;
 
-  let assignedTo = null;
+  // A manager's own request is theirs to carry once approved. Left unassigned it
+  // could be started and finished by them, but not spent against -- expenses
+  // belong to the assignee -- so an approved request had no way to record money.
+  let assignedTo = assigning ? null : req.user.id;
   let deadline = null;
   if (assigning) {
     assignedTo = parseId(payload.assignedTo);
@@ -667,19 +685,25 @@ router.put('/:id', asyncRoute(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
+    const edited = await client.query(
       `UPDATE activities
        SET project_id = $2, sector = $3, category = $4, activity = $5, description = $6, materials = $7,
            quantity = $8, cost_usd = $9, cost_rwf = $10, cost_cdf = $11, requested_budget = $12,
            signed = $13, updated_at = NOW()
-       WHERE id = $1`,
+       -- Checked against what was read above: an edit that lands just after the
+       -- Director decided the request would change a budget already approved.
+       WHERE id = $1 AND status = $14::text AND approval_status = $15::text`,
       [
         existing.id, payload.projectId, sector, payload.category, payload.activity, payload.description || '',
         optionalText(payload.materials, 2000), Number(payload.quantity || 0),
         requestedBudget, Number(payload.costRwf || 0), Number(payload.costCdf ?? payload.costFco ?? 0),
-        requestedBudget, Boolean(payload.signed)
+        requestedBudget, Boolean(payload.signed), existing.status, existing.approval_status
       ]
     );
+    if (!edited.rowCount) {
+      await safeRollback(client);
+      return res.status(409).json({ message: 'This request was decided while you were editing it. Refresh to see the decision.' });
+    }
     const entries = [{ action: 'Request edited', field: 'activity', oldValue: existing.activity, newValue: payload.activity }];
     if (round2(existing.requested_budget) !== requestedBudget) {
       entries.push({ action: 'Request edited', field: 'requestedBudget', oldValue: round2(existing.requested_budget), newValue: requestedBudget });
@@ -905,14 +929,20 @@ router.patch('/:id/submit', asyncRoute(async (req, res) => {
   if (!existing.approval_required_from) {
     return res.status(400).json({ message: 'This activity has nobody to approve it. Set an approver first.' });
   }
+  assertPlanOpen(existing);
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
-      `UPDATE activities SET status = 'Pending Approval', approval_status = 'pending', updated_at = NOW() WHERE id = $1`,
+    const sent = await client.query(
+      `UPDATE activities SET status = 'Pending Approval', approval_status = 'pending', updated_at = NOW()
+       WHERE id = $1 AND status = 'Draft'`,
       [existing.id]
     );
+    if (!sent.rowCount) {
+      await safeRollback(client);
+      return res.status(409).json({ message: 'This activity has already been sent for approval.' });
+    }
     await logHistory(client, existing.id, req.user, [
       { action: 'Submitted for approval', field: 'status', oldValue: 'Draft', newValue: 'Pending Approval' }
     ]);
@@ -942,7 +972,7 @@ router.patch('/:id/decision', asyncRoute(async (req, res) => {
   if (!ACTIVITY_STATUSES.includes(status)) {
     return res.status(400).json({ message: 'Activity status is invalid.' });
   }
-  if (status !== existing.status && !(STATUS_FLOW[existing.status] || []).includes(status)) {
+  if (status !== existing.status && !allowedNextStatuses(existing).includes(status)) {
     return res.status(400).json({ message: `A ${existing.status} activity cannot move straight to ${status}.` });
   }
   // A record waiting on a decision is decided by the person it names, through
@@ -1012,8 +1042,8 @@ router.patch('/:id/decision', asyncRoute(async (req, res) => {
 
   const settled = APPROVED_STATUSES.includes(status);
   // Work sent back is no longer submitted: it returns to the manager's court,
-  // and they resubmit it once corrected.
-  const returned = status === 'Needs Correction';
+  // and they resubmit it once corrected. Reopening completed work does the same.
+  const returned = status === 'Needs Correction' || (existing.status === 'Completed' && status !== 'Completed');
   const entries = [];
   const previousApproved = existing.approved_budget === null ? null : round2(existing.approved_budget);
   if (budgetGiven && previousApproved !== approvedBudget) {
@@ -1051,6 +1081,7 @@ router.patch('/:id/decision', asyncRoute(async (req, res) => {
              WHEN $3::text = 'Completed' THEN (CASE WHEN status = 'Completed' THEN completed_at ELSE NOW() END)
              ELSE NULL END,
            completion_submitted_at = CASE WHEN $7 THEN NULL ELSE completion_submitted_at END,
+           evidence_status = CASE WHEN $7 AND evidence_status = 'Complete' THEN 'Partial' ELSE evidence_status END,
            -- The Director's wider decision surface reaches the same statuses the
            -- approve/reject route does, so the approval trail has to follow it.
            -- Otherwise a record cleared here would sit in its approver's queue
@@ -1109,7 +1140,7 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
   if (status === existing.status) {
     return res.status(400).json({ message: `This activity is already ${status}.` });
   }
-  if (!(STATUS_FLOW[existing.status] || []).includes(status)) {
+  if (!allowedNextStatuses(existing).includes(status)) {
     return res.status(400).json({ message: `A ${existing.status} activity cannot move straight to ${status}.` });
   }
   assertPlanOpen(existing);
@@ -1124,6 +1155,12 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
   const managerStart = ownsIt
     && status === 'In Progress'
     && ['Approved', 'Budget Adjusted', 'Needs Correction'].includes(existing.status);
+  // Planned work is approved when it is added to a month, before the month is
+  // confirmed. Starting it then led straight to expenses the API refuses, so
+  // the month has to be confirmed first.
+  if (managerStart && existing.plan_status === 'Draft') {
+    return res.status(409).json({ message: 'This month has not been confirmed yet. Ask the Director to confirm it before starting the work.' });
+  }
   // A record still waiting on somebody cannot be started around them.
   if (managerStart && existing.approval_required && existing.approval_status !== 'approved') {
     return res.status(403).json({ message: 'This activity has not been approved yet.' });
@@ -1160,9 +1197,14 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
              WHEN $2::text = 'Rejected' THEN $5
              WHEN $2::text = ANY($3::text[]) THEN ''
              ELSE rejection_reason END,
+           -- Reopening finished work clears its hand-back. Left set, the record
+           -- read "completion submitted" for ever and the manager could never
+           -- hand it back again.
+           completion_submitted_at = CASE WHEN $7 THEN NULL ELSE completion_submitted_at END,
+           evidence_status = CASE WHEN $7 AND evidence_status = 'Complete' THEN 'Partial' ELSE evidence_status END,
            updated_at = NOW()
        WHERE id = $1 AND status = $6::text`,
-      [existing.id, status, APPROVED_STATUSES, req.user.id, note, existing.status]
+      [existing.id, status, APPROVED_STATUSES, req.user.id, note, existing.status, existing.status === 'Completed']
     );
     if (!written.rowCount) {
       await safeRollback(client);
@@ -1211,10 +1253,15 @@ router.post('/:id/completion', asyncRoute(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
-      `UPDATE activities SET completion_submitted_at = NOW(), evidence_status = 'Complete', updated_at = NOW() WHERE id = $1`,
-      [existing.id]
+    const handedBack = await client.query(
+      `UPDATE activities SET completion_submitted_at = NOW(), evidence_status = 'Complete', updated_at = NOW()
+       WHERE id = $1 AND status = $2::text AND completion_submitted_at IS NULL`,
+      [existing.id, existing.status]
     );
+    if (!handedBack.rowCount) {
+      await safeRollback(client);
+      return res.status(409).json({ message: 'This activity changed a moment ago. Refresh and try again.' });
+    }
     await logHistory(client, existing.id, req.user, [
       { action: 'Completion submitted', field: 'completionSubmittedAt', oldValue: existing.completion_submitted_at, newValue: 'submitted for review', note }
     ]);
@@ -1490,8 +1537,50 @@ router.delete('/:id', asyncRoute(async (req, res) => {
     return res.status(403).json({ message: 'Only the Director can delete a reviewed activity.' });
   }
   assertPlanOpen(existing);
+  // Money recorded against the work is part of the month's accounts. Deleting
+  // the activity took its expenses with it by cascade, silently; it is
+  // cancelled instead, which keeps them.
+  const spent = await pool.query('SELECT COUNT(*)::int AS total FROM activity_expenses WHERE activity_id = $1', [existing.id]);
+  if (spent.rows[0].total) {
+    return res.status(409).json({ message: 'Expenses have been recorded against this activity, so it cannot be deleted. Cancel it instead.' });
+  }
   const files = await pool.query('SELECT stored_name FROM activity_evidence WHERE activity_id = $1', [existing.id]);
-  const result = await pool.query('DELETE FROM activities WHERE id = $1 RETURNING *', [existing.id]);
+
+  const client = await pool.connect();
+  let result;
+  try {
+    await client.query('BEGIN');
+    result = await client.query('DELETE FROM activities WHERE id = $1 RETURNING *', [existing.id]);
+    // A planned activity added to a confirmed month raised the month's approved
+    // allocation, so removing it lowers the allocation by the same amount and
+    // says so in the month's history -- otherwise the month kept money for work
+    // that no longer exists.
+    if (result.rowCount && existing.monthly_plan_id && existing.plan_status === 'Confirmed') {
+      const budget = round2(existing.approved_budget === null ? existing.requested_budget : existing.approved_budget);
+      const plan = await client.query(
+        `UPDATE monthly_plans SET approved_budget = GREATEST(0, approved_budget - $2), updated_at = NOW()
+         WHERE id = $1 AND status = 'Confirmed'
+         RETURNING approved_budget + $2 AS old_value, approved_budget AS new_value`,
+        [existing.monthly_plan_id, budget]
+      );
+      if (plan.rowCount && budget) {
+        await client.query(
+          `INSERT INTO monthly_plan_history (plan_id, action, field, old_value, new_value, note, actor_id, actor_name)
+           VALUES ($1, 'Approved allocation changed', 'approvedBudget', $2, $3, $4, $5, $6)`,
+          [
+            existing.monthly_plan_id, String(round2(plan.rows[0].old_value)), String(round2(plan.rows[0].new_value)),
+            `Activity deleted: ${String(existing.activity).slice(0, 200)}`, req.user.id, req.user.name
+          ]
+        );
+      }
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
   // The rows are already gone by cascade; the bytes follow. A file that cannot
   // be removed is not worth failing a completed delete over.
   await Promise.all(files.rows.map((row) => deleteFile(EVIDENCE_FOLDER, row.stored_name)));
@@ -1746,7 +1835,8 @@ router.post('/:id/expenses', asyncRoute(async (req, res) => {
     // it. A month still in Draft has no confirmed allocation yet, so there is no
     // money handed over to spend.
     if (existing.monthly_plan_id) {
-      const plan = await client.query('SELECT status FROM monthly_plans WHERE id = $1', [existing.monthly_plan_id]);
+      // Locked, so the month cannot be closed between this check and the insert.
+      const plan = await client.query('SELECT status FROM monthly_plans WHERE id = $1 FOR UPDATE', [existing.monthly_plan_id]);
       if (plan.rowCount && plan.rows[0].status === 'Closed') {
         await safeRollback(client);
         return res.status(400).json({ message: 'This month has been closed. Ask the Director to reopen it.' });

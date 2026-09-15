@@ -1304,6 +1304,15 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
 
   // The review stays open until the deletion is confirmed and done; cancelling
   // leaves the reader exactly where they were.
+  const sendDraft = act(async (activity) => {
+    setError('');
+    try {
+      await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/submit`, { method: 'PATCH' });
+      notify(t('msg.activitySubmitted'));
+      await refreshActivity(activity.id);
+    } catch (sendError) { fail(sendError.message); }
+  });
+
   const deleteActivity = act(async (activity) => {
     const confirmed = await dialog.confirm({
       title: t('msg.deleteTitle'),
@@ -1696,7 +1705,8 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
           onRemoveExpense={removeExpense}
           onRequestBudget={requestBudgetChange}
           onDecideBudget={decideBudgetRequest}
-          onDelete={isDirector ? deleteActivity : undefined}
+          onDelete={deleteActivity}
+          onSendDraft={sendDraft}
         />
       </DetailView>}
 
@@ -1724,8 +1734,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
               isDirector={isDirector}
               openId={activeRouteActivity}
               onOpen={openActivity}
-              onDelete={deleteActivity}
-              busy={actionBusy}
               empty={t('empty.noActivitiesMatch')}
             />}
         {registerPage.hasMore && <div className="load-more-row">
@@ -2105,7 +2113,7 @@ function ProjectTable({ projects, managers, isDirector, busy, onShowActivities, 
   </tbody></table></div> : <EmptyState>{empty}</EmptyState>;
 }
 
-function ActivityTable({ activities, isDirector, openId, onOpen, onDelete, busy, empty }) {
+function ActivityTable({ activities, isDirector, openId, onOpen, empty }) {
   const t = useT();
   return activities.length ? <div className="table-wrap"><table className="card-table"><thead><tr>
     <th>{t('table.activity')}</th><th>{t('table.category')}</th><th>{t('activities.originalBudget')}</th><th>{t('approval.approved')}</th><th>{t('activities.adjustment')}</th><th>{t('table.status')}</th><th>{t('field.evidence')}</th><th>{t('activities.raisedBy')}</th><th>{t('field.carriedOutBy')}</th><th>{t('table.actions')}</th>
@@ -2138,7 +2146,6 @@ function ActivityTable({ activities, isDirector, openId, onOpen, onDelete, busy,
           : <span className="muted-cell">{t('table.unassigned')}</span>}</td>
         <td className="card-actions">
           <button className="text-btn" onClick={() => onOpen(activity.id)} type="button">{isDirector ? t('approval.review') : t('action.open')}</button>
-          {isDirector && <button className="danger-btn" disabled={busy} onClick={() => onDelete(activity)} type="button">{t('action.delete')}</button>}
         </td>
       </tr>;
     })}

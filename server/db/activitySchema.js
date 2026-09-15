@@ -208,6 +208,24 @@ const statements = [
   `CREATE INDEX IF NOT EXISTS activities_deadline_idx ON activities(deadline)`,
   `CREATE INDEX IF NOT EXISTS activities_created_by_idx ON activities(created_by)`,
   `CREATE INDEX IF NOT EXISTS activity_evidence_activity_idx ON activity_evidence(activity_id, created_at DESC)`,
+  // A manager's request is carried by the manager who raised it. Requests made
+  // before that rule were left unassigned, which kept their author from
+  // recording expenses on them once approved.
+  `UPDATE activities a SET assigned_to = a.created_by, assigned_at = COALESCE(a.assigned_at, a.created_at)
+     FROM users u
+     WHERE u.id = a.created_by AND u.role = 'manager' AND a.origin = 'requested' AND a.assigned_to IS NULL`,
+  // One open budget change per activity. The API checks first, but two requests
+  // sent at the same moment both passed that check. Skipped on a database that
+  // already holds duplicates, so booting never fails on old data.
+  `DO $$
+   BEGIN
+     IF NOT EXISTS (
+       SELECT 1 FROM activity_budget_requests WHERE status = 'Pending' GROUP BY activity_id HAVING COUNT(*) > 1
+     ) THEN
+       CREATE UNIQUE INDEX IF NOT EXISTS activity_budget_requests_one_pending
+         ON activity_budget_requests(activity_id) WHERE status = 'Pending';
+     END IF;
+   END $$`,
   `CREATE INDEX IF NOT EXISTS activity_history_activity_idx ON activity_history(activity_id, created_at DESC)`
 ];
 

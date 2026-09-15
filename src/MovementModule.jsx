@@ -32,9 +32,15 @@ const STATUS_FLOW = {
   'Funds Released': ['In Progress', 'Completed', 'Cancelled'],
   'In Progress': ['Completed', 'Cancelled'],
   Completed: ['In Progress'],
-  Rejected: ['Pending Approval'],
+  Rejected: ['Pending Approval', 'Draft'],
   Cancelled: ['Pending Approval']
 };
+
+// Mirrors SELF_MOVES, FINANCE_STATUSES and DELETABLE_STATUSES in
+// server/routes/movements.js, which is what enforces them.
+const SELF_MOVES = [['Draft', 'Pending Approval'], ['Pending Approval', 'Draft'], ['Rejected', 'Draft']];
+const FINANCE_STATUSES = ['Approved', 'Funds Released', 'In Progress', 'Completed'];
+const DELETABLE_STATUSES = ['Draft', 'Pending Approval', 'Rejected', 'Cancelled'];
 
 // The key names the column; the second entry is the translation key for its
 // label, so a cost line reads in the viewer's language.
@@ -797,8 +803,16 @@ function MovementDetail({ detail, user, onOpenFile, isDirector, busy = false, on
     // buttons: while the decision is open they happen in the decision form.
     if (['Approved', 'Rejected'].includes(status) && decisionIsOpen(movement)) return false;
     if (isDirector) return true;
-    return movement.status === 'Draft' && status === 'Pending Approval' && movement.createdBy === user.id;
+    return movement.createdBy === user.id && SELF_MOVES.some(([from, to]) => movement.status === from && status === to);
   });
+  const canRecordFigures = isDirector && FINANCE_STATUSES.includes(movement.status);
+  const canDelete = isDirector && DELETABLE_STATUSES.includes(movement.status)
+    && !Number(movement.fundsReleased) && !Number(movement.actualExpense);
+  // An approval that changed the budget moves the total but not the lines it was
+  // estimated from, so the lines are shown against the approved total rather
+  // than as a sum that silently fails to add up.
+  const linesTotal = COST_LINES.reduce((sum, [key]) => sum + Number(movement.costs[key] || 0), 0);
+  const approvedDiffers = Math.round(linesTotal * 100) !== Math.round(Number(movement.estimatedTotal) * 100);
 
   return <section className="panel detail-panel">
     <div className="panel-header">
@@ -872,7 +886,8 @@ function MovementDetail({ detail, user, onOpenFile, isDirector, busy = false, on
       <thead><tr><th>{t('movement.costItem')}</th><th>{t('field.amount')}</th></tr></thead>
       <tbody>
         {COST_LINES.map(([key, labelKey]) => <tr key={key}><td>{t(labelKey)}</td><td>{formatMoney(movement.costs[key], movement.currency)}</td></tr>)}
-        <tr className="total-row"><td><strong>{t('field.total')}</strong></td><td><strong>{formatMoney(movement.estimatedTotal, movement.currency)}</strong></td></tr>
+        {approvedDiffers && <tr><td>{t('movement.estimatedLines')}</td><td>{formatMoney(linesTotal, movement.currency)}</td></tr>}
+        <tr className="total-row"><td><strong>{approvedDiffers ? t('movement.approvedTotal') : t('field.total')}</strong></td><td><strong>{formatMoney(movement.estimatedTotal, movement.currency)}</strong></td></tr>
       </tbody>
     </table></div>
     {movement.converted && <p className="detail-notes">
@@ -890,7 +905,7 @@ function MovementDetail({ detail, user, onOpenFile, isDirector, busy = false, on
       <Fact label={t('movement.evidenceStatus')} value={<span className={`status-badge ${movement.evidenceStatus === 'Complete' ? 'tone-done' : 'tone-waiting'}`}>{t(`estatus.${movement.evidenceStatus}`)}</span>} />
     </div>
 
-    {isDirector && <form className="inline-form" onSubmit={(event) => {
+    {canRecordFigures && <form className="inline-form" onSubmit={(event) => {
       event.preventDefault();
       onFinance(movement, {
         fundsReleased: Number(finance.fundsReleased) || 0,
@@ -951,13 +966,17 @@ function MovementDetail({ detail, user, onOpenFile, isDirector, busy = false, on
               ...(status === 'Funds Released' ? { fundsReleased: Number(finance.fundsReleased) || Number(movement.estimatedTotal) } : {}),
               ...(status === 'Completed' ? { actualExpense: Number(finance.actualExpense) || 0 } : {})
             })}
-          >{status === 'Pending Approval' && movement.status === 'Draft' ? t('action.submitForApproval') : `${t('action.markAs')} ${t(`status.${status}`)}`}</button>)}
+          >{status === 'Pending Approval' && movement.status === 'Draft'
+            ? t('action.submitForApproval')
+            : status === 'Draft' && !isDirector
+              ? t('action.takeBackToEdit')
+              : `${t('action.markAs')} ${t(`status.${status}`)}`}</button>)}
         </div>
       : <p className="detail-notes">{t('movement.noFurtherStatus')}</p>}
 
     <div className="button-row">
       {canEdit && <button className="secondary-btn" type="button" disabled={busy} onClick={() => onEdit(movement)}>{t('action.editMovement')}</button>}
-      {isDirector && <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onDelete(movement)}>{t('action.deleteMovement')}</button>}
+      {canDelete && <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onDelete(movement)}>{t('action.deleteMovement')}</button>}
     </div>
 
     <h3 className="form-section-title">{t('movement.historyTitle')}</h3>

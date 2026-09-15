@@ -78,10 +78,17 @@ export function isPlanManager(user, plan) {
 // Recording a spend is the manager's act on their own assigned work. The
 // Director may record one too -- correcting a manager's books is part of the
 // review -- but nobody else may, whatever the browser drew.
+//
+// The same person who may start and finish the work: its assignee, or -- for
+// work nobody was handed -- a manager of its operation. The two rules used to
+// differ, so an approved request its own manager raised could be started and
+// handed back but not spent against.
 export function canRecordExpense(user, activity) {
   if (isAdmin(user)) return true;
-  if (!activity.assigned_to || Number(activity.assigned_to) !== Number(user.id)) return false;
-  return hasFullScope(user) || (Boolean(user.sector) && activity.sector === user.sector);
+  const inScope = hasFullScope(user) || (Boolean(user.sector) && activity.sector === user.sector);
+  if (!inScope) return false;
+  if (!activity.assigned_to) return user.role === 'manager';
+  return Number(activity.assigned_to) === Number(user.id);
 }
 
 // Financial records are never deleted by the person who created them. Only the

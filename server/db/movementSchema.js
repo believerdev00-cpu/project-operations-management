@@ -166,15 +166,30 @@ const statements = [
 ];
 
 export async function migrateMovementModule(pool) {
-  // Rows predating the module carry only the estimated cost; back-fill the
-  // breakdown so "Other Expenses" accounts for the amount already recorded.
   for (const statement of statements) {
     await pool.query(statement);
   }
+  // Rows predating the module carry only the estimated cost; back-fill the
+  // breakdown so "Other Expenses" accounts for the amount already recorded.
+  //
+  // Once only. Run on every boot it also rewrote movements created since --
+  // any with no cost lines whose total was later set at approval -- quietly
+  // inventing an "Other Expenses" line on the next restart.
   await pool.query(
-    `UPDATE movements SET cost_other = cost
-     WHERE cost > 0
-       AND cost_transport = 0 AND cost_fuel = 0 AND cost_accommodation = 0
-       AND cost_meals = 0 AND cost_handling = 0 AND cost_other = 0`
+    `CREATE TABLE IF NOT EXISTS schema_markers (
+       name VARCHAR(100) PRIMARY KEY,
+       applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+     )`
   );
+  const firstTime = await pool.query(
+    "INSERT INTO schema_markers (name) VALUES ('movement-cost-backfill') ON CONFLICT (name) DO NOTHING RETURNING name"
+  );
+  if (firstTime.rowCount) {
+    await pool.query(
+      `UPDATE movements SET cost_other = cost
+       WHERE cost > 0
+         AND cost_transport = 0 AND cost_fuel = 0 AND cost_accommodation = 0
+         AND cost_meals = 0 AND cost_handling = 0 AND cost_other = 0`
+    );
+  }
 }

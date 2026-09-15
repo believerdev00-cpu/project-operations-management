@@ -32,9 +32,22 @@ const STATUS_FLOW = {
   'Funds Released': ['In Progress', 'Completed', 'Cancelled'],
   'In Progress': ['Completed', 'Cancelled'],
   Completed: ['In Progress'],
-  Rejected: ['Pending Approval'],
+  // Draft lets the person who raised a refused movement take it back, correct
+  // it and send it again, instead of waiting on the Director.
+  Rejected: ['Pending Approval', 'Draft'],
   Cancelled: ['Pending Approval']
 };
+
+// The moves the person who raised a movement makes on their own request: send
+// a draft, take back one still waiting (to correct it), and reopen a refused one
+// as a draft. Everything else is the Director's.
+const SELF_MOVES = [['Draft', 'Pending Approval'], ['Pending Approval', 'Draft'], ['Rejected', 'Draft']];
+
+// Money is recorded only on a movement that is actually going ahead.
+const FINANCE_STATUSES = ['Approved', 'Funds Released', 'In Progress', 'Completed'];
+// A movement can be deleted only before any money moved on it; after that it is
+// part of the accounts and is cancelled instead, which keeps its history.
+const DELETABLE_STATUSES = ['Draft', 'Pending Approval', 'Rejected', 'Cancelled'];
 
 // Where the bytes go is the storage adapter's business (server/uploads).
 const EVIDENCE_FOLDER = 'movements';
@@ -924,11 +937,12 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
     return res.status(400).json({ message: `A ${existing.status} movement cannot move straight to ${status}.` });
   }
 
-  // A movement officer may only submit their own draft for approval.
+  // The person who raised it may send, withdraw or reopen their own request.
+  // Before, they could only send a draft, so a submitted or refused movement
+  // left them with nothing to do.
   const selfSubmit = !isAdmin(req.user)
     && existing.created_by === req.user.id
-    && existing.status === 'Draft'
-    && status === 'Pending Approval';
+    && SELF_MOVES.some(([from, to]) => existing.status === from && status === to);
   if (!selfSubmit) requireAdmin(req.user, 'change the status of a movement');
   // Approving and refusing are decisions, not status edits: they have to name
   // their approver and be authorised against them, which is what /approval
@@ -972,7 +986,8 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
     }
   }
   if (status === 'Pending Approval' || status === 'Draft') {
-    fields.push("approval_status = 'pending'", 'approved_by = NULL', 'approved_at = NULL');
+    // The old refusal no longer describes a request that is being sent again.
+    fields.push("approval_status = 'pending'", 'approved_by = NULL', 'approved_at = NULL', "rejection_reason = ''");
   }
 
   // Funds released and the final actual expense are recorded on the transition
@@ -1079,6 +1094,9 @@ router.patch('/:id/visibility', asyncRoute(async (req, res) => {
 router.patch('/:id/finance', asyncRoute(async (req, res) => {
   const existing = await loadMovement(req.params.id, req.user);
   requireAdmin(req.user, 'record funds and final expenditure');
+  if (!FINANCE_STATUSES.includes(existing.status)) {
+    return res.status(409).json({ message: `Money can only be recorded on an approved movement, not a ${existing.status} one.` });
+  }
 
   const fields = ['updated_at = NOW()'];
   const values = [existing.id];
@@ -1132,6 +1150,11 @@ router.patch('/:id/finance', asyncRoute(async (req, res) => {
 router.delete('/:id', asyncRoute(async (req, res) => {
   const existing = await loadMovement(req.params.id, req.user);
   requireAdmin(req.user, 'delete a movement');
+  // Deleting took the whole trail with it by cascade, even on a completed trip
+  // with money released against it.
+  if (!DELETABLE_STATUSES.includes(existing.status) || Number(existing.funds_released) || Number(existing.actual_expense)) {
+    return res.status(409).json({ message: 'This movement is under way or has money recorded against it, so it cannot be deleted. Cancel it instead.' });
+  }
 
   const files = await pool.query('SELECT stored_name FROM movement_evidence WHERE movement_id = $1', [existing.id]);
   const result = await pool.query('DELETE FROM movements WHERE id = $1 RETURNING *', [existing.id]);

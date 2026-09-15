@@ -27,6 +27,7 @@ const SUITES = [
   ['translations', 'translations.test.mjs', { needsApi: false }],
   ['account security', 'account-security.test.mjs', { needsApi: true }],
   ['approval workflow', 'approval-workflow.test.mjs', { needsApi: true }],
+  ['workflow fixes', 'workflow-fixes.test.mjs', { needsApi: true }],
   ['partner access', 'partner-access.test.mjs', { needsApi: true }],
   ['monthly workflow', 'monthly-workflow.test.mjs', { needsApi: true }]
 ];

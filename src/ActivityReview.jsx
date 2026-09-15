@@ -24,10 +24,19 @@ const STATUS_FLOW = {
   'In Progress': ['Completed', 'Needs Correction', 'Budget Adjusted', 'On Hold', 'Rejected', 'Cancelled'],
   'Needs Correction': ['In Progress', 'Completed', 'Budget Adjusted', 'On Hold', 'Rejected', 'Cancelled'],
   Completed: ['In Progress', 'Needs Correction'],
-  Rejected: ['Pending Approval', 'Draft'],
-  Cancelled: ['Pending Approval', 'Draft'],
+  Rejected: ['Pending Approval'],
+  Cancelled: ['Pending Approval'],
   'On Hold': ['Pending Approval', 'Approved', 'Budget Adjusted', 'In Progress', 'Rejected', 'Cancelled']
 };
+
+// Mirrors allowedNextStatuses in server/routes/activities.js: work that never
+// needed an approval is never sent back for one, and reopens as Approved.
+function allowedNextStatuses(activity) {
+  const flow = STATUS_FLOW[activity.status] || [];
+  if (activity.approvalRequired) return flow;
+  return flow.filter((status) => status !== 'Pending Approval')
+    .concat(['Rejected', 'Cancelled'].includes(activity.status) ? ['Approved'] : []);
+}
 
 export const EVIDENCE_KINDS = ['Receipt', 'Invoice', 'Fuel Slip', 'Delivery Note', 'Payment Proof', 'Photograph', 'Other'];
 
@@ -148,7 +157,7 @@ export function canApproveRecord(user, record) {
 export function ActivityReview({
   detail, user, onOpenFile, sectorLabel, managers = [], busy = false,
   onClose, onDecision, onStatus, onAssign, onUpload, onRemoveEvidence, onSubmitCompletion, onApprove, onReject,
-  onVisibility, onRecordExpense, onRemoveExpense, onRequestBudget, onDecideBudget, onDelete
+  onVisibility, onRecordExpense, onRemoveExpense, onRequestBudget, onDecideBudget, onDelete, onSendDraft
 }) {
   const { language, t } = useI18n();
   const { activity, evidence, history, expenses = [], expenseSummary = null, budgetRequests = [] } = detail;
@@ -221,7 +230,7 @@ export function ActivityReview({
   // park or cancel it -- the API refuses anything else. It used to start on
   // Approved, so saving a note approved work over a manager's head.
   const waitingForDecision = decisionIsOpen(activity);
-  const statusOptions = [activity.status, ...(STATUS_FLOW[activity.status] || [])]
+  const statusOptions = [activity.status, ...allowedNextStatuses(activity)]
     .filter((status, index, all) => all.indexOf(status) === index)
     .filter((status) => !waitingForDecision || [activity.status, 'On Hold', 'Cancelled'].includes(status));
 
@@ -261,22 +270,32 @@ export function ActivityReview({
     || (inMyArea && (user.role === 'manager' || activity.assignedTo === user.id)));
   // Whether this user is the person the record is waiting on. The API checks
   // the same thing again before it writes anything.
-  const iAmApprover = canApproveRecord(user, activity);
+  const iAmApprover = monthOpen && canApproveRecord(user, activity);
+  // Planned work cannot start, or carry spending, until its month is confirmed.
+  const monthConfirmed = activity.planStatus !== 'Draft';
   // Only the Director may move a budget as part of a decision; a manager
   // approving work handed to them approves the figure as it stands.
   const canChangeBudget = iAmApprover && isDirector;
   // The one move a manager owns on their own work, mirroring the status route:
   // starting what has been approved.
   const canWorkOnIt = monthOpen && !isDirector && carriesIt;
-  const managerCanStart = canWorkOnIt && STARTABLE_STATUSES.includes(activity.status)
+  const managerCanStart = canWorkOnIt && monthConfirmed && STARTABLE_STATUSES.includes(activity.status)
     && (!activity.approvalRequired || activity.approvalStatus === 'approved');
   const canSubmitCompletion = monthOpen && (isDirector || carriesIt)
     && WORKABLE_STATUSES.includes(activity.status) && !activity.completionSubmittedAt;
-  // Mirrors canRecordExpense in server/lib/monthly.js, which is what decides it.
-  const canRecordExpense = (isDirector || activity.assignedTo === user.id)
+  // Mirrors canRecordExpense in server/lib/monthly.js, which is what decides it:
+  // the same person who carries the work.
+  const canRecordExpense = (isDirector || carriesIt)
     && (!activity.approvalRequired || activity.approvalStatus === 'approved')
     && !['Rejected', 'Cancelled'].includes(activity.status)
-    && activity.planStatus !== 'Closed';
+    && monthOpen && monthConfirmed;
+  // A draft is sent on by whoever wrote it, or the Director.
+  const canSendDraft = monthOpen && activity.status === 'Draft' && (isDirector || activity.createdBy === user.id);
+  // The Director may delete; the author may withdraw a request nobody has
+  // decided yet. Both mirror the delete route, which also keeps closed months.
+  const canWithdraw = !isDirector && activity.createdBy === user.id
+    && ['Draft', 'Pending Approval'].includes(activity.status) && activity.approvalStatus === 'pending';
+  const canDelete = monthOpen && onDelete && (isDirector || canWithdraw);
   const typedApprovalBudget = Number(approval.approvedBudget || 0);
   const approvalBudgetChanged = canChangeBudget && typedApprovalBudget !== activity.requestedBudget;
   const items = materialLines(activity.materials);
@@ -394,7 +413,7 @@ export function ActivityReview({
       </div>
     </form>}
 
-    {isDirector
+    {isDirector && monthOpen
       ? <form className="decision-form" onSubmit={(event) => {
         event.preventDefault();
         // Only what actually changed travels, so an untouched budget is never
@@ -443,7 +462,7 @@ export function ActivityReview({
 
     {/* Who carries the work out, by when, and on what terms. The budget is not
         reachable here; that is the decision above. */}
-    {isDirector && <form className="decision-form assignment-form" onSubmit={(event) => {
+    {isDirector && monthOpen && <form className="decision-form assignment-form" onSubmit={(event) => {
       event.preventDefault();
       onAssign(activity, assignmentChanges);
     }}>
@@ -465,10 +484,16 @@ export function ActivityReview({
         </label>
       </div>
       {!managerOptions.length && <p className="decision-hint">{t('review.noManagerCoversArea')}</p>}
-      {assignmentChanges.assignedTo !== undefined && activity.acceptedAt && <p className="decision-hint">{t('review.reassignClearsAcceptance')}</p>}
+      {/* Only an undecided hand-over moves to the new manager's queue; work
+          already accepted simply changes hands. */}
+      {assignmentChanges.assignedTo !== undefined && waitingForDecision && activity.approvalRequiredRole === 'manager' && <p className="decision-hint">{t('review.reassignClearsAcceptance')}</p>}
       <button className="secondary-btn" type="submit" disabled={busy || !hasAssignmentChanges}>{t('action.saveAssignment')}</button>
     </form>}
 
+    {canSendDraft && onSendDraft && <div className="workflow-actions button-row">
+      <button className="primary-btn" type="button" disabled={busy} onClick={() => onSendDraft(activity)}>{t('action.submitForApproval')}</button>
+    </div>}
+    {!monthConfirmed && !isDirector && carriesIt && <p className="decision-hint">{t('review.monthNotConfirmed')}</p>}
     {(managerCanStart || canSubmitCompletion) && <div className="workflow-actions button-row">
       {managerCanStart && <button className="secondary-btn" type="button" disabled={busy} onClick={() => onStatus(activity, 'In Progress')}>{t('action.startWork')}</button>}
       {canSubmitCompletion && <>
@@ -485,7 +510,9 @@ export function ActivityReview({
       {t('approval.waitingFor')} {approverName(activity, sectorLabel, t)} {t('review.waitingOnOther')}
     </p>}
     {activity.status === 'Needs Correction' && !isDirector && <p className="decision-hint">{t('review.sentBackToYou')}</p>}
-    {activity.completionSubmittedAt && activity.status !== 'Completed' && <p className="decision-hint">{t('review.completionAwaiting')}</p>}
+    {activity.completionSubmittedAt && activity.status !== 'Completed' && <p className="decision-hint">
+      {isDirector ? t('review.completionAwaiting') : t('review.completionWithDirector')}
+    </p>}
 
     {/* What leaves the organisation. An external partner assigned to this
         business operation sees an approved record unless it is switched off
@@ -515,7 +542,7 @@ export function ActivityReview({
       expenses={expenses}
       summary={expenseSummary}
       canRecord={canRecordExpense}
-      canRemove={isDirector}
+      canRemove={isDirector && monthOpen}
       busy={busy}
       // The panel hands back only the expense; the handlers also need to know
       // which activity it belongs to, exactly like the evidence handlers below.
@@ -550,7 +577,7 @@ export function ActivityReview({
       activity={activity}
       evidence={paymentEvidence}
       onOpenFile={onOpenFile}
-      canRemove={isDirector}
+      canRemove={isDirector && monthOpen}
       busy={busy}
       onRemove={(item) => onRemoveEvidence(activity, item)}
     />
@@ -567,13 +594,15 @@ export function ActivityReview({
       activity={activity}
       evidence={completionEvidence}
       onOpenFile={onOpenFile}
-      canRemove={isDirector}
+      canRemove={isDirector && monthOpen}
       busy={busy}
       onRemove={(item) => onRemoveEvidence(activity, item)}
     />
 
-    {onDelete && <div className="button-row">
-      <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onDelete(activity)}>{t('action.delete')}</button>
+    {canDelete && <div className="button-row">
+      <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onDelete(activity)}>
+        {isDirector ? t('action.delete') : t('action.withdrawRequest')}
+      </button>
     </div>}
 
     <h3 className="form-section-title">{t('review.activityHistory')}</h3>

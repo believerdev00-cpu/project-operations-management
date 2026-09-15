@@ -864,7 +864,10 @@ router.post('/:id/report', asyncRoute(async (req, res) => {
 
   // An unspent balance and an overspend both need explaining; a month that came
   // out exactly on budget does not.
-  if (remaining !== 0 && !requiredText(payload.unusedBalanceExplanation)) {
+  // Either box counts. The form offers one for the unused balance and one for
+  // budget differences, and an overspend explained in the second -- the natural
+  // place for it -- used to be refused.
+  if (remaining !== 0 && !requiredText(payload.unusedBalanceExplanation) && !requiredText(payload.budgetDifferenceExplanation)) {
     return res.status(400).json({
       message: remaining > 0
         ? 'Explain what happened to the unused balance.'
