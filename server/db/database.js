@@ -35,7 +35,10 @@ export const pool = new Pool({
   keepAliveInitialDelayMillis: 10000,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
-  max: 10
+  // A serverless instance handles one request at a time, so it needs one
+  // connection. Ten per instance would exhaust Postgres the moment a handful of
+  // instances went warm at once; a long-running server still wants the pool.
+  max: process.env.VERCEL ? 1 : 10
 });
 
 // Without a listener, an error raised on an *idle* client is an unhandled

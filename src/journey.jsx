@@ -175,7 +175,10 @@ export function goToSection(id) {
 // Offering image/* let a phone pick formats the server then refused.
 export const EVIDENCE_ACCEPT = 'image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,application/pdf';
 const ACCEPTED = new Set(EVIDENCE_ACCEPT.split(','));
-const MAX_BYTES = 10 * 1024 * 1024;
+// Mirrors MAX_EVIDENCE_BYTES in server/lib/storage.js: a serverless host caps
+// the whole request at 4.5 MB, and every upload goes through the API so the
+// record can be authorised before a byte is stored.
+const MAX_BYTES = 4 * 1024 * 1024;
 const MAX_FILES = 10;
 
 // Two ways in, because on a phone they are different jobs: "Take a photo" opens

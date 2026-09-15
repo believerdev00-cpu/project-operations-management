@@ -101,8 +101,10 @@ function mapApproval(row) {
 // app is deployed -- trusting it lets any caller write their own address into
 // the header, and a fresh fake address per guess walked straight past the login
 // limiter. So it is off unless TRUST_PROXY says how many proxies there are.
-if (process.env.TRUST_PROXY) {
-  const hops = Number(process.env.TRUST_PROXY);
+// Vercel always sits behind its own proxy, so the hop is trusted there without
+// anyone having to remember the setting.
+if (process.env.TRUST_PROXY || process.env.VERCEL) {
+  const hops = Number(process.env.TRUST_PROXY || 1);
   app.set('trust proxy', Number.isInteger(hops) ? hops : process.env.TRUST_PROXY);
 }
 

@@ -2,7 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import crypto from 'node:crypto';
 import { pool, safeRollback } from '../db/database.js';
-import { deleteFile, readFile, saveFile, storedFileName } from '../lib/storage.js';
+import { MAX_EVIDENCE_BYTES, MAX_EVIDENCE_FILES, MAX_EVIDENCE_LABEL, deleteFile, readFile, saveFile, storedFileName } from '../lib/storage.js';
 import { authMiddleware } from '../lib/auth.js';
 import {
   asyncRoute, contentDisposition, hasFullScope, isAdmin, isValidDate as isCalendarDate, parseId, requiredText,
@@ -65,7 +65,7 @@ const upload = multer({
   // Browsers send the filename as UTF-8. Busboy reads it as Latin-1 unless told
   // otherwise, which stored "Fagitire_ñ.pdf" as mojibake.
   defParamCharset: 'utf8',
-  limits: { fileSize: 10 * 1024 * 1024, files: 10 },
+  limits: { fileSize: MAX_EVIDENCE_BYTES, files: MAX_EVIDENCE_FILES },
   fileFilter: (req, file, done) => {
     if (!ALLOWED_MIME.has(file.mimetype)) {
       return done(new MovementError(400, 'Evidence must be a JPG, PNG, GIF, WEBP, HEIC image or a PDF.'));
@@ -1374,7 +1374,7 @@ router.use((error, req, res, next) => {
   }
   if (error instanceof multer.MulterError) {
     const message = error.code === 'LIMIT_FILE_SIZE'
-      ? 'Each evidence file must be 10 MB or smaller.'
+      ? `Each evidence file must be ${MAX_EVIDENCE_LABEL} or smaller.`
       : error.code === 'LIMIT_FILE_COUNT'
         ? 'Upload at most 10 evidence files at a time.'
         : 'The evidence upload was rejected.';

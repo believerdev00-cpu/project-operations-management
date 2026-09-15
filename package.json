@@ -11,7 +11,8 @@
     "preview": "vite preview",
     "start": "node server/index.js",
     "test": "node tests/run.mjs",
-    "migrate": "node server/migrate.js"
+    "migrate": "node server/migrate.js",
+    "vercel-build": "vite build && node server/migrate.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
