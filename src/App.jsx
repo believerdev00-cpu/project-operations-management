@@ -606,8 +606,11 @@ function AppShell({
       <header className="top-header">
         <div><span className="eyebrow">{eyebrow}</span><h1 id="page-title" tabIndex={-1}>{title}</h1></div>
         <div className="header-meta">
-          <span className={online ? 'connection-dot' : 'connection-dot offline'} aria-hidden="true" />
-          <span role="status">{online ? (refreshing ? t('app.refreshing') : t('app.online')) : t('app.offlineShort')}</span>
+          {/* While connected the green dot says it on its own; the word stays for
+              screen readers and as the dot's tooltip. "Updating…" and "Offline"
+              are still written out, because those are worth noticing. */}
+          <span className={online ? 'connection-dot' : 'connection-dot offline'} aria-hidden="true" title={online ? t('app.online') : t('app.offlineShort')} />
+          <span role="status" className={online && !refreshing ? 'sr-only' : undefined}>{online ? (refreshing ? t('app.refreshing') : t('app.online')) : t('app.offlineShort')}</span>
           {onRefresh && <button className="text-btn" type="button" onClick={onRefresh} disabled={refreshing}>{t('action.refresh')}</button>}
         </div>
       </header>
