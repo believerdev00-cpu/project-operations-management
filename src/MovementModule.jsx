@@ -230,7 +230,14 @@ export default function MovementModule({ user, onOpenFile, fetchJson, upload, op
       setDetail(null);
       return;
     }
+    // #/movements/new, from "New trip" on the home screen, opens the form.
+    if (openId === 'new') {
+      if (canCreate) setFormState({ mode: 'create', values: emptyForm });
+      closeRef.current?.();
+      return;
+    }
     fetchDetail(openId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openId, fetchDetail]);
 
   const openDetail = (movementId) => onOpen?.(movementId);

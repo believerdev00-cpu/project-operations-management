@@ -99,6 +99,12 @@ try {
     amount: 40, spentOn: '2026-01-10', paymentMethod: 'Cash', description: 'ZZTEST venue'
   });
   check('  the manager records an expense against it', spend.status === 201, `${spend.status} ${spend.body.message}`);
+
+  // The home screen's "Your work" tile and the list it opens use one rule.
+  const workList = await api(farming.token, '/api/activities?awaiting=work&limit=50');
+  const workCount = (await api(farming.token, '/api/summary')).body.summary.myOpenWork;
+  check('  it is in the manager\'s "Your work" list', workList.body.some((item) => item.id === request.body.id));
+  check('  and the home count matches that list', workCount === workList.body.length, `${workCount} vs ${workList.body.length}`);
   const deleteWithMoney = await api(admin, `/api/activities/${request.body.id}`, { method: 'DELETE' });
   check('an activity with expenses cannot be deleted', deleteWithMoney.status === 409, `${deleteWithMoney.status} ${deleteWithMoney.body.message}`);
 
@@ -107,6 +113,12 @@ try {
   check('  evidence is attached', await uploadEvidence(farming.token, request.body.id) === 201);
   const handBack = await post(farming.token, `/api/activities/${request.body.id}/completion`, { note: 'Done.' });
   check('the manager hands the work back', handBack.status === 200, `${handBack.status} ${handBack.body.message}`);
+  const afterHandBack = await api(farming.token, '/api/activities?awaiting=work&limit=50');
+  check('  it leaves "Your work"', !afterHandBack.body.some((item) => item.id === request.body.id));
+  const checks = await api(admin, '/api/activities?awaiting=final-check&limit=50');
+  const checkCount = (await api(admin, '/api/summary')).body.summary.finalChecksWaiting;
+  check('  it is waiting for the Director\'s final check', checks.body.some((item) => item.id === request.body.id));
+  check('  and the Director\'s home count matches that list', checkCount === checks.body.length, `${checkCount} vs ${checks.body.length}`);
   const twice = await post(farming.token, `/api/activities/${request.body.id}/completion`, {});
   check('  it cannot be handed back twice', twice.status === 409, String(twice.status));
   const completed = await patch(admin, `/api/activities/${request.body.id}/decision`, { status: 'Completed' });

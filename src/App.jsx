@@ -14,6 +14,7 @@ import {
   useHashRoute, useMediaQuery, useScrollLock
 } from './ui.jsx';
 import { activityJourney, journeyLabel, journeyTone } from './journey.jsx';
+import Home, { DecisionList } from './Home.jsx';
 
 // The category presets offered per business operation. Keep in step with
 // CATEGORIES in server/data/seedData.js, which is what the API validates
@@ -71,7 +72,9 @@ const emptyProject = { name: '', sector: 'agriculture', location: '', owner: '',
 // awaiting the Director's review, so it carries no status and no "approved"
 // tick for the requester to set. The Director instead hands work out: the last
 // three fields are theirs, and what they assign is funded from the start.
-const emptyActivity = { projectId: '', sector: 'agriculture', categoryChoice: '', category: '', activity: '', description: '', materials: '', quantity: '', costUsd: '', signed: false, assignedTo: '', deadline: '', instructions: '' };
+// Quantity starts at 1: most requests are for one thing, and it was one more
+// box every manager had to fill before the form would send.
+const emptyActivity = { projectId: '', sector: 'agriculture', categoryChoice: '', category: '', activity: '', description: '', materials: '', quantity: '1', costUsd: '', signed: false, assignedTo: '', deadline: '', instructions: '' };
 // The statuses that mean assigned work is still on the manager's desk. Closed
 // and refused records drop out of their queue.
 const OPEN_ASSIGNMENT_STATUSES = ['Pending Approval', 'Approved', 'Budget Adjusted', 'In Progress', 'Needs Correction'];
@@ -488,6 +491,8 @@ const NAV_ICON_PATHS = {
   monthly: 'M7 3v3M17 3v3M4 8h16M5 5h14v15H5V5Zm4 7h2m2 0h2m-6 4h2',
   approvals: 'M5 12l4 4L19 6',
   movements: 'M3 16V7h11v9M14 10h4l3 3v3h-7M7 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm10 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z',
+  reports: 'M5 20V10m7 10V4m7 16v-7',
+  more: 'M5 12h.01M12 12h.01M19 12h.01',
   users: 'M16 19v-1a4 4 0 0 0-8 0v1M12 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7 8v-1a3 3 0 0 0-2-2.8M17 5.2a3 3 0 0 1 0 5.6',
   partners: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm-9 9h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9Z'
 };
@@ -500,7 +505,7 @@ function NavIcon({ id }) {
 }
 
 function AppShell({
-  user, subtitle, navLabel, nav = [], activeId, onNavigate, sidebarContent, eyebrow, title,
+  user, subtitle, navLabel, nav = [], bottomNav = null, activeId, onNavigate, sidebarContent, eyebrow, title,
   badge = 0, onBadge, online, refreshing, onRefresh, onLogout, onChangePassword, accountLines = [], children
 }) {
   const { language, setLanguage, t } = useI18n();
@@ -532,8 +537,9 @@ function AppShell({
   };
 
   return <div className={`application-shell${drawerActive ? ' drawer-open' : ''}`}>
-    <header className="mobile-bar">
-      <button
+    <header className={bottomNav ? 'mobile-bar has-bottom-nav' : 'mobile-bar'}>
+      {/* With a bottom bar, "More" opens the menu, so the burger is not needed. */}
+      {!bottomNav && <button
         ref={menuButton}
         className="icon-btn menu-btn"
         type="button"
@@ -541,9 +547,9 @@ function AppShell({
         aria-expanded={drawerActive}
         aria-controls="app-sidebar"
         onClick={() => setDrawerOpen(true)}
-      ><span className="burger" aria-hidden="true"><span /><span /><span /></span></button>
+      ><span className="burger" aria-hidden="true"><span /><span /><span /></span></button>}
       <span className="mobile-title">{title}</span>
-      {badge > 0 && <button className="mobile-badge" type="button" onClick={onBadge}
+      {!bottomNav && badge > 0 && <button className="mobile-badge" type="button" onClick={onBadge}
         aria-label={fill(t('app.waitingOnYou'), { count: badge })}>{badge}</button>}
       {onRefresh && <button className="icon-btn" type="button" onClick={onRefresh} disabled={refreshing} aria-label={t('action.refresh')}>
         <span className={refreshing ? 'refresh-glyph spinning' : 'refresh-glyph'} aria-hidden="true">&#8635;</span>
@@ -563,20 +569,26 @@ function AppShell({
         <div className="brand-lockup"><img className="brand-logo" src="/logo-mark.png" alt="" /><div><strong>{t('app.name')}</strong><span>{subtitle}</span></div></div>
         <button className="icon-btn drawer-close" type="button" onClick={closeDrawer} aria-label={t('app.closeMenu')}>&times;</button>
       </div>
-      {nav.length > 0 && <>
-        <div className="sidebar-label">{t('app.workspace')}</div>
-        <nav aria-label={navLabel}>{nav.map(([id, label, count]) => <button
-          key={id}
-          className={activeId === id ? 'nav-item active' : 'nav-item'}
-          aria-current={activeId === id ? 'page' : undefined}
-          onClick={() => go(id)}
-          type="button"
-        >
-          <NavIcon id={id} />
-          <span className="nav-label">{label}</span>
-          {count > 0 && <span className="nav-badge" aria-label={fill(t('app.waitingOnYou'), { count })}>{count}</span>}
-        </button>)}</nav>
-      </>}
+      {nav.length > 0 && <nav aria-label={navLabel}>
+        {[['main', t('app.workspace')], ['more', t('nav.more')]].map(([group, groupLabel]) => {
+          const items = nav.filter((item) => (item[3] || 'main') === group);
+          if (!items.length) return null;
+          return <div key={group} className="nav-group">
+            <div className="sidebar-label">{groupLabel}</div>
+            {items.map(([id, label, count]) => <button
+              key={id}
+              className={activeId === id ? 'nav-item active' : 'nav-item'}
+              aria-current={activeId === id ? 'page' : undefined}
+              onClick={() => go(id)}
+              type="button"
+            >
+              <NavIcon id={id} />
+              <span className="nav-label">{label}</span>
+              {count > 0 && <span className="nav-badge"><span className="sr-only">{fill(t('app.waitingOnYou'), { count })}</span><span aria-hidden="true">{count}</span></span>}
+            </button>)}
+          </div>;
+        })}
+      </nav>}
       {sidebarContent}
       <div className="sidebar-bottom">
         <LanguagePicker language={language} setLanguage={setLanguage} label={t('app.language')} />
@@ -597,8 +609,29 @@ function AppShell({
           {onRefresh && <button className="text-btn" type="button" onClick={onRefresh} disabled={refreshing}>{t('action.refresh')}</button>}
         </div>
       </header>
-      <main id="main-content" className="main-content">{children}</main>
+      <main id="main-content" className={bottomNav ? 'main-content with-bottom-nav' : 'main-content'}>{children}</main>
     </div>
+
+    {/* On a phone: the everyday pages under the thumb, and More for the rest,
+        the account and the language. Hidden on wider screens by the stylesheet. */}
+    {bottomNav && <nav className="bottom-nav" aria-label={t('app.quickNavigation')}>
+      {bottomNav.map((id) => {
+        const item = nav.find(([navId]) => navId === id);
+        if (!item) return null;
+        const [, fullLabel, count, , shortLabel] = item;
+        const label = shortLabel || fullLabel;
+        return <button key={id} type="button" className={activeId === id ? 'bottom-nav-item active' : 'bottom-nav-item'}
+          aria-current={activeId === id ? 'page' : undefined} onClick={() => go(id)}>
+          <span className="bottom-nav-icon"><NavIcon id={id} />{count > 0 && <span className="bottom-nav-badge" aria-hidden="true">{count}</span>}</span>
+          <span className="bottom-nav-label">{label}{count > 0 && <span className="sr-only"> {fill(t('app.waitingOnYou'), { count })}</span>}</span>
+        </button>;
+      })}
+      <button ref={menuButton} type="button" className={drawerActive || !bottomNav.includes(activeId) ? 'bottom-nav-item active' : 'bottom-nav-item'}
+        aria-expanded={drawerActive} aria-controls="app-sidebar" onClick={() => setDrawerOpen(true)}>
+        <span className="bottom-nav-icon"><NavIcon id="more" /></span>
+        <span className="bottom-nav-label">{t('nav.more')}</span>
+      </button>
+    </nav>}
   </div>;
 }
 
@@ -748,19 +781,36 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // comes from the API's own count of the same predicate the queue runs, so the
   // two can never drift apart.
   const approvalCount = summary.summary?.approvalsAwaitingMe ?? approvalQueue.total ?? 0;
+  // Five things people use every day, and the rest under "More". Nine items at
+  // one level, with two of them both called some form of "approvals", was the
+  // first thing the client found confusing. Only people who approve anything --
+  // the Director and managers -- get the approvals page at all.
+  const approves = isDirector || isManager;
   const navItems = [
-    ['dashboard', t('nav.dashboard')],
-    ['approval-queue', t('nav.approvalQueue'), approvalCount],
-    ['projects', t('nav.projects')], ['activities', t('nav.activities')],
-    ['monthly', t('nav.monthlyPlans')],
-    ['approvals', t('nav.approvals')], ['movements', operationName('movement', language)],
-    ...(isDirector ? [['users', t('nav.users')], ['partners', t('nav.partners')]] : [])
+    // The fifth entry is the short name used in the phone's bottom bar.
+    ['dashboard', t('nav.home'), 0, 'main', t('nav.home')],
+    ...(approves ? [['approval-queue', t('nav.approvalQueue'), approvalCount, 'main', t('nav.shortApprovals')]] : []),
+    ['activities', t('nav.activities'), 0, 'main', t('nav.activities')],
+    ['monthly', t('nav.monthlyPlans'), 0, 'main', t('nav.shortBudget')],
+    ['movements', operationName('movement', language), 0, 'main', t('nav.shortTrips')],
+    ['reports', t('nav.reports'), 0, 'more'],
+    ['projects', t('nav.projects'), 0, 'more'],
+    ['approvals', t('nav.approvals'), 0, 'more'],
+    ...(isDirector ? [['users', t('nav.users'), 0, 'more'], ['partners', t('nav.partners'), 0, 'more']] : [])
   ];
+  // The bar along the bottom of a phone: four pages and More. Someone who works
+  // in Movements & Facilitation gets their trips there instead of activities.
+  const tripsFirst = !isDirector && !user.coversAllSectors && user.sector === 'movement';
+  const bottomNav = approves
+    ? ['dashboard', 'approval-queue', tripsFirst ? 'movements' : 'activities', 'monthly']
+    : ['dashboard', 'activities', 'monthly', 'movements'];
   // An address naming a page this account does not have -- a manager following
-  // a Director's link to #/users -- lands on the dashboard instead of a blank page.
+  // a Director's link to #/users -- lands on the home page instead of a blank page.
   const view = navItems.some(([id]) => id === route.view) ? route.view : 'dashboard';
   const routeId = route.id;
-  const activeRouteActivity = view === 'activities' ? routeId : null;
+  // #/activities/new is the add form, not a record called "new".
+  const creatingActivity = view === 'activities' && routeId === 'new' && canAddActivity;
+  const activeRouteActivity = view === 'activities' && routeId !== 'new' ? routeId : null;
   const currentActivityRoute = useRef(activeRouteActivity);
   currentActivityRoute.current = activeRouteActivity;
 
@@ -846,6 +896,8 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const registerQuery = useMemo(() => {
     const params = new URLSearchParams({ paged: '1' });
     if (activityStatusFilter === 'Awaiting review') params.set('awaiting', 'review');
+    else if (activityStatusFilter === 'My work') params.set('awaiting', 'work');
+    else if (activityStatusFilter === 'Final check') params.set('awaiting', 'final-check');
     else if (activityStatusFilter === 'Assigned to me') params.set('assignedTo', 'me');
     else if (activityStatusFilter !== 'All') params.set('status', activityStatusFilter);
     if (selectedProjectId) params.set('projectId', selectedProjectId);
@@ -977,12 +1029,14 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     ]);
   };
 
-  // Arriving from "Assign activity" on the dashboard goes straight to the form.
+  // A home tile opens the register already filtered to what it counted:
+  // #/activities?filter=work or ?filter=final-check.
+  const filterFromAddress = view === 'activities' ? route.query.get('filter') : null;
   useEffect(() => {
-    if (view !== 'activities' || !route.query.get('new')) return;
+    if (!filterFromAddress) return;
+    setActivityStatusFilter(filterFromAddress === 'work' ? 'My work' : filterFromAddress === 'final-check' ? 'Final check' : 'All');
     navigate(buildHash('activities'), { replace: true });
-    requestAnimationFrame(() => document.getElementById('activity-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
-  }, [view, route.query, navigate]);
+  }, [filterFromAddress, navigate]);
 
   // ---- actions ------------------------------------------------------------------
   // Every change goes through runAction, so a second click while the first is
@@ -1662,7 +1716,10 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   ];
 
   const pageTitle = navItems.find(([id]) => id === view)?.[1];
-  const go = (id) => navigate(buildHash(id));
+  const go = (id, filter) => navigate(filter ? `${buildHash(id)}?filter=${encodeURIComponent(filter)}` : buildHash(id));
+  const addActivity = () => navigate(buildHash('activities', 'new'));
+  const coversMovements = Boolean(user.coversAllSectors) || user.sector === 'movement';
+  const canAddMovement = isDirector || (isManager && coversMovements);
   // Stable, because the modules key their loading effects on them.
   const openPlanRoute = useCallback((planId) => navigate(buildHash('monthly', planId)), [navigate]);
   const closePlanRoute = useCallback(() => navigate(buildHash('monthly')), [navigate]);
@@ -1682,55 +1739,25 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       <button className="primary-btn" type="button" onClick={() => { setLoadState('loading'); loadData(); }}>{t('action.retry')}</button>
     </div>;
   } else if (view === 'dashboard') {
-    content = <>
-      <section className="welcome-strip"><div><span className="eyebrow">{t('dash.systemOverview')}</span><h2>{t('dash.headline')}</h2><p>{t('dash.blurb')}</p></div>{canAddActivity && <button className="primary-btn" type="button" onClick={() => navigate(`${buildHash('activities')}?new=1`)}>{isDirector ? t('action.assignActivity') : t('action.raiseActivity')}</button>}</section>
-      <div className={`metric-grid${dashboardMetrics.length === 5 ? ' metric-grid-5' : ''}`}>
-        {dashboardMetrics.map(([label, value]) => <Metric key={label} label={label} value={value} />)}
-      </div>
-      {/* The decisions this account is personally holding up. First on the
-          dashboard because nothing else moves until they are taken. */}
-      <Panel
-        title={t('approval.queueTitle')}
-        subtitle={approvalCount ? `${approvalCount} · ${t('approval.queueBlurb')}` : t('approval.queueEmpty')}
-        action={t('action.openQueue')}
-        onAction={() => go('approval-queue')}
-      >
-        {issues.queue
-          ? <LoadIssue onRetry={loadData} />
-          : <ApprovalQueueTable
-            items={[...approvalQueue.activities, ...approvalQueue.movements].slice(0, 6)}
-            onOpen={openQueueItem}
-            onDecide={decideFromQueue}
-            busy={actionBusy}
-            empty={t('approval.queueEmpty')}
-          />}
-      </Panel>
-      {/* A manager's own queue: what the Director handed them, soonest
-          deadline first, so nothing is accepted late or quietly forgotten. */}
-      {!isDirector && <Panel
-        title={t('panel.workAssignedToYou')}
-        subtitle={`${myAssignments.length} · ${t('nav.activities')}`}
-        action={t('action.openRegister')}
-        onAction={() => { setActivityStatusFilter('Assigned to me'); go('activities'); }}
-      >
-        <AssignmentQueue activities={myAssignments.slice(0, 6)} onOpen={openActivity} empty={t('empty.nothingAssigned')} />
-      </Panel>}
-      {/* A request submitted by a manager lands here the moment it is
-          raised, so nothing sits unnoticed in the register. */}
-      <Panel
-        title={isDirector ? t('panel.awaitingYourReview') : t('panel.awaitingDirector')}
-        subtitle={`${summary.summary?.activityReviewsPending || 0} · ${summary.summary?.completionsAwaitingReview || 0} ${t('activities.completionSubmitted')} · ${summary.summary?.budgetChangesPending || 0} ${t('budget.changesPending')}`}
-        action={t('action.openRegister')}
-        onAction={() => go('activities')}
-      >
-        <ReviewQueue activities={reviewQueue.slice(0, 6)} onOpen={openActivity} empty={isDirector ? t('empty.nothingWaiting') : t('empty.noneOfYours')} />
-      </Panel>
-      {(summary.sectorBreakdown || []).length > 1 && <Panel title={t('panel.operationsOverview')} subtitle={t('panel.operationsOverviewBlurb')}><SectorBoard rows={summary.sectorBreakdown} onSelect={(sector) => { setSectorFilter(sector); go('projects'); }} /></Panel>}
-      <div className="dashboard-columns">
-        <Panel title={t('panel.projects')} action={t('action.viewAll')} onAction={() => go('projects')}><ProjectPreview projects={projects.slice(0, 5)} empty={t('empty.noProjects')} /></Panel>
-        <Panel title={t('panel.pendingApprovals')} action={t('approval.review')} onAction={() => go('approvals')}><ApprovalPreview approvals={pendingApprovals.slice(0, 5)} empty={t('empty.noPendingApprovals')} /></Panel>
-      </div>
-    </>;
+    content = <Home
+      user={user}
+      summary={summary.summary}
+      sectorRows={summary.sectorBreakdown}
+      approvalItems={issues.queue ? [] : [...approvalQueue.activities, ...approvalQueue.movements]}
+      approvalCount={approvalCount}
+      fetchJson={fetchJson}
+      reloadKey={summary}
+      canAddActivity={canAddActivity}
+      canAddMovement={canAddMovement}
+      busy={actionBusy}
+      onGo={go}
+      onAddActivity={addActivity}
+      onAddMovement={() => navigate(buildHash('movements', 'new'))}
+      onOpenActivity={openActivity}
+      onOpenQueueItem={openQueueItem}
+      onDecide={decideFromQueue}
+      onOpenPlan={openPlanRoute}
+    />;
   } else if (view === 'approval-queue') {
     content = <>
       <section className="welcome-strip">
@@ -1740,14 +1767,15 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
           <p>{t('approval.queueBlurb')} {t('approval.onlyYou')}</p>
         </div>
       </section>
-      {issues.queue ? <Panel title={t('approval.queueTitle')}><LoadIssue onRetry={loadData} /></Panel> : <>
-        <Panel title={t('approval.activitiesWaiting')} subtitle={`${approvalQueue.activities.length}`}>
-          <ApprovalQueueTable items={approvalQueue.activities} onOpen={openQueueItem} onDecide={decideFromQueue} busy={actionBusy} empty={t('approval.queueEmpty')} />
-        </Panel>
-        <Panel title={t('approval.movementsWaiting')} subtitle={`${approvalQueue.movements.length}`}>
-          <ApprovalQueueTable items={approvalQueue.movements} onOpen={openQueueItem} onDecide={decideFromQueue} busy={actionBusy} empty={t('approval.queueEmpty')} />
-        </Panel>
-      </>}
+      {issues.queue
+        ? <Panel title={t('approval.queueTitle')}><LoadIssue onRetry={loadData} /></Panel>
+        : <DecisionList
+          items={[...approvalQueue.activities, ...approvalQueue.movements]}
+          onOpen={openQueueItem}
+          onDecide={decideFromQueue}
+          busy={actionBusy}
+          empty={t('approval.queueEmpty')}
+        />}
     </>;
   } else if (view === 'projects') {
     content = <>
@@ -1769,8 +1797,27 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     content = <>
       <section className="context-strip">
         <div><span className="eyebrow">{t('activities.eyebrow')}</span><h2>{t('activities.title')}</h2><p>{isDirector ? t('activities.directorBlurb') : t('activities.managerBlurb')}</p></div>
-        {canAddActivity && <button className="primary-btn" type="button" onClick={() => document.getElementById('activity-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>{isDirector ? t('action.assignActivity') : t('action.raiseActivity')}</button>}
+        {canAddActivity && <button className="primary-btn" type="button" onClick={addActivity}>{isDirector ? t('action.assignActivity') : t('action.raiseActivity')}</button>}
       </section>
+
+      {creatingActivity && <DetailView onClose={closeActivity} label={isDirector ? t('action.assignActivity') : t('action.raiseActivity')}>
+        <ActivityForm
+          form={activityForm} setForm={setActivityForm} projects={projects} onChooseProject={chooseFormProject}
+          selectedProject={formProject} sectorOptions={sectorOptions} managers={managers}
+          isDirector={isDirector} usd={usd} rate={rate} busy={actionBusy}
+          onCancel={closeActivity}
+          onSubmit={(event) => {
+            const { categoryChoice, ...payload } = activityForm;
+            return submit(
+              event, '/api/activities',
+              { ...payload, costRwf: round2(usd * rate.rwfPerUsd), costCdf: round2(usd * rate.cdfPerUsd) },
+              isDirector ? t('msg.activityAssigned') : t('msg.activitySubmitted'),
+              (result) => { setActivityForm({ ...emptyActivity, projectId: result.projectId, sector: result.sector }); },
+              (result) => navigate(buildHash('activities', result.id), { replace: true })
+            );
+          }}
+        />
+      </DetailView>}
 
       {activityDetail && activeRouteActivity && activityDetail.activity.id === activeRouteActivity && <DetailView onClose={closeActivity} label={activityDetail.activity.activity}>
         <ActivityReview
@@ -1806,6 +1853,8 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         <label className="sr-only" htmlFor="activity-status-filter">{t('table.status')}</label>
         <select id="activity-status-filter" value={activityStatusFilter} onChange={(event) => setActivityStatusFilter(event.target.value)}>
           <option value="All">{t('form.allStatuses')}</option>
+          {!isDirector && <option value="My work">{t('home.tileWork')}</option>}
+          <option value="Final check">{t('home.tileChecks')}</option>
           <option value="Awaiting review">{t('activities.awaitingReview')}</option>
           {!isDirector && <option value="Assigned to me">{t('activities.assignedToMe')}</option>}
           {ACTIVITY_STATUSES.map((status) => <option key={status} value={status}>{t(`status.${status}`)}</option>)}
@@ -1835,21 +1884,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         </div>}
       </Panel>
 
-      {canAddActivity && <ActivityForm
-        form={activityForm} setForm={setActivityForm} projects={projects} onChooseProject={chooseFormProject}
-        selectedProject={formProject} sectorOptions={sectorOptions} managers={managers}
-        isDirector={isDirector} usd={usd} rate={rate} busy={actionBusy}
-        onSubmit={(event) => {
-          const { categoryChoice, ...payload } = activityForm;
-          return submit(
-            event, '/api/activities',
-            { ...payload, costRwf: round2(usd * rate.rwfPerUsd), costCdf: round2(usd * rate.cdfPerUsd) },
-            isDirector ? t('msg.activityAssigned') : t('msg.activitySubmitted'),
-            (result) => { setActivityForm({ ...emptyActivity, projectId: result.projectId, sector: result.sector }); },
-            (result) => openActivity(result.id)
-          );
-        }}
-      />}
+    </>;
+  } else if (view === 'reports') {
+    content = <>
       <ReportsSection
         mode={reportMode}
         range={reportRange}
@@ -1955,6 +1992,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     subtitle={t('app.subtitle')}
     navLabel={t('app.mainNavigation')}
     nav={navItems}
+    bottomNav={bottomNav}
     activeId={view}
     onNavigate={go}
     eyebrow={t('app.operationsControl')}
@@ -2069,108 +2107,6 @@ function UserTable({ users, managers, currentUserId, busy, onChangeManager, onCh
 
 function Metric({ label, value }) { return <div className="metric-card"><span>{label}</span><strong>{value}</strong></div>; }
 
-function ReviewQueue({ activities, onOpen, empty }) {
-  const t = useT();
-  return activities.length ? <div className="preview-list">{activities.map((activity) => <div className="preview-row review-row" key={activity.id} {...rowActivation(() => onOpen(activity.id))}>
-    <div>
-      <strong>{sectorName(activity.sector)} &mdash; {activity.activity}</strong>
-      <span>{activity.createdByName || '—'} &middot; {formatUsd(activity.requestedBudget)} &middot; {formatShortDate(activity.createdAt)}</span>
-    </div>
-    <span className={`status-badge ${statusTone(activity.status)}`}>{activity.status === 'Pending Approval'
-      ? t('activities.needsDecision')
-      : activity.completionSubmittedAt && activity.status !== 'Completed'
-        ? t('activities.completionSubmitted')
-        : t('budget.changeRequested')}</span>
-  </div>)}</div> : <EmptyState>{empty}</EmptyState>;
-}
-
-// The manager's side of the same queue: what they were handed, what it is
-// worth, and how its deadline stands. Work not yet accepted is called out,
-// because accepting it is the one move only they can make.
-function AssignmentQueue({ activities, onOpen, empty }) {
-  const t = useT();
-  return activities.length ? <div className="preview-list">{activities.map((activity) => {
-    const due = deadlineNote(activity, displayLanguage());
-    return <div className="preview-row review-row" key={activity.id} {...rowActivation(() => onOpen(activity.id))}>
-      <div>
-        <strong>{sectorName(activity.sector)} &mdash; {activity.activity}</strong>
-        <span>
-          {formatUsd(activity.approvedBudget === null ? activity.requestedBudget : activity.approvedBudget)}
-          {' '}&middot; {activity.deadline ? formatDate(activity.deadline) : t('review.noDeadline')}
-          {due && due.tone !== 'ok' ? ` · ${due.text}` : ''}
-        </span>
-      </div>
-      <span className={`status-badge ${statusTone(activity.status)}`}>{activity.status === 'Pending Approval' ? t('activities.approveIt') : t(`status.${activity.status}`)}</span>
-    </div>;
-  })}</div> : <EmptyState>{empty}</EmptyState>;
-}
-
-// "What I Need to Approve", as rows. Takes activities and movements alike --
-// the two carry the same approval fields, so one table reads both.
-//
-// Every row states who must approve it, so an approval is never presented as a
-// bare "Pending" with nobody attached. Review / Approve / Reject are the only
-// actions offered, and each one is checked again by the API.
-function ApprovalQueueTable({ items, onOpen, onDecide, busy, empty }) {
-  const t = useT();
-  if (!items.length) return <EmptyState>{empty}</EmptyState>;
-  return <div className="table-wrap"><table className="approval-queue-table card-table"><thead><tr>
-    <th>{t('table.activityMovement')}</th><th>{t('table.createdBy')}</th><th>{t('table.assignedTo')}</th><th>{t('table.department')}</th>
-    <th>{t('table.budget')}</th><th>{t('table.date')}</th><th>{t('approval.status')}</th><th>{t('table.actions')}</th>
-  </tr></thead><tbody>
-    {items.map((item) => {
-      const isMovement = Boolean(item.ref);
-      const title = isMovement ? `${item.ref} — ${item.purpose}` : item.activity;
-      const detail = isMovement
-        ? `${t(`mtype.${item.movementType}`)} · ${item.origin || '—'} → ${item.destination}`
-        : (item.description || t('review.noDescription'));
-      const budget = isMovement
-        ? `${item.currency} ${formatNumber(item.estimatedTotal)}`
-        : formatUsd(item.approvedBudget === null ? item.requestedBudget : item.approvedBudget);
-      const carrier = isMovement
-        ? (item.assignedToName || item.personTeam || null)
-        : item.assignedToName;
-      return <tr key={`${isMovement ? 'mov' : 'act'}-${item.id}`}>
-        <td className="card-title-cell"><strong>{title}</strong><small>{detail}</small></td>
-        <td data-label={t('table.createdBy')}>{item.createdByName || <span className="muted-cell">&mdash;</span>}</td>
-        <td data-label={t('table.assignedTo')}>{carrier || <span className="muted-cell">{t('table.unassigned')}</span>}</td>
-        <td data-label={t('table.department')}>{sectorName(item.department || item.sector)}</td>
-        <td data-label={t('table.budget')}>{budget}</td>
-        <td data-label={t('table.date')}>{formatShortDate(item.createdAt)}</td>
-        <td data-label={t('approval.status')}>
-          <span className={`status-badge ${approvalTone(item.approvalStatus)}`}>
-            {t(`approval.${item.approvalStatus}`)}
-          </span>
-          <small className="awaiting-flag">{t('approval.waitingFor')} {approverName(item, sectorName, t)}</small>
-        </td>
-        <td className="queue-actions card-actions">
-          <button className="text-btn" type="button" onClick={() => onOpen(item)}>{t('approval.review')}</button>
-          <button className="primary-btn compact" type="button" disabled={busy} onClick={() => onDecide(item, 'approve')}>{t('approval.approve')}</button>
-          <button className="danger-btn outlined compact" type="button" disabled={busy} onClick={() => onDecide(item, 'reject')}>{t('approval.reject')}</button>
-        </td>
-      </tr>;
-    })}
-  </tbody></table></div>;
-}
-
-function SectorBoard({ rows, onSelect }) {
-  const t = useT();
-  return <div className="table-wrap"><table className="sector-board card-table"><thead><tr><th>{t('app.businessOperation')}</th><th>{t('field.projects')}</th><th>{t('nav.activities')}</th><th>{t('portal.inProgress')}</th><th>{t('portal.completed')}</th><th>{t('metric.pendingApprovals')}</th><th>{t('field.budget')}</th><th>{t('field.spent')}</th><th>{t('report.remainingBudget')}</th><th>{t('table.progress')}</th></tr></thead><tbody>
-    {rows.map((row) => <tr key={row.id} {...rowActivation(() => onSelect(row.id))}>
-      <td className="card-title-cell"><strong>{sectorName(row.id)}</strong></td>
-      <td data-label={t('field.projects')}>{row.projects}</td>
-      <td data-label={t('nav.activities')}>{row.activities}</td>
-      <td data-label={t('portal.inProgress')}>{row.activeActivities}</td>
-      <td data-label={t('portal.completed')}>{row.completedActivities}</td>
-      <td data-label={t('metric.pendingApprovals')}>{row.approvalsPending ? <span className="priority-badge">{row.approvalsPending}</span> : <span className="muted-cell">{t('table.none')}</span>}</td>
-      <td data-label={t('field.budget')}>{formatRwf(row.budget)}</td>
-      <td data-label={t('field.spent')}>{formatRwf(row.spent)}</td>
-      <td data-label={t('report.remainingBudget')} className={row.remaining < 0 ? 'over-budget' : undefined}>{formatRwf(row.remaining)}</td>
-      <td data-label={t('table.progress')}><div className="progress-meter"><span style={{ width: `${Math.max(0, Math.min(100, row.progress))}%` }} /></div><small>{row.progress}%</small></td>
-    </tr>)}
-  </tbody></table></div>;
-}
-
 function Panel({ title, subtitle, action, onAction, children }) { return <section className="panel"><div className="panel-header"><div><h2>{title}</h2>{subtitle && <span>{subtitle}</span>}</div>{action && <button className="text-btn" onClick={onAction} type="button">{action} &rarr;</button>}</div>{children}</section>; }
 // The empty-state message on its own. It used to add "There is no data to
 // display yet." under every one, which contradicted "No activities match the
@@ -2183,8 +2119,6 @@ function StageBadge({ activity }) {
   const journey = activityJourney(activity);
   return <span className={`status-badge ${journeyTone(journey)}`}>{journeyLabel(journey, t)}</span>;
 }
-function ProjectPreview({ projects, empty }) { const t = useT(); return projects.length ? <div className="preview-list">{projects.map((project) => <div className="preview-row" key={project.id}><div><strong>{project.name}</strong><span>{project.location} &middot; {project.category || t('activities.notDecided')}</span></div><span className="status-badge">{t(`status.${project.status}`)}</span></div>)}</div> : <EmptyState>{empty}</EmptyState>; }
-function ApprovalPreview({ approvals, empty }) { const t = useT(); return approvals.length ? <div className="preview-list">{approvals.map((approval) => <div className="preview-row" key={approval.id}><div><strong>{approval.title}</strong><span>{approval.owner} &middot; {formatRwf(approval.amount)}</span></div><span className="priority-badge">{t(`form.priority${approval.priority}`)}</span></div>)}</div> : <EmptyState>{empty}</EmptyState>; }
 
 // Delete and the manager picker are the Director's; the API refuses anyone else,
 // so a manager is no longer shown controls that could only ever fail.
@@ -2218,17 +2152,17 @@ function ProjectTable({ projects, managers, isDirector, busy, onShowActivities, 
 function ActivityTable({ activities, isDirector, openId, onOpen, empty }) {
   const t = useT();
   return activities.length ? <div className="table-wrap"><table className="card-table"><thead><tr>
-    <th>{t('table.activity')}</th><th>{t('table.category')}</th><th>{t('activities.originalBudget')}</th><th>{t('approval.approved')}</th><th>{t('activities.adjustment')}</th><th>{t('table.status')}</th><th>{t('field.evidence')}</th><th>{t('activities.raisedBy')}</th><th>{t('field.carriedOutBy')}</th><th>{t('table.actions')}</th>
+    <th>{t('table.activity')}</th><th>{t('table.category')}</th><th>{t('activities.originalBudget')}</th><th>{t('approval.approved')}</th><th>{t('activities.adjustment')}</th><th>{t('table.status')}</th><th>{t('field.evidence')}</th><th>{t('people.requestedBy')}</th><th>{t('people.assignedTo')}</th><th>{t('table.actions')}</th>
   </tr></thead><tbody>
     {activities.map((activity) => {
       const awaiting = activity.status === 'Pending Approval' || (activity.completionSubmittedAt && activity.status !== 'Completed');
       const due = deadlineNote(activity, displayLanguage());
       return <tr key={activity.id} className={activity.id === openId ? 'row-selected' : undefined}>
         <td className="card-title-cell"><strong>{activity.activity}</strong><small>{activity.description || t('review.noDescription')}</small></td>
-        <td data-label={t('table.category')}>{categoryLabel(activity.category, t)}</td>
-        <td data-label={t('activities.originalBudget')}>{formatUsd(activity.requestedBudget)}</td>
-        <td data-label={t('approval.approved')}>{activity.approvedBudget === null ? <span className="muted-cell">{t('activities.notDecided')}</span> : formatUsd(activity.approvedBudget)}</td>
-        <td data-label={t('activities.adjustment')} className={activity.budgetAdjustment ? 'over-budget' : undefined}>
+        <td className="card-optional" data-label={t('table.category')}>{categoryLabel(activity.category, t)}</td>
+        <td className="card-optional" data-label={t('activities.originalBudget')}>{formatUsd(activity.requestedBudget)}</td>
+        <td data-label={t('approval.approved')}>{activity.approvedBudget === null ? <span className="muted-cell">{fill(t('activities.askedForAmount'), { amount: formatUsd(activity.requestedBudget) })}</span> : formatUsd(activity.approvedBudget)}</td>
+        <td data-label={t('activities.adjustment')} className={activity.budgetAdjustment ? 'card-optional over-budget' : 'card-optional'}>
           {activity.budgetAdjustment ? `${activity.budgetAdjustment > 0 ? '+' : ''}${formatUsd(activity.budgetAdjustment)}` : <span className="muted-cell">&mdash;</span>}
         </td>
         {/* A pending record always names the person it is pending on, so the
@@ -2237,11 +2171,11 @@ function ActivityTable({ activities, isDirector, openId, onOpen, empty }) {
           {activity.approvalRequired && activity.approvalStatus === 'pending' && !['Draft', 'Cancelled', 'On Hold'].includes(activity.status)
             ? <small className="awaiting-flag">{t('approval.waitingFor')} {approverName(activity, sectorName, t)}</small>
             : awaiting && <small className="awaiting-flag">{t('activities.completionSubmitted')}</small>}</td>
-        <td data-label={t('field.evidence')}>{activity.evidenceCount ? `${activity.evidenceCount} × ${t('field.file')}` : <span className="muted-cell">{t('table.none')}</span>}</td>
-        <td data-label={t('activities.raisedBy')}>{activity.createdByName || <span className="muted-cell">&mdash;</span>}</td>
+        <td className="card-optional" data-label={t('field.evidence')}>{activity.evidenceCount ? `${activity.evidenceCount} × ${t('field.file')}` : <span className="muted-cell">{t('table.none')}</span>}</td>
+        <td className="card-optional" data-label={t('people.requestedBy')}>{activity.createdByName || <span className="muted-cell">&mdash;</span>}</td>
         {/* Who the work sits with, and how its deadline stands. An overdue
             record is flagged here, not only inside the review screen. */}
-        <td data-label={t('field.carriedOutBy')}>{activity.assignedToName
+        <td data-label={t('people.assignedTo')}>{activity.assignedToName
           ? <><strong>{activity.assignedToName}</strong>{activity.deadline && <small className={due && due.tone !== 'ok' ? `deadline-flag deadline-${due.tone}` : undefined}>
             {formatDate(activity.deadline)}{due && due.tone !== 'ok' ? ` · ${due.text}` : ''}
           </small>}</>
@@ -2327,7 +2261,7 @@ function ProjectForm({ form, setForm, managers, busy, onSubmit }) {
 // needs, which the Director then decides; the Director fills it to hand work
 // out, and the three fields at the end -- who carries it out, by when, and on
 // what terms -- are theirs alone.
-function ActivityForm({ form, setForm, projects, selectedProject, sectorOptions, managers, isDirector, usd, rate, busy, onChooseProject, onSubmit }) {
+function ActivityForm({ form, setForm, projects, selectedProject, sectorOptions, managers, isDirector, usd, rate, busy, onChooseProject, onSubmit, onCancel }) {
   const t = useT();
   // A manager only ever reads their own working area, so only the managers who
   // cover the chosen area can be handed the work. The API refuses the rest.
@@ -2353,17 +2287,12 @@ function ActivityForm({ form, setForm, projects, selectedProject, sectorOptions,
         {' '}{isDirector ? t('form.goesToManager') : t('form.submittedToDirector')}
       </span>
     </div></div>
+    {/* The four things every request needs first; where it belongs and the
+        longer explanations follow. A manager with one project and one operation
+        is never asked to choose them. */}
     <div className="form-grid activity-grid">
-      <Field label={t('field.project')}>
-        <select required value={form.projectId} onChange={(event) => onChooseProject(event.target.value)}>
-          <option value="">{t('form.selectProject')}</option>
-          {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-        </select>
-      </Field>
-      <Field label={t('field.workingArea')}>
-        <select required value={form.sector} onChange={(event) => setForm({ ...form, sector: event.target.value, categoryChoice: '', category: '', assignedTo: '' })}>
-          {sectorOptions.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}
-        </select>
+      <Field label={t('field.activity')} wide>
+        <input required maxLength="200" placeholder={t('form.activityPlaceholder')} value={form.activity} onChange={(event) => setForm({ ...form, activity: event.target.value })} />
       </Field>
       <Field label={t('field.category')}>
         <select required value={form.categoryChoice} onChange={(event) => { const choice = event.target.value; setForm({ ...form, categoryChoice: choice, category: choice === OTHER_CATEGORY ? '' : choice }); }}>
@@ -2375,25 +2304,26 @@ function ActivityForm({ form, setForm, projects, selectedProject, sectorOptions,
       {form.categoryChoice === OTHER_CATEGORY && <Field label={t('field.specifyCategory')}>
         <input required maxLength="100" value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} />
       </Field>}
-      <Field label={t('field.activity')}>
-        <input required maxLength="200" value={form.activity} onChange={(event) => setForm({ ...form, activity: event.target.value })} />
-      </Field>
-      <Field label={t('field.description')}>
-        <input placeholder={isDirector ? t('form.whatWorkInvolves') : t('form.whyWorkNeeded')} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
-      </Field>
-      <Field label={isDirector ? t('form.materialsToBuy') : t('form.materialsRequested')}>
-        <textarea rows="3" placeholder={t('form.onePerLine')} value={form.materials} onChange={(event) => setForm({ ...form, materials: event.target.value })} />
+      <Field label={isDirector ? t('form.budgetUsd') : t('form.requestedBudgetUsd')}>
+        <input required type="number" inputMode="decimal" min="0" step="0.01" placeholder={isDirector ? t('form.amountReleased') : t('form.amountNeeded')} value={form.costUsd} onChange={(event) => setForm({ ...form, costUsd: event.target.value })} />
+        {/* At the Director's current reference rate, the same one the Movements
+            module uses -- not a figure fixed in the code. */}
+        {usd > 0 && <small className="field-hint">≈ RWF {formatNumber(round2(usd * rate.rwfPerUsd))} · CDF {formatNumber(round2(usd * rate.cdfPerUsd))}</small>}
       </Field>
       <Field label={t('field.quantity')}>
         <input required type="number" inputMode="decimal" min="0.01" step="0.01" value={form.quantity} onChange={(event) => setForm({ ...form, quantity: event.target.value })} />
       </Field>
-      <Field label={isDirector ? t('form.budgetUsd') : t('form.requestedBudgetUsd')}>
-        <input required type="number" inputMode="decimal" min="0" step="0.01" placeholder={isDirector ? t('form.amountReleased') : t('form.amountNeeded')} value={form.costUsd} onChange={(event) => setForm({ ...form, costUsd: event.target.value })} />
-      </Field>
-      {/* At the Director's current reference rate, the same one the Movements
-          module uses -- not a figure fixed in the code. */}
-      <Field label={t('field.equivalentRwf')}><input readOnly tabIndex={-1} value={usd ? formatNumber(round2(usd * rate.rwfPerUsd)) : ''} placeholder={t('form.calculatedFromUsd')} /></Field>
-      <Field label={t('field.equivalentCdf')}><input readOnly tabIndex={-1} value={usd ? formatNumber(round2(usd * rate.cdfPerUsd)) : ''} placeholder={t('form.calculatedFromUsd')} /></Field>
+      {projects.length !== 1 && <Field label={t('field.project')}>
+        <select required value={form.projectId} onChange={(event) => onChooseProject(event.target.value)}>
+          <option value="">{t('form.selectProject')}</option>
+          {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+        </select>
+      </Field>}
+      {sectorOptions.length > 1 && <Field label={t('field.workingArea')}>
+        <select required value={form.sector} onChange={(event) => setForm({ ...form, sector: event.target.value, categoryChoice: '', category: '', assignedTo: '' })}>
+          {sectorOptions.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}
+        </select>
+      </Field>}
       {isDirector && <>
         <Field label={t('field.carriedOutBy')}>
           <select required value={form.assignedTo} onChange={(event) => setForm({ ...form, assignedTo: event.target.value })} disabled={!managerOptions.length}>
@@ -2404,15 +2334,27 @@ function ActivityForm({ form, setForm, projects, selectedProject, sectorOptions,
         <Field label={t('field.deadline')}>
           <input type="date" value={form.deadline} onChange={(event) => setForm({ ...form, deadline: event.target.value })} />
         </Field>
-        <Field label={t('field.instructionsForManager')} wide>
-          <textarea rows="3" value={form.instructions} onChange={(event) => setForm({ ...form, instructions: event.target.value })} />
-        </Field>
       </>}
-      <label className="check-field"><input type="checkbox" checked={form.signed} onChange={(event) => setForm({ ...form, signed: event.target.checked })} />{t('form.signed')}</label>
     </div>
+    <details className="form-more">
+      <summary>{t('form.moreDetails')}</summary>
+      <div className="form-grid">
+        <Field label={t('field.description')} wide>
+          <textarea rows="2" placeholder={isDirector ? t('form.whatWorkInvolves') : t('form.whyWorkNeeded')} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
+        </Field>
+        <Field label={isDirector ? t('form.materialsToBuy') : t('form.materialsRequested')} wide>
+          <textarea rows="3" placeholder={t('form.onePerLine')} value={form.materials} onChange={(event) => setForm({ ...form, materials: event.target.value })} />
+        </Field>
+        {isDirector && <Field label={t('field.instructionsForManager')} wide>
+          <textarea rows="3" value={form.instructions} onChange={(event) => setForm({ ...form, instructions: event.target.value })} />
+        </Field>}
+        <label className="check-field"><input type="checkbox" checked={form.signed} onChange={(event) => setForm({ ...form, signed: event.target.checked })} />{t('form.signed')}</label>
+      </div>
+    </details>
     {isDirector && !managerOptions.length && <p className="decision-hint">{t('form.noManagerCovers')}</p>}
     <div className="form-submit-bar">
       {missing.length > 0 && <p className="form-missing">{t('form.stillNeeded')}: {missing.join(', ')}</p>}
+      {onCancel && <button className="secondary-btn" type="button" onClick={onCancel}>{t('action.cancel')}</button>}
       <button className="primary-btn" disabled={busy || missing.length > 0} type="submit">{isDirector ? t('action.assignActivity') : t('form.submitForReview')}</button>
     </div>
   </form>;

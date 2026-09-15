@@ -28,7 +28,7 @@ import {
 import { canApprove, decisionOpen, pendingForMeSql, resolveDirector, APPROVER_ROLE_LABELS } from '../lib/approvals.js';
 import { PAYMENT_METHODS } from '../db/monthlySchema.js';
 import {
-  DEAD_STATUSES, OVER_BUDGET_MESSAGE, canDeleteExpense, canRecordExpense, cents,
+  DEAD_STATUSES, FINAL_CHECK_SQL, OVER_BUDGET_MESSAGE, canDeleteExpense, canRecordExpense, cents, openWorkSql,
   fitsRemaining, fromCents
 } from '../lib/monthly.js';
 import { round2 } from '../lib/rates.js';
@@ -423,6 +423,8 @@ router.get('/', asyncRoute(async (req, res) => {
     values.push(req.user.id);
     filters.push(`a.assigned_to = $${values.length}`);
   }
+  if (awaiting === 'work') filters.push(openWorkSql(values, 'a', req.user.id));
+  if (awaiting === 'final-check') filters.push(FINAL_CHECK_SQL('a'));
   // Approved, live work that no monthly plan has taken in yet: what the Director
   // may attach to a month. Asked of the server rather than filtered out of the
   // newest page of the register, which silently missed anything older.

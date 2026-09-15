@@ -13,6 +13,7 @@ import { hashPassword, passwordMatches, passwordProblem } from './lib/passwords.
 import { asyncRoute, hasFullScope, isAdmin, managerScope, parseId, requiredText, validNumber, validateSector, withinScope } from './lib/http.js';
 import { pendingForMeSql } from './lib/approvals.js';
 import { getCurrentRate } from './lib/rates.js';
+import { FINAL_CHECK_SQL, openWorkSql } from './lib/monthly.js';
 import { deleteFile } from './lib/storage.js';
 import movementRouter, { mapMovement } from './routes/movements.js';
 import rateRouter from './routes/rates.js';
@@ -355,6 +356,18 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
     approvalValues
   );
 
+  // The home screen's "what needs doing" counts, from the same predicates as the
+  // lists they open, so a tile never promises more or fewer than the list holds.
+  const workValues = [...scopeValues];
+  const homeCounts = await pool.query(
+    `SELECT
+       (SELECT COUNT(*) FROM activities a WHERE ${openWorkSql(workValues, 'a', req.user.id)})::int AS my_open_work,
+       (SELECT COUNT(*) FROM activities a WHERE ${FINAL_CHECK_SQL('a')}${scoped ? ' AND a.sector = $1' : ''})::int AS final_checks,
+       (SELECT COUNT(*) FROM monthly_reports r JOIN monthly_plans p ON p.id = r.plan_id
+         WHERE r.status = 'Submitted' AND p.status <> 'Closed'${scoped ? ' AND p.sector = $1' : ''})::int AS month_end_reports`,
+    workValues
+  );
+
   // Budget changes a manager has asked for and nobody has answered yet.
   const budgetQueue = await pool.query(
     `SELECT COUNT(*)::int AS budget_changes_pending
@@ -370,7 +383,9 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
     pool.query(`SELECT sector, COUNT(*)::int AS projects, COALESCE(SUM(budget), 0) AS budget, COALESCE(SUM(spent), 0) AS spent, COALESCE(AVG(progress), 0) AS progress FROM projects${whereSector} GROUP BY sector`, scopeValues),
     pool.query(`SELECT sector, COUNT(*)::int AS activities,
       COUNT(*) FILTER (WHERE status = 'In Progress')::int AS active_activities,
-      COUNT(*) FILTER (WHERE status = 'Completed')::int AS completed_activities
+      COUNT(*) FILTER (WHERE status = 'Completed')::int AS completed_activities,
+      COUNT(*) FILTER (WHERE status = 'Pending Approval' AND approval_status = 'pending')::int AS decisions_pending,
+      COUNT(*) FILTER (WHERE ${FINAL_CHECK_SQL('activities')})::int AS final_checks
       FROM activities${whereSector} GROUP BY sector`, scopeValues),
     pool.query(`SELECT sector, COUNT(*)::int AS approvals_pending FROM approvals WHERE status = 'Pending'${andSector} GROUP BY sector`, scopeValues),
     // Per operation, a movement counts towards the operation it supported, and
@@ -406,6 +421,8 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
         activities: a.activities || 0,
         activeActivities: a.active_activities || 0,
         completedActivities: a.completed_activities || 0,
+        decisionsPending: a.decisions_pending || 0,
+        finalChecks: a.final_checks || 0,
         approvalsPending: approvalsFor.get(sector.id)?.approvals_pending || 0,
         movementSpend: Number(movementsFor.get(sector.id)?.movement_spend || 0)
       };
@@ -432,6 +449,9 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
       completionsAwaitingReview: reviewQueue.rows[0].completions_awaiting_review,
       budgetChangesPending: budgetQueue.rows[0].budget_changes_pending,
       activitiesAssignedToMe: reviewQueue.rows[0].assigned_to_me,
+      myOpenWork: homeCounts.rows[0].my_open_work,
+      finalChecksWaiting: homeCounts.rows[0].final_checks,
+      monthEndReportsWaiting: homeCounts.rows[0].month_end_reports,
       totalProjects: project.total_projects,
       activeOperations: operationsStats.rows[0].active_operations,
       approvalsPending: approval.pending_approvals,

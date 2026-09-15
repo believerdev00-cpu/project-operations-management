@@ -125,6 +125,20 @@ export function fitsRemaining(amount, approvedBudget, alreadySpent) {
 export const COMPLETED_STATUS = 'Completed';
 export const DEAD_STATUSES = ['Rejected', 'Cancelled'];
 
+// "Your work" on the home screen and in the register: approved work this account
+// carries that is not finished and not already handed back for the final check.
+// One definition, used by the count and by the list, so the two always agree.
+export function openWorkSql(values, alias = 'a', userId) {
+  values.push(userId);
+  return `(${alias}.assigned_to = $${values.length}
+    AND ${alias}.status IN ('Approved', 'Budget Adjusted', 'In Progress', 'Needs Correction')
+    AND ${alias}.completion_submitted_at IS NULL)`;
+}
+
+// Finished work handed back and waiting for the Director's final check.
+export const FINAL_CHECK_SQL = (alias = 'a') =>
+  `(${alias}.completion_submitted_at IS NOT NULL AND ${alias}.status <> 'Completed')`;
+
 export function isLive(status) {
   return !DEAD_STATUSES.includes(status);
 }

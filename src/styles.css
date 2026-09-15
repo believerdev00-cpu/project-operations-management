@@ -1,6 +1,8 @@
 :root {
   --ink: #182436;
-  --muted: #6d7d91;
+  /* Secondary text. Darkened from #6d7d91, which was about 4:1 against the page
+     and used for every label and small line. */
+  --muted: #58687b;
   --line: #e1e8ef;
   --surface: #ffffff;
   --canvas: #f5f7fa;
@@ -16,6 +18,7 @@
   --sidebar-w: 248px;
   --header-h: 106px;
   --mobile-bar-h: 56px;
+  --bottom-nav-h: 64px;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
@@ -127,7 +130,7 @@ input[type="checkbox"] { width: 18px; height: 18px; min-height: 0; }
 .success-banner, .error-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 20px; padding: 11px 14px; border-radius: 5px; font-size: .84rem; line-height: 1.45; }
 .success-banner span, .error-banner span { min-width: 0; overflow-wrap: anywhere; }
 .success-banner { color: var(--green); background: #eef9f3; border: 1px solid #cfe9da; }
-.success-banner button, .error-banner button { flex: none; min-height: 32px; padding: 0 4px; color: inherit; background: transparent; border: 0; font-size: .78rem; font-weight: 700; }
+.success-banner button, .error-banner button { flex: none; min-height: 44px; padding: 0 4px; color: inherit; background: transparent; border: 0; font-size: .78rem; font-weight: 700; }
 .loading-state { display: flex; align-items: center; justify-content: center; gap: 10px; min-height: 300px; color: var(--muted); text-align: center; }
 .spinner { flex: none; width: 18px; height: 18px; border: 2px solid #c9d9e7; border-top-color: var(--blue); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -159,7 +162,7 @@ input[type="checkbox"] { width: 18px; height: 18px; min-height: 0; }
 .preview-row strong, .preview-row span { display: block; }
 .preview-row strong { font-size: .86rem; overflow-wrap: anywhere; }
 .preview-row div span { margin-top: 4px; color: var(--muted); font-size: .75rem; }
-.status-badge, .priority-badge { display: inline-flex; white-space: nowrap; padding: 5px 8px; border-radius: 999px; font-size: .68rem; font-weight: 800; }
+.status-badge, .priority-badge { display: inline-flex; white-space: nowrap; padding: 5px 9px; border-radius: 999px; font-size: .74rem; font-weight: 800; }
 .status-badge { color: var(--green); background: #eaf7ef; }
 .priority-badge { color: #94671c; background: #fff6dd; }
 .empty-state { display: grid; place-items: center; gap: 6px; min-height: 130px; padding: 24px; color: var(--muted); text-align: center; }
@@ -192,12 +195,12 @@ input[type="checkbox"] { width: 18px; height: 18px; min-height: 0; }
   background-attachment: local, local, scroll, scroll;
 }
 table { width: 100%; border-collapse: collapse; white-space: nowrap; }
-th { color: var(--muted); font-size: .67rem; text-align: left; text-transform: uppercase; letter-spacing: .06em; }
+th { color: var(--muted); font-size: .72rem; text-align: left; text-transform: uppercase; letter-spacing: .06em; }
 th, td { padding: 13px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
 td { color: #34475a; font-size: .8rem; }
 td strong, td small { display: block; }
 td strong { color: var(--ink); }
-td small { margin-top: 4px; color: var(--muted); font-size: .68rem; }
+td small { margin-top: 4px; color: var(--muted); font-size: .74rem; }
 /* The first column carries the record's name and a line about it; it wraps so
    one long description does not stretch the whole table. */
 td.card-title-cell { min-width: 180px; max-width: 360px; white-space: normal; }
@@ -229,6 +232,11 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .activity-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .activity-grid .form-field:nth-child(5) { grid-column: span 2; }
 .read-only-value { display: flex; align-items: center; min-height: 42px; padding: 9px 11px; color: var(--muted); background: #f5f7f9; border: 1px solid var(--line); border-radius: 5px; font-size: .78rem; font-weight: 500; text-transform: none; letter-spacing: 0; }
+/* Typed values read as values, not as the bold uppercase label above them. */
+.form-field input, .form-field select, .form-field textarea, .login-card input { font-weight: 500; letter-spacing: 0; text-transform: none; }
+.form-more { margin-top: 16px; border-top: 1px solid var(--line); }
+.form-more > summary { display: flex; align-items: center; min-height: 48px; color: var(--blue); cursor: pointer; font-weight: 750; }
+.form-more[open] > summary { margin-bottom: 8px; }
 .check-field { display: flex; align-items: center; gap: 8px; min-height: 42px; color: var(--ink); font-size: .8rem; font-weight: 700; }
 .check-field input { width: 18px; min-height: auto; }
 /* Where a form's buttons sit. On a phone they stay pinned to the bottom of the
@@ -329,14 +337,14 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .decision-readout { margin-top: 18px; }
 .admin-note { padding: 10px 12px; border-left: 3px solid var(--blue); background: var(--blue-soft); font-style: italic; }
 .completion-note { max-width: 320px; }
-.awaiting-flag { display: block; margin-top: 4px; color: #94671c; font-size: .66rem; font-weight: 800; white-space: normal; }
+.awaiting-flag { display: block; margin-top: 4px; color: #7a5416; font-size: .72rem; font-weight: 800; white-space: normal; }
 .review-row { cursor: pointer; }
 .review-row:hover { background: var(--blue-soft); }
 
 /* Assignment: who carries the work out, by when, and how that deadline stands.
    A date on its own says nothing until it is measured against today. */
 .assignment-form { margin-top: 14px; }
-.deadline-flag { display: block; margin-top: 3px; font-size: .66rem; font-weight: 800; }
+.deadline-flag { display: block; margin-top: 3px; font-size: .72rem; font-weight: 800; }
 .deadline-overdue { color: var(--red); }
 .deadline-due-soon { color: #94671c; }
 .detail-facts .deadline-flag { font-weight: 700; }
@@ -372,7 +380,8 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 /* The count of records personally held up by whoever is signed in. It sits on
    the nav item itself so it is legible without opening anything. */
 .nav-badge { margin-left: auto; min-width: 20px; padding: 1px 7px; color: white; background: var(--red); border-radius: 10px; font-size: .72rem; font-weight: 800; text-align: center; }
-.nav-item.active .nav-badge { background: #d95757; }
+.nav-item.active .nav-badge { background: #b23b3b; }
+.nav-group + .nav-group { margin-top: 18px; }
 .queue-count { display: inline-block; min-width: 28px; margin-left: 8px; padding: 2px 10px; color: var(--navy); background: white; border-radius: 12px; font-size: 1rem; font-weight: 800; vertical-align: middle; }
 
 /* Who must approve a record, and what they decided. Reads as a strip of facts
@@ -400,6 +409,74 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .queue-actions { white-space: nowrap; }
 .queue-actions > * + * { margin-left: 8px; }
 .primary-btn.compact, .danger-btn.outlined.compact, .secondary-btn.compact { padding: 6px 11px; font-size: .78rem; }
+
+/* ---- home: what needs doing ------------------------------------------------ */
+
+.home { padding-bottom: 8px; }
+.home-hello { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px 20px; margin-top: 26px; }
+.home-hello h2 { margin: 0; color: var(--navy); font-size: 1.6rem; }
+.home-hello p { margin: 4px 0 0; color: var(--muted); font-size: .95rem; }
+.home-quick { display: flex; flex-wrap: wrap; gap: 10px; }
+.home-quick button span { font-size: 1.15rem; font-weight: 800; }
+.home-heading { margin: 28px 0 12px; color: var(--navy); font-size: 1.02rem; font-weight: 800; }
+.home-more { margin-top: 6px; }
+
+.home-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+.home-tile { display: flex; align-items: center; gap: 14px; min-height: 92px; padding: 16px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-left-width: 5px; border-radius: 10px; box-shadow: 0 4px 14px rgba(16,43,70,.04); text-align: left; }
+.home-tile:hover { border-color: #b9cfe4; }
+.home-tile-count { display: grid; flex: none; place-items: center; min-width: 52px; height: 52px; padding: 0 8px; color: var(--navy); background: var(--blue-soft); border-radius: 12px; font-size: 1.5rem; font-weight: 800; }
+.home-tile-text { flex: 1; min-width: 0; }
+.home-tile-text strong { display: block; font-size: 1rem; }
+.home-tile-text small { display: block; margin-top: 3px; color: var(--muted); font-size: .84rem; line-height: 1.35; }
+.home-tile-arrow { flex: none; color: var(--muted); font-size: 1.8rem; line-height: 1; }
+.home-tile-urgent { border-left-color: var(--red); }
+.home-tile-urgent .home-tile-count { color: white; background: var(--red); }
+.home-tile-active { border-left-color: var(--blue); }
+.home-tile-active .home-tile-count { color: white; background: var(--blue); }
+.home-tile-calm { border-left-color: var(--line); }
+.home-tile-calm .home-tile-count { color: var(--muted); background: #eef2f6; }
+
+.home-operations { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.operation-card { display: grid; gap: 4px; align-content: start; padding: 16px; background: var(--surface); border: 1px solid var(--line); border-top: 4px solid var(--blue); border-radius: 10px; }
+.operation-farming { border-top-color: #2e7d32; }
+.operation-agriculture { border-top-color: #9e7c16; }
+.operation-mining { border-top-color: #6d4c41; }
+.operation-movement { border-top-color: #1565c0; }
+.operation-card header { display: flex; align-items: center; gap: 12px; }
+.operation-mark { display: grid; flex: none; place-items: center; width: 40px; height: 40px; color: white; background: var(--navy); border-radius: 10px; font-weight: 800; }
+.operation-farming .operation-mark { background: #2e7d32; }
+.operation-agriculture .operation-mark { background: #8a6c12; }
+.operation-mining .operation-mark { background: #6d4c41; }
+.operation-movement .operation-mark { background: #1565c0; }
+.operation-card h4 { margin: 0; color: var(--navy); font-size: 1.02rem; }
+.operation-card header small { display: block; margin-top: 2px; color: var(--muted); font-size: .8rem; }
+.operation-card .money-bar { margin-top: 12px; padding: 12px; }
+.operation-card .money-figures strong { font-size: 1rem; }
+.operation-empty { margin: 12px 0 0; padding: 12px; color: var(--muted); background: #f7fafc; border-radius: 8px; font-size: .86rem; }
+.operation-facts { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 12px 0 0; padding: 0; color: var(--muted); font-size: .84rem; list-style: none; }
+.operation-facts strong { color: var(--navy); }
+.operation-actions { display: flex; margin-top: 12px; }
+.operation-actions:empty { display: none; }
+.operation-actions button { flex: 1; }
+
+/* A decision waiting on this person, as a card: what, how much, who asked. */
+.decision-list, .work-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.decision-card { background: var(--surface); border: 1px solid var(--line); border-left: 5px solid #c9962c; border-radius: 10px; overflow: hidden; }
+.decision-card-main { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; width: 100%; padding: 14px 16px 10px; color: var(--ink); background: none; border: 0; text-align: left; }
+.decision-card-kind { grid-column: 1 / -1; color: var(--muted); font-size: .76rem; font-weight: 700; }
+.decision-card-main strong { grid-column: 1; font-size: 1rem; overflow-wrap: anywhere; }
+.decision-card-meta { grid-column: 1; color: var(--muted); font-size: .84rem; }
+.decision-card-amount { grid-column: 2; grid-row: 2 / span 2; align-self: center; color: var(--navy); font-size: 1.1rem; font-weight: 800; white-space: nowrap; }
+.decision-card-actions { display: flex; gap: 8px; padding: 0 16px 14px; }
+.decision-card-actions button { flex: 1; }
+.work-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 64px; padding: 12px 16px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; text-align: left; }
+.work-card:hover { border-color: #b9cfe4; }
+.work-card-text { min-width: 0; }
+.work-card-text strong { display: block; overflow-wrap: anywhere; }
+.work-card-text small { display: block; margin-top: 3px; color: var(--muted); font-size: .82rem; }
+
+/* The bar along the bottom of a phone. Hidden on wider screens. */
+.bottom-nav { display: none; }
 
 /* ---- record screens: journey, next step, money, sections, files ----------- */
 
@@ -479,7 +556,7 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 /* ---- language, external partners, partner portal ------------------------- */
 
 .language-picker { display: grid; gap: 6px; margin-bottom: 16px; color: inherit; font-size: .68rem; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
-.language-picker select { min-height: 40px; padding: 6px 9px; font-size: .82rem; }
+.language-picker select { min-height: 44px; padding: 6px 9px; font-size: .82rem; }
 .login-card .language-picker { margin: 0 0 20px; color: var(--muted); }
 
 /* The one business operation a partner account carries. Not a picker: there is
@@ -491,7 +568,7 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .partner-access-chip strong { display: block; margin-top: 4px; font-size: 1rem; }
 .partner-notice { margin: 16px 0 0; padding: 12px 14px; color: #1d466a; background: var(--blue-soft); border: 1px solid #cfe1f3; border-radius: 5px; font-size: .85rem; line-height: 1.5; }
 .partner-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
-.partner-tab { min-height: 40px; padding: 9px 16px; color: var(--navy); background: var(--surface); border: 1px solid var(--line); border-radius: 20px; font-weight: 750; font-size: .84rem; }
+.partner-tab { min-height: 44px; padding: 9px 16px; color: var(--navy); background: var(--surface); border: 1px solid var(--line); border-radius: 20px; font-weight: 750; font-size: .84rem; }
 .partner-tab.active { color: white; background: var(--navy); border-color: var(--navy); }
 .partner-budget { padding: 12px 0; overflow-wrap: anywhere; color: var(--navy); font-size: 2rem; font-weight: 800; }
 
@@ -553,7 +630,25 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 
   .mobile-bar { position: fixed; top: 0; right: 0; left: 0; z-index: 25; display: flex; align-items: center; gap: 2px; height: calc(var(--mobile-bar-h) + var(--safe-top)); padding: var(--safe-top) 6px 0; color: white; background: var(--navy); box-shadow: 0 2px 10px rgba(8, 20, 33, .18); }
   .mobile-title { flex: 1; min-width: 0; padding: 0 6px; overflow: hidden; font-size: 1.02rem; font-weight: 750; white-space: nowrap; text-overflow: ellipsis; }
-  .mobile-badge { display: inline-grid; place-items: center; flex: none; min-width: 30px; height: 30px; margin: 0 4px; padding: 0 9px; color: white; background: var(--red); border: 0; border-radius: 15px; font-size: .8rem; font-weight: 800; }
+  .mobile-badge { display: inline-grid; place-items: center; flex: none; min-width: 44px; height: 44px; margin: 0 4px; padding: 0 12px; color: white; background: var(--red); border: 0; border-radius: 22px; font-size: .9rem; font-weight: 800; }
+  .mobile-bar.has-bottom-nav { padding-left: 12px; }
+
+  .bottom-nav { position: fixed; right: 0; bottom: 0; left: 0; z-index: 30; display: grid; grid-auto-columns: minmax(0, 1fr); grid-auto-flow: column; min-height: calc(var(--bottom-nav-h) + var(--safe-bottom)); padding: 4px 4px var(--safe-bottom); background: var(--surface); border-top: 1px solid var(--line); box-shadow: 0 -4px 16px rgba(16, 43, 70, .08); }
+  .bottom-nav-item { display: grid; justify-items: center; align-content: center; gap: 3px; min-width: 0; min-height: 56px; padding: 4px 2px; color: var(--muted); background: none; border: 0; border-radius: 10px; font-size: .72rem; font-weight: 700; }
+  .bottom-nav-item.active { color: var(--blue); }
+  .bottom-nav-item.active .bottom-nav-icon { background: var(--blue-soft); }
+  .bottom-nav-icon { position: relative; display: grid; place-items: center; width: 52px; height: 30px; border-radius: 15px; }
+  .bottom-nav-icon .nav-icon { width: 22px; height: 22px; opacity: 1; }
+  .bottom-nav-icon .nav-icon svg { width: 22px; height: 22px; }
+  .bottom-nav-badge { position: absolute; top: -4px; right: 4px; min-width: 20px; height: 20px; padding: 0 5px; color: white; background: var(--red); border-radius: 10px; font-size: .7rem; font-weight: 800; line-height: 20px; text-align: center; }
+  .bottom-nav-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .main-content.with-bottom-nav { padding-bottom: calc(var(--bottom-nav-h) + 12px); }
+
+  .home-operations { grid-template-columns: 1fr; }
+  .home-hello { margin-top: 18px; }
+  .home-hello h2 { font-size: 1.35rem; }
+  .home-quick { flex: 1 1 100%; }
+  .home-quick button { flex: 1 1 0; min-height: 52px; }
 
   /* The sidebar slides in from the left, over a dimmed page. */
   .sidebar { z-index: 40; width: min(86vw, 320px); padding: calc(14px + var(--safe-top)) 14px calc(16px + var(--safe-bottom)); box-shadow: 12px 0 40px rgba(8, 20, 33, .3); transform: translateX(-105%); transition: transform .24s ease, visibility 0s linear .24s; visibility: hidden; }
@@ -670,6 +765,9 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
   .card-table td:not([data-label]) { display: block; }
   .card-table td:not([data-label])::before { content: none; }
   .card-table td.card-title-cell { min-width: 0; max-width: none; padding: 0 0 10px; border-bottom: 1px solid var(--line); }
+  .card-table td.card-optional { display: none; }
+  /* The whole card opens the record, so its one button can be full width. */
+  .card-table td.card-actions > .text-btn:only-child { justify-content: center; width: 100%; background: var(--blue-soft); border-radius: 8px; }
   .card-table td.card-title-cell strong { font-size: .98rem; }
   .card-table td.card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 0 0; border-bottom: 0; }
   .card-table td.card-actions > * + * { margin-left: 0; }
