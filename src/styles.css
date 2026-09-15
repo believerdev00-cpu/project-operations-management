@@ -522,6 +522,7 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .money-track { height: 8px; margin-top: 12px; overflow: hidden; background: #e7edf4; border-radius: 999px; }
 .money-track span { display: block; height: 100%; background: var(--blue); border-radius: inherit; }
 .money-over .money-track span { background: var(--red); }
+.money-equivalent { display: block; margin-top: 3px; color: var(--muted); font-size: .78rem; font-weight: 600; }
 .money-note { margin: 8px 0 0; color: var(--muted); font-size: .82rem; }
 .money-note:empty { display: none; }
 

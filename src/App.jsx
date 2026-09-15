@@ -1754,6 +1754,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       reloadKey={summary}
       canAddActivity={canAddActivity}
       canAddMovement={canAddMovement}
+      rate={rate}
       busy={actionBusy}
       onGo={go}
       onAddActivity={addActivity}
@@ -1956,6 +1957,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       user={user}
       fetchJson={fetchJson}
       managers={managers}
+      rate={rate}
       planId={routeId}
       onOpenPlan={openPlanRoute}
       onClosePlan={closePlanRoute}

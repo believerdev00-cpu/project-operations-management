@@ -39,7 +39,7 @@ function greetingKey() {
 
 export default function Home({
   user, summary, sectorRows, approvalItems, approvalCount, fetchJson, reloadKey,
-  canAddActivity, canAddMovement, busy,
+  canAddActivity, canAddMovement, busy, rate,
   onGo, onAddActivity, onAddMovement, onOpenActivity, onOpenQueueItem, onDecide, onOpenPlan
 }) {
   const { language, t } = useI18n();
@@ -159,7 +159,7 @@ export default function Home({
           </header>
           {plan
             ? <MoneyBar approved={plan.status === 'Draft' ? null : plan.approvedBudget} requested={plan.plannedBudget}
-              spent={plan.totalSpent} format={formatUsdShort} />
+              spent={plan.totalSpent} format={formatUsdShort} rates={rate} />
             : <p className="operation-empty">{isDirector ? t('home.planThisMonth') : t('home.noPlanForYou')}</p>}
           <ul className="operation-facts">
             <li><strong>{row.activeActivities || 0}</strong> {t('home.underWay')}</li>

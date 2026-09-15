@@ -367,6 +367,7 @@ const STRINGS = {
   'money.over': { en: 'Over budget', rw: 'Birenze ingengo y’imari', fr: 'Dépassement', sw: 'Imezidi bajeti' },
   'money.notDecided': { en: 'Not decided', rw: 'Ntibirafatwaho icyemezo', fr: 'Non décidé', sw: 'Haijaamuliwa' },
   'money.askedForLabel': { en: 'Asked for', rw: 'Byasabwe', fr: 'Demandé', sw: 'Kilichoombwa' },
+  'money.todayRate': { en: 'At today’s rate', rw: 'Ku gipimo cy’uyu munsi', fr: 'Au taux du jour', sw: 'Kwa kiwango cha leo' },
   'money.usedShare': { en: '{share}% of the approved budget used', rw: '{share}% by’ingengo y’imari yemejwe byakoreshejwe', fr: '{share} % du budget approuvé utilisé', sw: '{share}% ya bajeti iliyoidhinishwa imetumika' },
   'money.changedFrom': { en: 'Asked for {amount} · changed by {change}.', rw: 'Hasabwe {amount} · byahinduweho {change}.', fr: 'Demandé : {amount} · modifié de {change}.', sw: 'Kiliombwa {amount} · kimebadilishwa kwa {change}.' },
   'money.handedOver': { en: 'Money handed over: {amount}', rw: 'Amafaranga yatanzwe: {amount}', fr: 'Argent remis : {amount}', sw: 'Pesa zilizokabidhiwa: {amount}' },

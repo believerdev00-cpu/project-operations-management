@@ -3,7 +3,7 @@ import { BUSINESS_OPERATIONS, operationName } from '../shared/businessOperations
 import { fill, useI18n } from './i18n.js';
 import { categoryLabel, trailActionLabel } from './ActivityReview.jsx';
 import { DetailView, useBusy, useDialog } from './ui.jsx';
-import { FilePicker, activityJourney, journeyLabel, journeyTone } from './journey.jsx';
+import { FilePicker, activityJourney, formatLocal, journeyLabel, journeyTone } from './journey.jsx';
 
 // Monthly planning, allocation and month-end review.
 //
@@ -56,7 +56,7 @@ const emptyActivity = {
 };
 
 export default function MonthlyPlans({
-  user, fetchJson, managers,
+  user, fetchJson, managers, rate = null,
   planId = null, onOpenPlan, onClosePlan, onChanged, onMessage, onError
 }) {
   const { language, t } = useI18n();
@@ -423,6 +423,7 @@ export default function MonthlyPlans({
         t={t}
         busy={busy}
         managers={managers}
+        rate={rate}
         activityForm={activityForm}
         setActivityForm={setActivityForm}
         onAddActivity={addActivity}
@@ -457,7 +458,7 @@ function planTone(status) {
 }
 
 function PlanDetail({
-  detail, user, isDirector, language, t, busy, managers = [], activityForm, setActivityForm,
+  detail, user, isDirector, language, t, busy, managers = [], rate = null, activityForm, setActivityForm,
   onAddActivity, onConfirm, onReopen, onSubmitReport, onDecideReport, onClose, onAttach, onUpdatePlan, offPlanActivities = []
 }) {
   const { plan, activities, history, report } = detail;
@@ -537,11 +538,20 @@ function PlanDetail({
     </table></div> : <div className="empty-state">
       <strong>{t('monthly.noActivitiesInPlan')}</strong><span>{t('table.noData')}</span>
     </div>}
-    {activities.length > 0 && <div className="totals-line">
-      <span>{plan.status === 'Draft' ? t('monthly.totalToGive') : t('monthly.totalApprovedBudget')}: <strong>{formatUsd(plan.status === 'Draft' ? plan.plannedBudget : plan.approvedBudget)}</strong></span>
-      <span>{t('monthly.totalSpent')}: <strong>{formatUsd(plan.totalSpent)}</strong></span>
-      <span>{t('monthly.remainingBalance')}: <strong className={plan.remainingBalance < 0 ? 'over-budget' : undefined}>{formatUsd(plan.remainingBalance)}</strong></span>
-    </div>}
+    {activities.length > 0 && <>
+      <div className="totals-line">
+        <span>{plan.status === 'Draft' ? t('monthly.totalToGive') : t('monthly.totalApprovedBudget')}: <strong>{formatUsd(plan.status === 'Draft' ? plan.plannedBudget : plan.approvedBudget)}</strong></span>
+        <span>{t('monthly.totalSpent')}: <strong>{formatUsd(plan.totalSpent)}</strong></span>
+        <span>{t('monthly.remainingBalance')}: <strong className={plan.remainingBalance < 0 ? 'over-budget' : undefined}>{formatUsd(plan.remainingBalance)}</strong></span>
+      </div>
+      {/* The month adds up records agreed at different times, so the local
+          currencies here are at today's rate rather than any one record's. */}
+      {rate?.rwfPerUsd > 0 && <p className="field-hint">
+        {t('money.todayRate')}: {formatLocal((plan.status === 'Draft' ? plan.plannedBudget : plan.approvedBudget) * rate.rwfPerUsd, 'RWF')}
+        {' · '}{formatLocal((plan.status === 'Draft' ? plan.plannedBudget : plan.approvedBudget) * rate.cdfPerUsd, 'CDF')}
+        {' · '}{t('monthly.remainingBalance')}: {formatLocal(plan.remainingBalance * rate.rwfPerUsd, 'RWF')} · {formatLocal(plan.remainingBalance * rate.cdfPerUsd, 'CDF')}
+      </p>}
+    </>}
 
     {/* Section 2: the Director confirms the plan, which records the allocation
         and nothing else. The wording on the button says so. */}

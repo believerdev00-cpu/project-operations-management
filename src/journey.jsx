@@ -100,11 +100,28 @@ export function NextStep({ tone = 'info', title, children, actions }) {
 
 // ---- money ----------------------------------------------------------------------
 
+// The same amount in the local currencies, for readers who think in Rwandan
+// francs or Congolese francs rather than dollars.
+export function formatLocal(value, currency) {
+  return `${currency} ${new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(Number(value || 0))}`;
+}
+
+function Equivalent({ amount, rates }) {
+  if (!rates?.rwfPerUsd || !rates?.cdfPerUsd) return null;
+  return <small className="money-equivalent">
+    {formatLocal(Number(amount || 0) * rates.rwfPerUsd, 'RWF')} · {formatLocal(Number(amount || 0) * rates.cdfPerUsd, 'CDF')}
+  </small>;
+}
+
 // Approved, spent and left, side by side with a bar: the three numbers the
 // budget questions are always about, never on different parts of the screen.
 // Before a budget is decided there is nothing to measure spending against, so
 // the bar shows what was asked for instead of an empty "left".
-export function MoneyBar({ approved, spent, requested, format, label, extra }) {
+//
+// `rates` adds each figure in Rwandan and Congolese francs underneath. An
+// activity carries the rate it was created at, so the conversion here is the
+// one the record was agreed on, not today's.
+export function MoneyBar({ approved, spent, requested, format, label, extra, rates }) {
   const t = useT();
   const hasBudget = approved !== null && approved !== undefined;
   const left = hasBudget ? Math.round((Number(approved) - Number(spent || 0)) * 100) / 100 : null;
@@ -114,12 +131,12 @@ export function MoneyBar({ approved, spent, requested, format, label, extra }) {
     {label && <span className="money-title">{label}</span>}
     {hasBudget
       ? <div className="money-figures">
-        <div><span>{t('money.approved')}</span><strong>{format(approved)}</strong></div>
-        <div><span>{t('money.spent')}</span><strong>{format(spent || 0)}</strong></div>
-        <div className="money-left"><span>{over ? t('money.over') : t('money.left')}</span><strong>{format(Math.abs(left))}</strong></div>
+        <div><span>{t('money.approved')}</span><strong>{format(approved)}</strong><Equivalent amount={approved} rates={rates} /></div>
+        <div><span>{t('money.spent')}</span><strong>{format(spent || 0)}</strong><Equivalent amount={spent || 0} rates={rates} /></div>
+        <div className="money-left"><span>{over ? t('money.over') : t('money.left')}</span><strong>{format(Math.abs(left))}</strong><Equivalent amount={Math.abs(left)} rates={rates} /></div>
       </div>
       : <div className="money-figures">
-        <div><span>{t('money.askedForLabel')}</span><strong>{format(requested || 0)}</strong></div>
+        <div><span>{t('money.askedForLabel')}</span><strong>{format(requested || 0)}</strong><Equivalent amount={requested || 0} rates={rates} /></div>
         <div><span>{t('money.approved')}</span><strong className="muted-cell">{t('money.notDecided')}</strong></div>
       </div>}
     {hasBudget && <div className="money-track" role="img" aria-label={fill(t('money.usedShare'), { share })}>

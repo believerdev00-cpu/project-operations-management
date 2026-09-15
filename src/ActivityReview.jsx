@@ -307,6 +307,14 @@ export function ActivityReview({
   }, [managers, activity.assignedTo, activity.assignedToName]);
 
   const journey = activityJourney(activity);
+  // The rate this record was created at, kept on the row as its RWF and CDF
+  // equivalents, so every figure below converts the way the request did.
+  const rates = activity.requestedBudget > 0 && activity.requestedEquivalent
+    ? {
+        rwfPerUsd: activity.requestedEquivalent.rwf / activity.requestedBudget,
+        cdfPerUsd: activity.requestedEquivalent.cdf / activity.requestedBudget
+      }
+    : null;
   const handedBack = Boolean(activity.completionSubmittedAt) && activity.status !== 'Completed';
   const assigneeName = activity.assignedToName || t('form.nobodyYet');
   const spentSoFar = expenseSummary ? expenseSummary.totalSpent : expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
@@ -396,6 +404,7 @@ export function ActivityReview({
       requested={activity.requestedBudget}
       spent={spentSoFar}
       format={formatUsd}
+      rates={rates}
       extra={<p className="money-note">
         {activity.approvedBudget === null
           ? null
