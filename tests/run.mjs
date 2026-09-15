@@ -25,6 +25,7 @@ const API = process.env.API || 'http://localhost:5000';
 // a broken dictionary fails in a second, without touching the database.
 const SUITES = [
   ['translations', 'translations.test.mjs', { needsApi: false }],
+  ['account security', 'account-security.test.mjs', { needsApi: true }],
   ['approval workflow', 'approval-workflow.test.mjs', { needsApi: true }],
   ['partner access', 'partner-access.test.mjs', { needsApi: true }],
   ['monthly workflow', 'monthly-workflow.test.mjs', { needsApi: true }]

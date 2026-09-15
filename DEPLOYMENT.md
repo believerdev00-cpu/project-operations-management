@@ -32,12 +32,18 @@ Copy `.env.example` to `.env.local` and set at least:
 | Variable | Value |
 | --- | --- |
 | `DATABASE_URL` | `postgresql://ops:<app password>@localhost:5433/project_ops?sslmode=disable` |
-| `JWT_SECRET` | a long random string (changing it signs everybody out) |
-| `ADMIN_PASSWORD` | only needed for the very first migration, which creates `admin` |
+| `JWT_SECRET` | at least 32 random characters (changing it signs everybody out) |
+| `ADMIN_PASSWORD` | the starting password for `admin`, used once by the first migration |
 | `PORT` | defaults to 5000 |
+| `TRUST_PROXY` | only behind a reverse proxy: the number of proxies, usually `1` |
 
 Keep `?sslmode=disable` only for a Postgres on the same machine. `CORS_ORIGIN`
 is not needed in production: the page and the API share one origin.
+
+**First sign-in.** Sign in as `admin` with `ADMIN_PASSWORD`; the app asks the
+Director to choose their own password straight away. Every account the Director
+creates or resets works the same way, so nobody else ever knows a user's
+password.
 
 ## 3. Build and run
 

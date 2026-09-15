@@ -14,6 +14,7 @@ running is left alone.
 | Suite | Covers |
 |---|---|
 | `translations.test.mjs` | every key translated into all four languages, every key used, no hard-coded English left in the JSX |
+| `account-security.test.mjs` | temporary passwords, choosing and changing your own, suspending accounts, team members raising nothing, short-lived evidence links |
 | `approval-workflow.test.mjs` | who must approve a record, and that nobody else can |
 | `partner-access.test.mjs` | an external partner sees one business operation and nothing else |
 | `monthly-workflow.test.mjs` | planning, the approved allocation, expenses, the budget block, evidence, month-end |
@@ -45,8 +46,10 @@ The consequences are worth knowing:
   DELETE FROM users WHERE username LIKE 'zz-%';
   ```
 
-`ADMIN_PASSWORD` is used to sign in as the Director; it defaults to the value in
-`.env`.
+The suites act as the Director through `tests/director.mjs`, which signs a short
+session token for the Director account with `JWT_SECRET` -- they never need the
+Director's password. The Director must have chosen their own password first (sign
+in to the app once); until then the suites stop with a message saying so.
 
 ## What they are actually guarding
 

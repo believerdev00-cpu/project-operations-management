@@ -1,15 +1,13 @@
 import express from 'express';
-import bcrypt from 'bcryptjs';
 import { pool } from '../db/database.js';
 import { ALL_OPERATIONS, asyncRoute, isAdmin, parseId, requiredText, sectorIds, withinScope } from '../lib/http.js';
+import { hashPassword, passwordProblem } from '../lib/passwords.js';
 
 const router = express.Router();
 
 // Accounts the Director can create. 'super-admin' is deliberately absent: the
 // Director account is seeded, never minted through the API.
 export const assignableRoles = new Set(['manager', 'staff']);
-
-const MINIMUM_PASSWORD_LENGTH = 6;
 
 function adminOnly(message) {
   return (req, res, next) => {
@@ -32,13 +30,16 @@ function mapAccount(row) {
     assignedProjects: row.assigned_projects ?? 0,
     teamSize: row.team_size ?? 0,
     createdAt: row.created_at,
-    passwordChangedAt: row.password_changed_at ?? null
+    passwordChangedAt: row.password_changed_at ?? null,
+    status: row.status || 'active',
+    mustChangePassword: Boolean(row.must_change_password)
   };
 }
 
 // Password hashes are never selected into any response built from this list.
 const ACCOUNT_SELECT = `
   SELECT u.id, u.username, u.name, u.role, u.sector, u.covers_all_sectors, u.manager_id, u.created_at, u.password_changed_at,
+         u.status, u.must_change_password,
          m.name AS manager_name, m.sector AS manager_sector,
          (SELECT COUNT(*) FROM projects p WHERE p.manager_id = u.id)::int AS assigned_projects,
          (SELECT COUNT(*) FROM users t WHERE t.manager_id = u.id)::int AS team_size
@@ -107,9 +108,8 @@ router.post('/', adminOnly('Only the administrator can create accounts.'), async
   if (!requiredText(username) || !requiredText(name)) {
     return res.status(400).json({ message: 'A username and a full name are required.' });
   }
-  if (typeof password !== 'string' || password.trim().length < MINIMUM_PASSWORD_LENGTH) {
-    return res.status(400).json({ message: `The password must be at least ${MINIMUM_PASSWORD_LENGTH} characters.` });
-  }
+  const weak = passwordProblem(password, { username });
+  if (weak) return res.status(400).json({ message: weak });
   if (!assignableRoles.has(role)) {
     return res.status(400).json({ message: 'Choose a role: sector manager or team member.' });
   }
@@ -138,9 +138,11 @@ router.post('/', adminOnly('Only the administrator can create accounts.'), async
 
   try {
     const inserted = await pool.query(
-      `INSERT INTO users (username, password_hash, name, role, sector, manager_id, covers_all_sectors)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-      [username.trim(), bcrypt.hashSync(password.trim(), 10), name.trim(), role, storedSector, managerId, coversAll]
+      // The password the Director typed is temporary: the new user chooses their
+      // own at first sign-in, so the Director never knows it.
+      `INSERT INTO users (username, password_hash, name, role, sector, manager_id, covers_all_sectors, must_change_password)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE) RETURNING id`,
+      [username.trim(), await hashPassword(password), name.trim(), role, storedSector, managerId, coversAll]
     );
     res.status(201).json(await loadAccount(inserted.rows[0].id));
   } catch (error) {
@@ -154,22 +156,67 @@ router.post('/', adminOnly('Only the administrator can create accounts.'), async
 // forgotten password is replaced rather than recovered.
 router.patch('/:id/password', adminOnly('Only the administrator can change a password.'), asyncRoute(async (req, res) => {
   const { password } = req.body || {};
-  if (typeof password !== 'string' || password.trim().length < MINIMUM_PASSWORD_LENGTH) {
-    return res.status(400).json({ message: `The new password must be at least ${MINIMUM_PASSWORD_LENGTH} characters.` });
-  }
+  const weak = passwordProblem(password);
+  if (weak) return res.status(400).json({ message: weak });
 
   // Stamped from the Node clock, not NOW(): this value is compared against a
   // JWT `iat`, which is minted here. The database clock runs a couple of
   // seconds ahead, which was enough to invalidate the fresh token the user got
   // when they signed in again straight after a reset.
   const result = await pool.query(
-    'UPDATE users SET password_hash = $2, password_changed_at = $3 WHERE id = $1 RETURNING id',
-    [req.params.id, bcrypt.hashSync(password.trim(), 10), new Date()]
+    // A reset password is temporary too: the owner chooses their own next time.
+    // Only internal accounts: partners are reset from their own register.
+    "UPDATE users SET password_hash = $2, password_changed_at = $3, must_change_password = TRUE WHERE id = $1 AND role <> 'partner' RETURNING id",
+    [req.params.id, await hashPassword(password), new Date()]
   );
   if (!result.rowCount) return res.status(404).json({ message: 'Account not found.' });
 
   const account = await loadAccount(req.params.id);
   res.json({ ...account, message: 'Password updated. That user must sign in again.' });
+}));
+
+// Suspend or reactivate a manager or team member. Before this there was no way
+// to stop an internal account at all: someone who had left kept signing in until
+// the Director thought to reset their password. authMiddleware reads the status
+// on every request, so a suspension ends every open session at once.
+//
+// The suspension is never blocked by work the person still holds -- locking out
+// someone who has left cannot wait -- but that work is reported back, because
+// approvals naming them wait on an account that can no longer act.
+router.patch('/:id/status', adminOnly('Only the Director can suspend or reactivate an account.'), asyncRoute(async (req, res) => {
+  const { status } = req.body || {};
+  if (!['active', 'suspended'].includes(status)) {
+    return res.status(400).json({ message: 'Status must be active or suspended.' });
+  }
+  if (Number(req.params.id) === Number(req.user.id)) {
+    return res.status(400).json({ message: 'You cannot suspend your own account.' });
+  }
+  const result = await pool.query(
+    "UPDATE users SET status = $2 WHERE id = $1 AND role IN ('manager', 'staff') RETURNING id",
+    [req.params.id, status]
+  );
+  if (!result.rowCount) return res.status(404).json({ message: 'Account not found.' });
+
+  const account = await loadAccount(req.params.id);
+  if (status === 'active') return res.json({ ...account, message: `${account.name} can sign in again.` });
+
+  const held = await pool.query(
+    `SELECT
+       (SELECT COUNT(*) FROM activities WHERE approval_required_from = $1 AND approval_status = 'pending'
+          AND status NOT IN ('Draft', 'Cancelled', 'On Hold'))::int
+     + (SELECT COUNT(*) FROM movements WHERE approval_required_from = $1 AND approval_status = 'pending'
+          AND status NOT IN ('Draft', 'Cancelled', 'On Hold'))::int AS approvals,
+       (SELECT COUNT(*) FROM activities WHERE assigned_to = $1
+          AND status NOT IN ('Completed', 'Rejected', 'Cancelled'))::int AS activities,
+       (SELECT COUNT(*) FROM monthly_plans WHERE manager_id = $1 AND status <> 'Closed')::int AS plans`,
+    [account.id]
+  );
+  const { approvals, activities, plans } = held.rows[0];
+  res.json({
+    ...account,
+    heldWork: { approvals, activities, plans },
+    message: `${account.name} is suspended and signed out everywhere.`
+  });
 }));
 
 // Requirements 6 and 7: the Director moves a user between managers and between

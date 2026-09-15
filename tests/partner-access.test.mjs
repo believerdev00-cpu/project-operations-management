@@ -8,7 +8,11 @@
 import bcrypt from 'bcryptjs';
 import { pool } from '../server/db/database.js';
 import { BUSINESS_OPERATIONS } from '../shared/businessOperations.js';
+import { directorSession } from './director.mjs';
 const API = process.env.API || 'http://localhost:5000';
+// What each invited partner changes the Director's temporary password to at
+// their first sign-in.
+const PARTNER_OWN_PASSWORD = 'partner-own-pass-456';
 
 let passed = 0;
 let failed = 0;
@@ -77,7 +81,7 @@ const INTERNAL_ENDPOINTS = [
 
 try {
   section('setup');
-  const adminToken = await login('admin', process.env.ADMIN_PASSWORD || 'admin123');
+  const { token: adminToken } = await directorSession();
   const directorId = (await pool.query("SELECT id FROM users WHERE role='super-admin' ORDER BY id LIMIT 1")).rows[0].id;
 
   // A manager in Mining, so a Mining activity can be raised, approved and then
@@ -127,7 +131,17 @@ try {
     check(`invite a ${operation.name} partner`, result.status === 201, JSON.stringify(result.body).slice(0, 160));
     if (result.status === 201) {
       created.users.push(result.body.id);
-      partners[operation.id] = { ...result.body, token: await login(`zz-partner-${operation.id}`, 'test-pass-123') };
+      // The Director's password is temporary: until the partner chooses their
+      // own, their session reaches nothing but the password route.
+      const firstToken = await login(`zz-partner-${operation.id}`, 'test-pass-123');
+      const blocked = await api(firstToken, '/api/partner/overview');
+      check('  blocked until they choose their own password', blocked.status === 403 && blocked.body.code === 'PASSWORD_CHANGE_REQUIRED',
+        `${blocked.status} ${blocked.body.code}`);
+      const chosen = await api(firstToken, '/api/auth/password', {
+        method: 'POST', body: JSON.stringify({ currentPassword: 'test-pass-123', newPassword: PARTNER_OWN_PASSWORD })
+      });
+      check('  chooses their own password', chosen.status === 200 && Boolean(chosen.body.token), `${chosen.status} ${chosen.body.message}`);
+      partners[operation.id] = { ...result.body, token: chosen.body.token };
       check(`  assigned to ${operation.name}`, result.body.operation === operation.id, result.body.operation);
       check('  access level is view-only', result.body.accessLevel === 'view-only', result.body.accessLevel);
       check('  status is active', result.body.status === 'active', result.body.status);
@@ -298,7 +312,7 @@ try {
   check('a suspended partner is refused on their existing token', suspendedRead.status === 403,
     `${suspendedRead.status} ${suspendedRead.body.message}`);
   const suspendedLogin = await api(null, '/api/auth/login', {
-    method: 'POST', body: JSON.stringify({ username: 'zz-partner-agriculture', password: 'test-pass-123' })
+    method: 'POST', body: JSON.stringify({ username: 'zz-partner-agriculture', password: PARTNER_OWN_PASSWORD })
   });
   check('a suspended partner cannot sign in again', suspendedLogin.status === 403,
     `${suspendedLogin.status} ${suspendedLogin.body.message}`);

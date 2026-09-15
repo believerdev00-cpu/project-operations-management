@@ -3,13 +3,13 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import jwt from 'jsonwebtoken';
-import bcrypt from 'bcryptjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { initDatabase, pool } from './db/database.js';
 import { sectors } from './data/seedData.js';
-import { authMiddleware, jwtSecret } from './lib/auth.js';
+import { authMiddleware, jwtSecret, FILE_PATH, FILE_TOKEN_PURPOSE } from './lib/auth.js';
+import { hashPassword, passwordMatches, passwordProblem } from './lib/passwords.js';
 import { asyncRoute, hasFullScope, isAdmin, managerScope, parseId, requiredText, validNumber, validateSector, withinScope } from './lib/http.js';
 import { pendingForMeSql } from './lib/approvals.js';
 import { getCurrentRate } from './lib/rates.js';
@@ -69,11 +69,16 @@ function mapApproval(row) {
   };
 }
 
-// Vercel (and any reverse proxy) puts the client address in X-Forwarded-For.
-// Without trusting the first hop, every request appears to come from the proxy,
-// so the login limiter counted the whole organisation as one caller and ten
-// mistyped passwords anywhere locked everybody out.
-app.set('trust proxy', 1);
+// A reverse proxy puts the client address in X-Forwarded-For, and without
+// trusting that hop every request appears to come from the proxy. But with no
+// proxy in front -- `node server/index.js` answering directly, which is how this
+// app is deployed -- trusting it lets any caller write their own address into
+// the header, and a fresh fake address per guess walked straight past the login
+// limiter. So it is off unless TRUST_PROXY says how many proxies there are.
+if (process.env.TRUST_PROXY) {
+  const hops = Number(process.env.TRUST_PROXY);
+  app.set('trust proxy', Number.isInteger(hops) ? hops : process.env.TRUST_PROXY);
+}
 
 // Until this process also served the built client, helmet's policy only ever
 // applied to JSON and the content policy did nothing. It now applies to the
@@ -96,16 +101,67 @@ app.use(helmet({
 app.use(cors({ origin: allowedOrigins, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
 
-// Slows credential stuffing. In-memory and per-process: behind more than one
+// Slows password guessing. In-memory and per-process: behind more than one
 // instance this needs a shared store.
-const loginLimiter = rateLimit({
+//
+// Two counters, because each alone was beatable. Keyed by address only, one
+// insider could mix a guess at the Director's password with a successful
+// sign-in of their own -- successes are not counted, so the budget never ran
+// out. Keyed by account as well, guesses at one account are capped however
+// they are spread out, and the address counter still stops one machine trying
+// a password against many accounts. An office behind one shared address is
+// why the address limit is the looser of the two.
+const TOO_MANY_ATTEMPTS = { code: 'TOO_MANY_ATTEMPTS', message: 'Too many login attempts. Try again in a few minutes.' };
+const addressLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 10,
+  limit: 30,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   skipSuccessfulRequests: true,
-  message: { code: 'TOO_MANY_ATTEMPTS', message: 'Too many login attempts. Try again in a few minutes.' }
+  message: TOO_MANY_ATTEMPTS
 });
+const accountLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: false,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => `account:${String(req.body?.username || '').trim().toLowerCase()}`,
+  message: TOO_MANY_ATTEMPTS
+});
+// Checking the current password is itself a guessable sign-in, so it is capped
+// per signed-in account.
+const passwordChangeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: false,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => `password-change:${req.user?.id}`,
+  message: TOO_MANY_ATTEMPTS
+});
+
+// What the browser is told about the signed-in account. Built in one place so
+// sign-in, the session check and a password change can never disagree.
+function publicAccount(row) {
+  return {
+    id: row.id, username: row.username, name: row.name, role: row.role, sector: row.sector,
+    email: row.email || null,
+    status: row.status || 'active',
+    accessLevel: row.access_level || 'internal',
+    coversAllSectors: Boolean(row.covers_all_sectors),
+    mustChangePassword: Boolean(row.must_change_password)
+  };
+}
+
+// Only the account id and the issue time are trusted from a token --
+// authMiddleware reads everything else back from the row -- so that is all a
+// new token carries.
+function sessionToken(account, issuedAt) {
+  const claims = { id: account.id };
+  if (issuedAt) claims.iat = issuedAt;
+  return jwt.sign(claims, jwtSecret, { algorithm: 'HS256', expiresIn: '12h' });
+}
 
 app.get('/api/health', asyncRoute(async (req, res) => {
   await pool.query('SELECT 1');
@@ -144,21 +200,17 @@ app.get('/api/managers', authMiddleware, asyncRoute(async (req, res) => {
 // leave the database, so a password is reset, never read back.
 app.use('/api/users', authMiddleware, userRouter);
 
-app.post('/api/auth/login', loginLimiter, asyncRoute(async (req, res) => {
+const ACCOUNT_COLUMNS = 'id, username, name, role, sector, email, status, access_level, covers_all_sectors, must_change_password';
+
+app.post('/api/auth/login', addressLimiter, accountLimiter, asyncRoute(async (req, res) => {
   const { username, password } = req.body || {};
   const result = await pool.query(
-    'SELECT id, username, password_hash, name, role, sector, status, access_level, covers_all_sectors FROM users WHERE username = $1',
+    `SELECT ${ACCOUNT_COLUMNS}, password_hash FROM users WHERE username = $1`,
     [typeof username === 'string' ? username.trim() : '']
   );
   const user = result.rows[0];
 
-  // Accounts have been created with the password trimmed, so a password typed
-  // with a stray trailing space was hashed without it. Checking the exact text
-  // first and the trimmed text second lets both sign in.
-  const typed = typeof password === 'string' ? password : '';
-  const matches = Boolean(user) && (bcrypt.compareSync(typed, user.password_hash)
-    || (typed.trim() !== typed && bcrypt.compareSync(typed.trim(), user.password_hash)));
-  if (!matches) {
+  if (!(await passwordMatches(password, user?.password_hash))) {
     return res.status(401).json({ code: 'BAD_CREDENTIALS', message: 'Invalid username or password.' });
   }
   // A suspended or revoked account is refused at the door, so no token is ever
@@ -174,32 +226,63 @@ app.post('/api/auth/login', loginLimiter, asyncRoute(async (req, res) => {
     });
   }
 
-  const publicUser = {
-    id: user.id, username: user.username, name: user.name, role: user.role, sector: user.sector,
-    accessLevel: user.access_level || 'internal',
-    coversAllSectors: Boolean(user.covers_all_sectors)
-  };
-  const token = jwt.sign(publicUser, jwtSecret, { expiresIn: '12h' });
-  res.json({ token, user: publicUser });
+  res.json({ token: sessionToken(user), user: publicAccount(user) });
 }));
 
 app.get('/api/auth/session', authMiddleware, asyncRoute(async (req, res) => {
-  const result = await pool.query(
-    'SELECT id, username, name, role, sector, email, status, access_level, covers_all_sectors FROM users WHERE id = $1',
-    [req.user.id]
+  const result = await pool.query(`SELECT ${ACCOUNT_COLUMNS} FROM users WHERE id = $1`, [req.user.id]);
+  res.json({ user: result.rowCount ? publicAccount(result.rows[0]) : null });
+}));
+
+// The owner choosing their own password: at the first sign-in after the Director
+// set one, or whenever they like from their account menu. The current password
+// is asked for even though the caller holds a session, so a session left open on
+// a shared computer cannot be turned into a permanent takeover.
+app.post('/api/auth/password', authMiddleware, passwordChangeLimiter, asyncRoute(async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  const found = await pool.query(`SELECT ${ACCOUNT_COLUMNS}, password_hash FROM users WHERE id = $1`, [req.user.id]);
+  const account = found.rows[0];
+  if (!account) return res.status(401).json({ code: 'ACCOUNT_GONE', message: 'Account no longer exists.' });
+
+  if (!(await passwordMatches(currentPassword, account.password_hash))) {
+    return res.status(400).json({ code: 'CURRENT_PASSWORD_WRONG', message: 'Your current password is not correct.' });
+  }
+  const problem = passwordProblem(newPassword, { username: account.username });
+  if (problem) return res.status(400).json({ code: 'PASSWORD_WEAK', message: problem });
+  if (await passwordMatches(newPassword, account.password_hash)) {
+    return res.status(400).json({ code: 'PASSWORD_SAME', message: 'Choose a password different from the current one.' });
+  }
+
+  // Every other session on this account ends here: authMiddleware refuses tokens
+  // issued before password_changed_at. The token handed back is issued at the
+  // second that check rounds up to, so this one session carries on.
+  const changedAt = new Date();
+  await pool.query(
+    'UPDATE users SET password_hash = $2, password_changed_at = $3, must_change_password = FALSE WHERE id = $1',
+    [account.id, await hashPassword(newPassword), changedAt]
   );
-  const row = result.rows[0];
+  const updated = { ...account, must_change_password: false };
   res.json({
-    user: row
-      ? {
-          id: row.id, username: row.username, name: row.name, role: row.role,
-          sector: row.sector, email: row.email || null,
-          status: row.status || 'active', accessLevel: row.access_level || 'internal',
-          coversAllSectors: Boolean(row.covers_all_sectors)
-        }
-      : null
+    token: sessionToken(updated, Math.ceil(changedAt.getTime() / 1000)),
+    user: publicAccount(updated),
+    message: 'Your password has been changed.'
   });
 }));
+
+// A short-lived link to one evidence file, for opening it in a new tab. See
+// FILE_PATH in lib/auth.js for why the session token is never put in a URL.
+// Nothing about the record is checked here: the file route itself runs the full
+// permission check when the link is opened, with this account.
+app.post('/api/auth/file-link', authMiddleware, (req, res) => {
+  const filePath = typeof req.body?.path === 'string' ? req.body.path : '';
+  if (!FILE_PATH.test(filePath)) return res.status(400).json({ message: 'That is not a file address.' });
+  const fileToken = jwt.sign(
+    { id: req.user.id, purpose: FILE_TOKEN_PURPOSE, path: filePath },
+    jwtSecret,
+    { algorithm: 'HS256', expiresIn: '5m' }
+  );
+  res.json({ url: `${filePath}?token=${encodeURIComponent(fileToken)}` });
+});
 
 app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
   // Parameterized rather than interpolated: every other query in this file binds

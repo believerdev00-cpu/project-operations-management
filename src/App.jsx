@@ -10,7 +10,7 @@ import ActivityReview, {
   deadlineNote, formatDate, formatUsd, statusTone
 } from './ActivityReview.jsx';
 import {
-  DetailView, DialogProvider, ErrorBoundary, PHONE_QUERY, buildHash, trapFocus, useBusy, useDialog,
+  DetailView, DialogProvider, ErrorBoundary, MINIMUM_PASSWORD_LENGTH, PHONE_QUERY, buildHash, trapFocus, useBusy, useDialog,
   useHashRoute, useMediaQuery, useScrollLock
 } from './ui.jsx';
 
@@ -167,6 +167,9 @@ function authRefusal(payload, t) {
     case 'ACCOUNT_INACTIVE': return payload.status === 'suspended' ? t('auth.accountSuspended') : t('auth.accountRevoked');
     case 'BAD_CREDENTIALS': return t('auth.badCredentials');
     case 'TOO_MANY_ATTEMPTS': return t('auth.tooManyAttempts');
+    case 'PASSWORD_CHANGE_REQUIRED': return t('auth.choosePasswordFirst');
+    case 'CURRENT_PASSWORD_WRONG': return t('auth.currentPasswordWrong');
+    case 'PASSWORD_SAME': return t('auth.passwordSame');
     default: return payload?.message || t('auth.sessionExpired');
   }
 }
@@ -206,12 +209,14 @@ function useApi(token, onExpired) {
     console.warn(`${options.method || 'GET'} ${url} -> ${response.status}`, payload);
     // A token that no longer works, or an account that may no longer sign in,
     // ends the session instead of leaving every screen failing with 401s.
-    if (response.status === 401 || payload.code === 'ACCOUNT_INACTIVE') {
+    // A password the Director just reset is the same: signing in again leads
+    // straight to choosing a new one.
+    if (response.status === 401 || payload.code === 'ACCOUNT_INACTIVE' || payload.code === 'PASSWORD_CHANGE_REQUIRED') {
       const reason = authRefusal(payload, translator.current);
       expired.current(reason);
       throw new Error(reason);
     }
-    throw new Error(payload.message || translator.current('app.requestFailed'));
+    throw new Error(payload.code ? authRefusal(payload, translator.current) : (payload.message || translator.current('app.requestFailed')));
   }, [token]);
 
   const fetchJson = useCallback(async (url, options = {}) => {
@@ -240,7 +245,49 @@ function useApi(token, onExpired) {
     setTimeout(() => URL.revokeObjectURL(href), 1000);
   }, [request]);
 
-  return { fetchJson, upload, download, online };
+  // Opens an evidence file in a new tab. The address carries a file token that
+  // lasts minutes and opens that one file, asked for at the moment of the click
+  // -- never the session token, which in a link ends up in browser history.
+  // The tab is opened before the request so the browser treats it as the
+  // reader's own click rather than a popup.
+  const openFile = useCallback(async (path) => {
+    const tab = window.open('', '_blank');
+    try {
+      const { url } = await fetchJson('/api/auth/file-link', { method: 'POST', body: JSON.stringify({ path }) });
+      if (tab) {
+        tab.opener = null;
+        tab.location.href = url;
+      } else {
+        window.location.assign(url);
+      }
+    } catch (fileError) {
+      tab?.close();
+      throw fileError;
+    }
+  }, [fetchJson]);
+
+  return { fetchJson, upload, download, openFile, online };
+}
+
+// Changing your own password, from the account menu. The API hands back a fresh
+// session -- every other session on the account has just ended -- which
+// replaces the current one.
+function useOwnPasswordChange(fetchJson, onSessionRenewed) {
+  const t = useT();
+  const dialog = useDialog();
+  return useCallback(async () => {
+    const answer = await dialog.password({
+      title: t('account.changeMyPassword'),
+      current: true,
+      confirmLabel: t('auth.savePassword')
+    });
+    if (!answer) return;
+    const result = await fetchJson('/api/auth/password', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword: answer.current, newPassword: answer.next })
+    });
+    onSessionRenewed(result.token, result.user, t('msg.ownPasswordChanged'));
+  }, [dialog, fetchJson, onSessionRenewed, t]);
 }
 
 // ---- the application ------------------------------------------------------------
@@ -260,6 +307,9 @@ function App() {
   // Why the reader is looking at the sign-in screen, when it was not their
   // choice: an expired session, a suspended account, a changed password.
   const [notice, setNotice] = useState('');
+  // A one-off confirmation shown once the new workspace opens, for changes that
+  // replace the session themselves -- choosing a new password.
+  const [welcome, setWelcome] = useState('');
 
   const endSession = useCallback((reason = '') => {
     removeStorage('ops-token');
@@ -277,13 +327,15 @@ function App() {
     endSession('');
   }, [endSession]);
 
-  const startSession = useCallback((nextToken, nextUser) => {
+  const startSession = useCallback((nextToken, nextUser, welcomeMessage = '') => {
     writeStorage('ops-token', nextToken);
     writeStorage('ops-user', JSON.stringify(nextUser));
     setNotice('');
+    setWelcome(welcomeMessage);
     setToken(nextToken);
     setUser(nextUser);
   }, []);
+  const clearWelcome = useCallback(() => setWelcome(''), []);
 
   // The stored account is a snapshot. It is confirmed against the API on every
   // start, and replaced with what the API says -- a manager moved to another
@@ -320,10 +372,14 @@ function App() {
   let screen;
   if (!token || !user) {
     screen = <LoginScreen notice={notice} onSignedIn={startSession} />;
+  } else if (user.mustChangePassword) {
+    // The API refuses everything else until this is done, so nothing else is
+    // drawn -- a workspace here would only fill with refusals.
+    screen = <ChoosePasswordScreen token={token} user={user} onChosen={startSession} onSignOut={signOut} onExpired={endSession} />;
   } else if (user.role === 'partner') {
-    screen = <PartnerWorkspace key={`${user.id}:${token}`} token={token} user={user} onLogout={signOut} onExpired={endSession} />;
+    screen = <PartnerWorkspace key={`${user.id}:${token}`} token={token} user={user} onLogout={signOut} onExpired={endSession} onSessionRenewed={startSession} welcome={welcome} onWelcomeShown={clearWelcome} />;
   } else {
-    screen = <InternalWorkspace key={`${user.id}:${token}`} token={token} user={user} onLogout={signOut} onExpired={endSession} />;
+    screen = <InternalWorkspace key={`${user.id}:${token}`} token={token} user={user} onLogout={signOut} onExpired={endSession} onSessionRenewed={startSession} welcome={welcome} onWelcomeShown={clearWelcome} />;
   }
 
   return <LanguageContext.Provider value={i18n}>
@@ -372,6 +428,53 @@ function LoginScreen({ notice, onSignedIn }) {
   </form></div>;
 }
 
+// Shown in place of the workspace while the account still has a password somebody
+// else chose: the Director's starting password, or one the Director set. It asks
+// for that password again, so a session left open on someone's desk cannot be
+// used to lock its owner out.
+function ChoosePasswordScreen({ token, user, onChosen, onSignOut, onExpired }) {
+  const { language, setLanguage, t } = useI18n();
+  const [form, setForm] = useState({ current: '', next: '', repeat: '' });
+  const [error, setError] = useState('');
+  const [busy, run] = useBusy();
+
+  const submit = (event) => {
+    event.preventDefault();
+    if (form.next.trim().length < MINIMUM_PASSWORD_LENGTH) { setError(t('dialog.passwordTooShort')); return; }
+    if (form.next !== form.repeat) { setError(t('dialog.passwordMismatch')); return; }
+    run(async () => {
+      setError('');
+      try {
+        const response = await fetch('/api/auth/password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ currentPassword: form.current, newPassword: form.next })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (response.status === 401 || payload.code === 'ACCOUNT_INACTIVE') { onExpired(authRefusal(payload, t)); return; }
+        if (!response.ok) throw new Error(payload.code ? authRefusal(payload, t) : (payload.message || t('app.requestFailed')));
+        onChosen(payload.token, payload.user, t('msg.ownPasswordChanged'));
+      } catch (changeError) {
+        setError(changeError.name === 'TypeError' ? t('app.offline') : changeError.message);
+      }
+    });
+  };
+
+  return <div className="login-shell"><form className="login-card" onSubmit={submit}>
+    <img className="login-logo" src="/logo.png" srcSet="/logo.png 1x, /logo@2x.png 2x" alt={t('app.name')} />
+    <LanguagePicker language={language} setLanguage={setLanguage} label={t('app.language')} />
+    <h1>{t('auth.choosePasswordTitle')}</h1>
+    <p>{fill(t('auth.choosePasswordBlurb'), { name: user.name })}</p>
+    <label>{t('auth.currentPassword')}<input required type="password" autoComplete="current-password" value={form.current} onChange={(event) => setForm({ ...form, current: event.target.value })} /></label>
+    <label>{t('dialog.newPassword')}<input required type="password" autoComplete="new-password" minLength={MINIMUM_PASSWORD_LENGTH} value={form.next} onChange={(event) => setForm({ ...form, next: event.target.value })} /></label>
+    <label>{t('dialog.repeatPassword')}<input required type="password" autoComplete="new-password" value={form.repeat} onChange={(event) => setForm({ ...form, repeat: event.target.value })} /></label>
+    <p className="field-hint">{t('dialog.passwordTooShort')}</p>
+    <button className="primary-btn full-width" type="submit" disabled={busy}>{busy ? t('report.working') : t('auth.savePassword')}</button>
+    {error && <div className="error-state" role="alert">{error}</div>}
+    <button className="text-btn full-width" type="button" onClick={onSignOut}>{t('app.signOut')}</button>
+  </form></div>;
+}
+
 // ---- the shell: sidebar on a wide screen, drawer on a phone ---------------------
 
 // One small line icon per page, so the pages can be told apart at a glance in
@@ -397,7 +500,7 @@ function NavIcon({ id }) {
 
 function AppShell({
   user, subtitle, navLabel, nav = [], activeId, onNavigate, sidebarContent, eyebrow, title,
-  badge = 0, onBadge, online, refreshing, onRefresh, onLogout, accountLines = [], children
+  badge = 0, onBadge, online, refreshing, onRefresh, onLogout, onChangePassword, accountLines = [], children
 }) {
   const { language, setLanguage, t } = useI18n();
   const phone = useMediaQuery(PHONE_QUERY);
@@ -479,6 +582,7 @@ function AppShell({
         <div className="sidebar-label">{t('app.signedInAs')}</div>
         <strong>{user.name}</strong>
         {accountLines.map((line) => <span key={line}>{line}</span>)}
+        {onChangePassword && <button className="account-btn" onClick={() => { setDrawerOpen(false); onChangePassword(); }} type="button">{t('account.changeMyPassword')}</button>}
         <button className="logout-btn" onClick={onLogout} type="button">{t('app.signOut')}</button>
       </div>
     </aside>
@@ -517,11 +621,14 @@ function Banners({ message, error, onDismissMessage, onDismissError }) {
 
 const PARTNER_TABS = ['overview', 'activities', 'movements', 'reports', 'updates'];
 
-function PartnerWorkspace({ token, user, onLogout, onExpired }) {
+function PartnerWorkspace({ token, user, onLogout, onExpired, onSessionRenewed, welcome, onWelcomeShown }) {
   const { language, t } = useI18n();
   const [route, navigate] = useHashRoute();
   const { fetchJson, online } = useApi(token, onExpired);
   const [error, setError] = useState('');
+  const [message, setMessage] = useState(welcome || '');
+  useEffect(() => { if (welcome) onWelcomeShown(); }, [welcome, onWelcomeShown]);
+  const changeOwnPassword = useOwnPasswordChange(fetchJson, onSessionRenewed);
   const [reloadKey, setReloadKey] = useState(0);
   const tab = PARTNER_TABS.includes(route.view) ? route.view : 'overview';
 
@@ -551,9 +658,10 @@ function PartnerWorkspace({ token, user, onLogout, onExpired }) {
     online={online}
     onRefresh={() => setReloadKey((key) => key + 1)}
     onLogout={onLogout}
+    onChangePassword={() => changeOwnPassword().catch((changeError) => setError(changeError.message))}
     accountLines={[t('role.partner'), t('partners.viewOnly')]}
   >
-    <Banners error={error} onDismissError={clearError} onDismissMessage={() => {}} />
+    <Banners message={message} error={error} onDismissError={clearError} onDismissMessage={() => setMessage('')} />
     <ErrorBoundary resetKey={tab}>
       <PartnerPortal
         key={reloadKey}
@@ -571,13 +679,17 @@ function PartnerWorkspace({ token, user, onLogout, onExpired }) {
 
 // ---- the internal application -----------------------------------------------
 
-function InternalWorkspace({ token, user, onLogout, onExpired }) {
+function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed, welcome, onWelcomeShown }) {
   const { language, t } = useI18n();
   const dialog = useDialog();
   const [route, navigate] = useHashRoute();
-  const { fetchJson, upload, download, online } = useApi(token, onExpired);
+  const { fetchJson, upload, download, openFile, online } = useApi(token, onExpired);
+  const changeOwnPassword = useOwnPasswordChange(fetchJson, onSessionRenewed);
   const isDirector = user.role === 'super-admin';
   const isManager = user.role === 'manager';
+  // Work is assigned by the Director and asked for by a manager. A team member
+  // follows their operation's work but raises nothing; the API refuses them too.
+  const canAddActivity = isDirector || isManager;
 
   // ---- data ------------------------------------------------------------------
   // 'loading' only until the first successful load. After that every refresh
@@ -599,8 +711,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired }) {
   const [issues, setIssues] = useState({});
 
   // ---- feedback --------------------------------------------------------------
-  const [message, setMessage] = useState('');
+  const [message, setMessage] = useState(welcome || '');
   const [error, setError] = useState('');
+  useEffect(() => { if (welcome) onWelcomeShown(); }, [welcome, onWelcomeShown]);
   const [actionBusy, runAction] = useBusy();
   const notify = useCallback((text) => { setError(''); setMessage(text); }, []);
   const fail = useCallback((text) => { setMessage(''); setError(text); }, []);
@@ -875,10 +988,39 @@ function InternalWorkspace({ token, user, onLogout, onExpired }) {
   // still with the server is ignored instead of sent twice.
   const act = (task) => (...args) => runAction(() => task(...args));
 
+  // Stable: the evidence lists inside the modules receive it.
+  const openEvidenceFile = useCallback((path) => {
+    openFile(path).catch((fileError) => fail(fileError.message));
+  }, [openFile, fail]);
+
+  // Suspending signs the person out everywhere at once. It is never blocked by
+  // the work they hold -- locking out someone who has left cannot wait -- but
+  // that work is named afterwards, so it can be handed to somebody else.
+  const setAccountStatus = act(async (account, status) => {
+    const suspending = status === 'suspended';
+    const confirmed = await dialog.confirm({
+      title: fill(t(suspending ? 'msg.suspendTitle' : 'msg.reactivateTitle'), { name: account.name }),
+      message: t(suspending ? 'msg.suspendBody' : 'msg.reactivateBody'),
+      confirmLabel: t(suspending ? 'action.suspend' : 'action.reactivate'),
+      danger: suspending
+    });
+    if (!confirmed) return;
+    setError('');
+    try {
+      const result = await fetchJson(`/api/users/${account.id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
+      const held = result.heldWork || {};
+      if (!suspending) notify(fill(t('msg.reactivated'), { name: account.name }));
+      else if (held.approvals || held.activities || held.plans) {
+        fail(fill(t('msg.suspendedHeldWork'), { name: account.name, approvals: held.approvals, activities: held.activities, plans: held.plans }));
+      } else notify(fill(t('msg.suspended'), { name: account.name }));
+      await loadData();
+    } catch (statusError) { fail(statusError.message); }
+  });
+
   const resetPassword = act(async (account) => {
     const next = await dialog.password({
       title: t('action.changePassword'),
-      message: fill(t('msg.passwordFor'), { name: account.name, username: account.username }),
+      message: `${fill(t('msg.passwordFor'), { name: account.name, username: account.username })} ${t('form.temporaryPasswordHint')}`,
       confirmLabel: t('action.changePassword')
     });
     if (next === null) return;
@@ -1443,7 +1585,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired }) {
     </div>;
   } else if (view === 'dashboard') {
     content = <>
-      <section className="welcome-strip"><div><span className="eyebrow">{t('dash.systemOverview')}</span><h2>{t('dash.headline')}</h2><p>{t('dash.blurb')}</p></div><button className="primary-btn" type="button" onClick={() => navigate(`${buildHash('activities')}?new=1`)}>{isDirector ? t('action.assignActivity') : t('action.raiseActivity')}</button></section>
+      <section className="welcome-strip"><div><span className="eyebrow">{t('dash.systemOverview')}</span><h2>{t('dash.headline')}</h2><p>{t('dash.blurb')}</p></div>{canAddActivity && <button className="primary-btn" type="button" onClick={() => navigate(`${buildHash('activities')}?new=1`)}>{isDirector ? t('action.assignActivity') : t('action.raiseActivity')}</button>}</section>
       <div className={`metric-grid${dashboardMetrics.length === 5 ? ' metric-grid-5' : ''}`}>
         {dashboardMetrics.map(([label, value]) => <Metric key={label} label={label} value={value} />)}
       </div>
@@ -1529,14 +1671,14 @@ function InternalWorkspace({ token, user, onLogout, onExpired }) {
     content = <>
       <section className="context-strip">
         <div><span className="eyebrow">{t('activities.eyebrow')}</span><h2>{t('activities.title')}</h2><p>{isDirector ? t('activities.directorBlurb') : t('activities.managerBlurb')}</p></div>
-        <button className="primary-btn" type="button" onClick={() => document.getElementById('activity-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>{isDirector ? t('action.assignActivity') : t('action.raiseActivity')}</button>
+        {canAddActivity && <button className="primary-btn" type="button" onClick={() => document.getElementById('activity-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>{isDirector ? t('action.assignActivity') : t('action.raiseActivity')}</button>}
       </section>
 
       {activityDetail && activeRouteActivity && activityDetail.activity.id === activeRouteActivity && <DetailView onClose={closeActivity} label={activityDetail.activity.activity}>
         <ActivityReview
           detail={activityDetail}
           user={user}
-          token={token}
+          onOpenFile={openEvidenceFile}
           busy={actionBusy}
           sectorLabel={sectorName}
           managers={managers}
@@ -1548,6 +1690,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired }) {
           onRemoveEvidence={removeActivityEvidence}
           onSubmitCompletion={submitCompletion}
           onApprove={decideActivityApproval}
+          onReject={(record) => decideFromQueue(record, 'reject')}
           onVisibility={setActivityVisibility}
           onRecordExpense={recordExpense}
           onRemoveExpense={removeExpense}
@@ -1592,7 +1735,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired }) {
         </div>}
       </Panel>
 
-      <ActivityForm
+      {canAddActivity && <ActivityForm
         form={activityForm} setForm={setActivityForm} projects={projects} onChooseProject={chooseFormProject}
         selectedProject={formProject} sectorOptions={sectorOptions} managers={managers}
         isDirector={isDirector} usd={usd} rate={rate} busy={actionBusy}
@@ -1606,7 +1749,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired }) {
             (result) => openActivity(result.id)
           );
         }}
-      />
+      />}
       <ReportsSection
         mode={reportMode}
         range={reportRange}
@@ -1662,7 +1805,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired }) {
       <Panel title={t('panel.userManagement')} subtitle={`${filteredUsers.length} / ${register.total}`}>
         {issues.users
           ? <LoadIssue onRetry={loadData} />
-          : <UserTable users={filteredUsers} managers={managers} currentUserId={user.id} busy={actionBusy} onChangeManager={changeUserManager} onChangeSector={changeUserSector} onResetPassword={resetPassword} empty={t('empty.noAccountsMatch')} />}
+          : <UserTable users={filteredUsers} managers={managers} currentUserId={user.id} busy={actionBusy} onChangeManager={changeUserManager} onChangeSector={changeUserSector} onResetPassword={resetPassword} onSetStatus={setAccountStatus} empty={t('empty.noAccountsMatch')} />}
       </Panel>
       <AccountForm form={accountForm} setForm={setAccountForm} managers={managers} busy={actionBusy} onSubmit={(event) => submit(event, '/api/users', { ...accountForm, managerId: accountForm.managerId || null }, t('msg.accountCreated'), () => setAccountForm(emptyAccount))} />
     </>;
@@ -1695,7 +1838,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired }) {
   } else if (view === 'movements') {
     content = <MovementModule
       user={user}
-      token={token}
+      onOpenFile={openEvidenceFile}
       fetchJson={fetchJson}
       upload={upload}
       openId={routeId}
@@ -1722,6 +1865,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired }) {
     refreshing={refreshing}
     onRefresh={loadData}
     onLogout={onLogout}
+    onChangePassword={() => changeOwnPassword().catch((changeError) => fail(changeError.message))}
     accountLines={[
       roleName(user.role, t),
       ...(user.coversAllSectors
@@ -1770,9 +1914,9 @@ function rowActivation(onActivate) {
   };
 }
 
-function UserTable({ users, managers, currentUserId, busy, onChangeManager, onChangeSector, onResetPassword, empty }) {
+function UserTable({ users, managers, currentUserId, busy, onChangeManager, onChangeSector, onResetPassword, onSetStatus, empty }) {
   const t = useT();
-  return users.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('field.name')}</th><th>{t('field.username')}</th><th>{t('field.role')}</th><th>{t('field.reportsTo')}</th><th>{t('field.workingArea')}</th><th>{t('field.projects')}</th><th>{t('field.team')}</th><th>{t('field.added')}</th><th>{t('field.password')}</th><th>{t('field.action')}</th></tr></thead><tbody>
+  return users.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('field.name')}</th><th>{t('field.username')}</th><th>{t('field.role')}</th><th>{t('user.access')}</th><th>{t('field.reportsTo')}</th><th>{t('field.workingArea')}</th><th>{t('field.projects')}</th><th>{t('field.team')}</th><th>{t('field.added')}</th><th>{t('field.password')}</th><th>{t('field.action')}</th></tr></thead><tbody>
     {users.map((account) => {
       const isDirector = account.role === 'super-admin';
       const isSelf = account.id === currentUserId;
@@ -1785,6 +1929,9 @@ function UserTable({ users, managers, currentUserId, busy, onChangeManager, onCh
         <td className="card-title-cell"><strong>{account.name}</strong><small>#{account.id}</small></td>
         <td data-label={t('field.username')}>{account.username}</td>
         <td data-label={t('field.role')}><span className={isDirector ? 'role-badge role-admin' : 'role-badge'}>{t(`role.${account.role}`)}</span></td>
+        <td data-label={t('user.access')}>{account.status === 'suspended'
+          ? <span className="status-badge tone-stopped">{t('user.suspended')}</span>
+          : <span className="status-badge tone-done">{t('user.active')}</span>}</td>
         <td data-label={t('field.reportsTo')}>{isDirector ? <span className="muted-cell">{t('user.reportsToNobody')}</span>
           : <select aria-label={`${t('field.reportsTo')}: ${account.name}`} disabled={busy} value={account.managerId || ''} onChange={(event) => onChangeManager(account, event.target.value)}>
             <option value="">{t('user.noManager')}</option>
@@ -1802,12 +1949,19 @@ function UserTable({ users, managers, currentUserId, busy, onChangeManager, onCh
         <td data-label={t('field.added')}>{account.createdAt ? formatShortDate(account.createdAt) : <span className="muted-cell">&mdash;</span>}</td>
         {/* Only ever a date. The stored value is a bcrypt hash, so there is no
             password here for anyone, the Director included, to read. */}
-        <td data-label={t('field.password')}>{account.passwordChangedAt ? <span className="muted-cell">{t('user.passwordReset')} {formatShortDate(account.passwordChangedAt)}</span> : <span className="muted-cell">{t('user.passwordOriginal')}</span>}</td>
-        {/* Resetting your own password here would end the session you are
-            using mid-action, so it is not offered on your own row. */}
+        <td data-label={t('field.password')}>{account.mustChangePassword
+          ? <span className="muted-cell">{t('user.passwordTemporary')}</span>
+          : account.passwordChangedAt ? <span className="muted-cell">{t('user.passwordReset')} {formatShortDate(account.passwordChangedAt)}</span> : <span className="muted-cell">{t('user.passwordOriginal')}</span>}</td>
+        {/* Your own password is changed from the account menu, which asks for
+            the current one; the Director's account cannot be suspended. */}
         <td className="card-actions">{isSelf
           ? <span className="muted-cell">{t('user.thisIsYou')}</span>
-          : <button className="text-btn" disabled={busy} onClick={() => onResetPassword(account)} type="button">{t('action.changePassword')}</button>}</td>
+          : <>
+            <button className="text-btn" disabled={busy} onClick={() => onResetPassword(account)} type="button">{t('action.changePassword')}</button>
+            {!isDirector && (account.status === 'suspended'
+              ? <button className="text-btn" disabled={busy} onClick={() => onSetStatus(account, 'active')} type="button">{t('action.reactivate')}</button>
+              : <button className="danger-btn outlined" disabled={busy} onClick={() => onSetStatus(account, 'suspended')} type="button">{t('action.suspend')}</button>)}
+          </>}</td>
       </tr>;
     })}
   </tbody></table></div> : <EmptyState>{empty}</EmptyState>;
@@ -2026,7 +2180,7 @@ function AccountForm({ form, setForm, managers, busy, onSubmit }) {
     <div className="form-grid">
       <Field label={t('field.name')}><input required maxLength="150" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></Field>
       <Field label={t('field.username')}><input required maxLength="100" autoComplete="off" autoCapitalize="none" spellCheck="false" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></Field>
-      <Field label={t('field.password')}><input required minLength="6" type="password" autoComplete="new-password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></Field>
+      <Field label={t('field.password')}><input required minLength={MINIMUM_PASSWORD_LENGTH} type="password" autoComplete="new-password" aria-describedby="account-password-hint" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /><small id="account-password-hint" className="field-hint">{t('form.temporaryPasswordHint')}</small></Field>
       {/* Switching to a team member drops an "all operations" choice that only a
           manager may hold, rather than submitting a value the API will refuse. */}
       <Field label={t('field.role')}><select required value={form.role} onChange={(event) => { const role = event.target.value; setForm({ ...form, role, managerId: '', sector: role !== 'manager' && form.sector === ALL_OPERATIONS ? '' : form.sector }); }}><option value="manager">{t('role.manager')}</option><option value="staff">{t('role.staff')}</option></select></Field>

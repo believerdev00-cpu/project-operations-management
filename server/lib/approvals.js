@@ -58,10 +58,17 @@ export async function resolveDirector(client) {
 // until the Director brings it back.
 export const NOT_AWAITING_STATUSES = ['Draft', 'Cancelled', 'On Hold'];
 
+// Whether the row's decision is still open for somebody -- the part of
+// canApprove that does not depend on who is asking. Routes that move a record
+// by other means use it to keep out of a decision that is not theirs.
+export function decisionOpen(row) {
+  return Boolean(row.approval_required)
+    && row.approval_status === 'pending'
+    && !NOT_AWAITING_STATUSES.includes(row.status);
+}
+
 export function canApprove(user, row) {
-  if (!row.approval_required) return false;
-  if (row.approval_status !== 'pending') return false;
-  if (NOT_AWAITING_STATUSES.includes(row.status)) return false;
+  if (!decisionOpen(row)) return false;
   if (row.approval_required_role === 'director' && isDirectorRole(user)) return true;
   if (row.approval_required_from === null || row.approval_required_from === undefined) return false;
   return Number(row.approval_required_from) === Number(user.id);

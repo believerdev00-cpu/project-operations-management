@@ -199,7 +199,9 @@ export function useDialog() {
   return api;
 }
 
-const MINIMUM_PASSWORD_LENGTH = 6;
+// The same minimum the API enforces (server/lib/passwords.js), checked here too
+// so the reader hears about it before sending anything.
+export const MINIMUM_PASSWORD_LENGTH = 8;
 
 function Dialog({ dialog, onClose }) {
   const t = useT();
@@ -207,6 +209,8 @@ function Dialog({ dialog, onClose }) {
   const returnFocus = useRef(typeof document !== 'undefined' ? document.activeElement : null);
   const [value, setValue] = useState(dialog.initialValue || '');
   const [repeat, setRepeat] = useState('');
+  // Asked for only when the reader is changing their own password.
+  const [current, setCurrent] = useState('');
   const [touched, setTouched] = useState(false);
   const cancelValue = dialog.kind === 'confirm' ? false : null;
 
@@ -226,7 +230,8 @@ function Dialog({ dialog, onClose }) {
   let problem = null;
   if (dialog.kind === 'prompt' && dialog.required && !text) problem = t('dialog.required');
   if (dialog.kind === 'password') {
-    if (value.length < MINIMUM_PASSWORD_LENGTH) problem = t('dialog.passwordTooShort');
+    if (dialog.current && !current) problem = t('dialog.required');
+    else if (value.trim().length < MINIMUM_PASSWORD_LENGTH) problem = t('dialog.passwordTooShort');
     else if (value !== repeat) problem = t('dialog.passwordMismatch');
   }
 
@@ -235,7 +240,7 @@ function Dialog({ dialog, onClose }) {
     setTouched(true);
     if (problem) return;
     if (dialog.kind === 'confirm') onClose(true);
-    else if (dialog.kind === 'password') onClose(value);
+    else if (dialog.kind === 'password') onClose(dialog.current ? { current, next: value } : value);
     else onClose(text);
   };
 
@@ -264,6 +269,10 @@ function Dialog({ dialog, onClose }) {
       </label>}
 
       {dialog.kind === 'password' && <>
+        {dialog.current && <label className="form-field">
+          <span>{t('auth.currentPassword')}</span>
+          <input type="password" autoComplete="current-password" value={current} onChange={(event) => setCurrent(event.target.value)} />
+        </label>}
         <label className="form-field">
           <span>{t('dialog.newPassword')}</span>
           <input type="password" autoComplete="new-password" value={value} onChange={(event) => setValue(event.target.value)} />

@@ -5,6 +5,7 @@
 import bcrypt from 'bcryptjs';
 import { pool } from '../server/db/database.js';
 import { BUSINESS_OPERATIONS } from '../shared/businessOperations.js';
+import { directorSession } from './director.mjs';
 const API = process.env.API || 'http://localhost:5000';
 const MONTH = '2099-09';
 
@@ -54,7 +55,7 @@ async function cleanup() {
 
 try {
   section('setup');
-  const adminToken = await login('admin', process.env.ADMIN_PASSWORD || 'admin123');
+  const { token: adminToken } = await directorSession();
   const managers = {};
   for (const operation of BUSINESS_OPERATIONS) {
     const row = await pool.query(

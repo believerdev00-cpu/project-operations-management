@@ -98,6 +98,13 @@ input[type="checkbox"] { width: 18px; height: 18px; min-height: 0; }
 .sidebar-bottom > span { margin-top: 4px; color: #9db0c2; font-size: .74rem; }
 .logout-btn { width: 100%; margin-top: 18px; padding: 11px; color: #dce7f1; background: #1a405f; text-align: left; }
 .logout-btn:hover { background: #24527a; }
+/* Sits above "Sign out", so the sign-out keeps its own spacing below it. */
+.account-btn { width: 100%; margin-top: 14px; padding: 11px; border: 1px solid rgba(255,255,255,.18); border-radius: 5px; color: #dce7f1; background: transparent; font-weight: 700; text-align: left; }
+.account-btn:hover { background: rgba(255,255,255,.08); }
+.account-btn + .logout-btn { margin-top: 8px; }
+/* A short plain sentence under a field: what the value is for, not a label. */
+.field-hint { display: block; margin: 2px 0 0; color: var(--muted); font-size: .8rem; font-weight: 500; letter-spacing: 0; text-transform: none; line-height: 1.4; }
+.login-card .field-hint { margin-top: 10px; }
 
 .icon-btn { display: inline-grid; place-items: center; flex: none; width: 44px; height: 44px; padding: 0; color: inherit; background: transparent; border: 0; border-radius: 8px; font-size: 1.4rem; line-height: 1; }
 .icon-btn:hover { background: rgba(255, 255, 255, .1); }
@@ -481,7 +488,7 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
   .drawer-close { display: inline-grid; }
   .brand-lockup { padding: 4px 6px 22px; }
   .nav-item { min-height: 48px; padding: 12px; font-size: .95rem; }
-  .logout-btn { min-height: 48px; text-align: center; }
+  .logout-btn, .account-btn { min-height: 48px; text-align: center; }
 
   /* The page title lives in the bar; the heading stays in the document for
      screen readers and for focus when the page changes. */

@@ -25,7 +25,7 @@ import {
   asyncRoute, contentDisposition, hasFullScope, isAdmin, isValidDate, managerScope, parseId, requiredText,
   validNumber, validateSector, withinScope
 } from '../lib/http.js';
-import { canApprove, pendingForMeSql, resolveDirector, APPROVER_ROLE_LABELS } from '../lib/approvals.js';
+import { canApprove, decisionOpen, pendingForMeSql, resolveDirector, APPROVER_ROLE_LABELS } from '../lib/approvals.js';
 import { PAYMENT_METHODS } from '../db/monthlySchema.js';
 import {
   DEAD_STATUSES, OVER_BUDGET_MESSAGE, canDeleteExpense, canRecordExpense, cents,
@@ -470,6 +470,13 @@ function validateRequestBody(payload) {
 }
 
 router.post('/', asyncRoute(async (req, res) => {
+  // The Director assigns work and a manager asks for it. A team member does
+  // neither: they follow their operation's work but raise nothing that would land
+  // in the Director's approval queue. The screen hid the form from nobody, so
+  // the rule lives here.
+  if (!isAdmin(req.user) && req.user.role !== 'manager') {
+    return res.status(403).json({ message: 'Only a manager or the Director can add an activity.' });
+  }
   const payload = req.body || {};
   const invalid = validateRequestBody(payload);
   if (invalid) return res.status(400).json({ message: invalid });
@@ -938,6 +945,19 @@ router.patch('/:id/decision', asyncRoute(async (req, res) => {
   if (status !== existing.status && !(STATUS_FLOW[existing.status] || []).includes(status)) {
     return res.status(400).json({ message: `A ${existing.status} activity cannot move straight to ${status}.` });
   }
+  // A record waiting on a decision is decided by the person it names, through
+  // the approve/reject route. This wider surface used to reach Approved as well
+  // -- and its form started on Approved -- so saving a note approved work that
+  // was waiting on a manager, over that manager's head, and skipped the
+  // approver check entirely. While the decision is open the Director may only
+  // park the record or cancel it here.
+  const awaitingDecision = decisionOpen(existing);
+  if (awaitingDecision && status !== existing.status && !['On Hold', 'Cancelled'].includes(status)) {
+    return res.status(409).json({
+      code: 'DECISION_PENDING',
+      message: 'This activity is waiting for a decision. Approve or reject it with the decision buttons instead.'
+    });
+  }
 
   const budgetGiven = Object.prototype.hasOwnProperty.call(payload, 'approvedBudget');
   let approvedBudget = existing.approved_budget === null ? null : Number(existing.approved_budget);
@@ -976,6 +996,13 @@ router.patch('/:id/decision', asyncRoute(async (req, res) => {
   // reason given for the change itself -- not one inherited from the record.
   const previousApprovedFigure = existing.approved_budget === null ? null : round2(existing.approved_budget);
   const budgetIsMoving = budgetGiven && previousApprovedFigure !== approvedBudget;
+  // The budget of an undecided request is set by the decision itself.
+  if (awaitingDecision && budgetIsMoving) {
+    return res.status(409).json({
+      code: 'DECISION_PENDING',
+      message: 'This activity is waiting for a decision. Set the budget when you approve it.'
+    });
+  }
   if (budgetIsMoving && !freshNote) {
     return res.status(400).json({ message: 'Say why the approved budget is changing.' });
   }
@@ -1531,7 +1558,10 @@ router.post('/:id/evidence', authorizeEvidenceUpload, upload.array('files', 10),
     }
   } catch (error) {
     await Promise.all(stored.map((item) => deleteFile(EVIDENCE_FOLDER, item.storedName)));
-    return res.status(502).json({ message: error.message });
+    // The disk error names the absolute folder on the server, which is nobody's
+    // business in the browser; it goes to the server log instead.
+    console.error('Evidence could not be stored:', error);
+    return res.status(502).json({ message: 'The file could not be saved. Please try again.' });
   }
 
   const client = await pool.connect();

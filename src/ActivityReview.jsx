@@ -128,20 +128,26 @@ function materialLines(materials) {
     .filter(Boolean);
 }
 
+// Whether the record's decision is still open for somebody. Mirrors decisionOpen
+// in server/lib/approvals.js.
+export function decisionIsOpen(record) {
+  return Boolean(record.approvalRequired)
+    && record.approvalStatus === 'pending'
+    && !['Draft', 'Cancelled', 'On Hold'].includes(record.status);
+}
+
 // Whether this user is the person the record is waiting on. Mirrors canApprove
 // in server/lib/approvals.js, which is what actually decides it -- this only
 // governs whether the buttons are drawn.
 export function canApproveRecord(user, record) {
-  if (!record.approvalRequired) return false;
-  if (record.approvalStatus !== 'pending') return false;
-  if (['Draft', 'Cancelled', 'On Hold'].includes(record.status)) return false;
+  if (!decisionIsOpen(record)) return false;
   if (record.approvalRequiredRole === 'director' && user.role === 'super-admin') return true;
   return record.approvalRequiredFrom !== null && record.approvalRequiredFrom === user.id;
 }
 
 export function ActivityReview({
-  detail, user, token, sectorLabel, managers = [], busy = false,
-  onClose, onDecision, onStatus, onAssign, onUpload, onRemoveEvidence, onSubmitCompletion, onApprove,
+  detail, user, onOpenFile, sectorLabel, managers = [], busy = false,
+  onClose, onDecision, onStatus, onAssign, onUpload, onRemoveEvidence, onSubmitCompletion, onApprove, onReject,
   onVisibility, onRecordExpense, onRemoveExpense, onRequestBudget, onDecideBudget, onDelete
 }) {
   const { language, t } = useI18n();
@@ -159,15 +165,14 @@ export function ActivityReview({
   // that old sentence back as the reason for any budget change saved later.
   const [decision, setDecision] = useState({
     approvedBudget: activity.approvedBudget === null ? String(activity.requestedBudget) : String(activity.approvedBudget),
-    status: activity.status === 'Pending Approval' ? 'Approved' : activity.status,
+    status: activity.status,
     adminNote: ''
   });
   // The approve/reject form, which is a different thing from the Director's
   // wider editing surface below: it is the decision the record is waiting on.
   const [approval, setApproval] = useState({
     approvedBudget: activity.approvedBudget === null ? String(activity.requestedBudget) : String(activity.approvedBudget),
-    adminNote: '',
-    rejectionReason: ''
+    adminNote: ''
   });
   const [assignment, setAssignment] = useState({
     assignedTo: activity.assignedTo === null ? '' : String(activity.assignedTo),
@@ -181,13 +186,12 @@ export function ActivityReview({
   useEffect(() => {
     setDecision({
       approvedBudget: activity.approvedBudget === null ? String(activity.requestedBudget) : String(activity.approvedBudget),
-      status: activity.status === 'Pending Approval' ? 'Approved' : activity.status,
+      status: activity.status,
       adminNote: ''
     });
     setApproval({
       approvedBudget: activity.approvedBudget === null ? String(activity.requestedBudget) : String(activity.approvedBudget),
-      adminNote: '',
-      rejectionReason: ''
+      adminNote: ''
     });
     setAssignment({
       assignedTo: activity.assignedTo === null ? '' : String(activity.assignedTo),
@@ -212,10 +216,14 @@ export function ActivityReview({
   const decisionHasChanges = decisionBudgetMoves || decision.status !== activity.status || Boolean(decisionNote);
   // The Director trimmed the amount, so the record is a budget adjustment
   // rather than a plain approval unless they say otherwise.
-  const suggestsAdjusted = decision.status === 'Approved' && typedBudget !== activity.requestedBudget;
-
+  // While the record waits on a decision, that decision is taken with Approve
+  // or Reject by the person it names. The Director's own form can then only
+  // park or cancel it -- the API refuses anything else. It used to start on
+  // Approved, so saving a note approved work over a manager's head.
+  const waitingForDecision = decisionIsOpen(activity);
   const statusOptions = [activity.status, ...(STATUS_FLOW[activity.status] || [])]
-    .filter((status, index, all) => all.indexOf(status) === index);
+    .filter((status, index, all) => all.indexOf(status) === index)
+    .filter((status) => !waitingForDecision || [activity.status, 'On Hold', 'Cancelled'].includes(status));
 
   // A manager only ever reads their own working area, so handing them work in
   // another one would leave them assigned to a record they cannot open. The API
@@ -311,47 +319,6 @@ export function ActivityReview({
       <Fact label={t('review.completionSubmitted')} value={activity.completionSubmittedAt ? formatDateTime(activity.completionSubmittedAt) : t('review.notSubmitted')} />
     </div>
 
-    {/* The decision this record is waiting on, taken by the person it names.
-        Drawn only for that person; the API refuses anybody else regardless. */}
-    {iAmApprover && <form className="decision-form approval-form" onSubmit={(event) => {
-      event.preventDefault();
-      onApprove(activity, {
-        action: 'approve',
-        ...(canChangeBudget ? { approvedBudget: Number(approval.approvedBudget || 0) } : {}),
-        adminNote: approval.adminNote.trim()
-      });
-    }}>
-      <h3 className="form-section-title">{t('approval.yourDecision')}</h3>
-      <div className="form-grid">
-        {canChangeBudget && <label className="form-field"><span>{t('review.approvedBudgetUsd')}</span>
-          <input type="number" min="0" step="0.01" value={approval.approvedBudget}
-            onChange={(event) => setApproval({ ...approval, approvedBudget: event.target.value })} />
-        </label>}
-        <label className="form-field form-field-wide">
-          <span>{isDirector ? t('review.directorNote') : t('field.note')} ({approvalBudgetChanged ? t('field.required') : t('field.optional')})</span>
-          <textarea rows="2"
-            value={approval.adminNote} onChange={(event) => setApproval({ ...approval, adminNote: event.target.value })} />
-        </label>
-        <label className="form-field form-field-wide"><span>{t('review.reasonIfReject')}</span>
-          <input
-            value={approval.rejectionReason} onChange={(event) => setApproval({ ...approval, rejectionReason: event.target.value })} />
-        </label>
-      </div>
-      {approvalBudgetChanged && <p className="decision-hint">
-        {formatUsd(activity.requestedBudget)} &rarr; {formatUsd(typedApprovalBudget)}
-        {' '}({typedApprovalBudget - activity.requestedBudget > 0 ? '+' : ''}
-        {formatUsd(typedApprovalBudget - activity.requestedBudget)})
-      </p>}
-      <div className="button-row">
-        <button className="primary-btn" type="submit" disabled={busy}>{t('approval.approve')}</button>
-        <button className="danger-btn outlined" type="button"
-          disabled={busy || !approval.rejectionReason.trim()}
-          onClick={() => onApprove(activity, { action: 'reject', rejectionReason: approval.rejectionReason.trim() })}>
-          {t('approval.reject')}
-        </button>
-      </div>
-    </form>}
-
     {activity.instructions && <>
       <h3 className="form-section-title">{t('review.instructionsFromDirector')}</h3>
       <p className="detail-notes admin-note">{activity.instructions}</p>
@@ -387,6 +354,46 @@ export function ActivityReview({
       </div>
     </div>
 
+    {/* The decision this record is waiting on, taken by the person it names.
+        Drawn only for that person; the API refuses anybody else regardless. It
+        sits after the details and the budget, which are what is being decided --
+        above them, the approver was asked to decide before reading. */}
+    {iAmApprover && <form className="decision-form approval-form" onSubmit={(event) => {
+      event.preventDefault();
+      onApprove(activity, {
+        action: 'approve',
+        ...(canChangeBudget ? { approvedBudget: Number(approval.approvedBudget || 0) } : {}),
+        adminNote: approval.adminNote.trim()
+      });
+    }}>
+      <h3 className="form-section-title">{t('approval.yourDecision')}</h3>
+      <div className="form-grid">
+        {canChangeBudget && <label className="form-field"><span>{t('review.approvedBudgetUsd')}</span>
+          <input type="number" min="0" step="0.01" value={approval.approvedBudget}
+            onChange={(event) => setApproval({ ...approval, approvedBudget: event.target.value })} />
+        </label>}
+        <label className="form-field form-field-wide">
+          <span>{isDirector ? t('review.directorNote') : t('field.note')} ({approvalBudgetChanged ? t('field.required') : t('field.optional')})</span>
+          <textarea rows="2"
+            value={approval.adminNote} onChange={(event) => setApproval({ ...approval, adminNote: event.target.value })} />
+        </label>
+      </div>
+      {approvalBudgetChanged && <p className="decision-hint">
+        {formatUsd(activity.requestedBudget)} &rarr; {formatUsd(typedApprovalBudget)}
+        {' '}({typedApprovalBudget - activity.requestedBudget > 0 ? '+' : ''}
+        {formatUsd(typedApprovalBudget - activity.requestedBudget)})
+      </p>}
+      <div className="button-row">
+        <button className="primary-btn" type="submit" disabled={busy}>{t('approval.approve')}</button>
+        {/* The reason is asked for in its own dialog, the same one the queue uses. */}
+        <button className="danger-btn outlined" type="button"
+          disabled={busy}
+          onClick={() => onReject(activity)}>
+          {t('approval.reject')}
+        </button>
+      </div>
+    </form>}
+
     {isDirector
       ? <form className="decision-form" onSubmit={(event) => {
         event.preventDefault();
@@ -401,7 +408,7 @@ export function ActivityReview({
         <h3 className="form-section-title">{t('review.adminDecision')}</h3>
         <div className="form-grid">
           <label className="form-field"><span>{t('review.approvedBudgetUsd')}</span>
-            <input type="number" min="0" step="0.01" value={decision.approvedBudget}
+            <input type="number" min="0" step="0.01" value={decision.approvedBudget} disabled={waitingForDecision}
               onChange={(event) => setDecision({ ...decision, approvedBudget: event.target.value })} />
           </label>
           <label className="form-field"><span>{t('table.status')}</span>
@@ -418,8 +425,8 @@ export function ActivityReview({
         {typedBudget !== activity.requestedBudget && <p className="decision-hint">
           {formatUsd(activity.requestedBudget)} &rarr; {formatUsd(typedBudget)}
           {' '}({typedAdjustment > 0 ? '+' : ''}{formatUsd(typedAdjustment)}).
-          {suggestsAdjusted ? ` ${t('review.considerAdjusted')}` : ''}
         </p>}
+        {waitingForDecision && <p className="decision-hint">{t('review.decisionFirst')}</p>}
         {decision.status === 'Needs Correction' && <p className="decision-hint">{t('review.needsCorrectionHint')}</p>}
         <button className="primary-btn" type="submit" disabled={busy || !decisionHasChanges}>{t('action.saveDecision')}</button>
       </form>
@@ -542,7 +549,7 @@ export function ActivityReview({
     <EvidenceList
       activity={activity}
       evidence={paymentEvidence}
-      token={token}
+      onOpenFile={onOpenFile}
       canRemove={isDirector}
       busy={busy}
       onRemove={(item) => onRemoveEvidence(activity, item)}
@@ -559,7 +566,7 @@ export function ActivityReview({
     <EvidenceList
       activity={activity}
       evidence={completionEvidence}
-      token={token}
+      onOpenFile={onOpenFile}
       canRemove={isDirector}
       busy={busy}
       onRemove={(item) => onRemoveEvidence(activity, item)}
@@ -811,7 +818,7 @@ function EvidenceUpload({ onUpload, evidenceType = 'payment', expenses = [], bus
   </form>;
 }
 
-function EvidenceList({ activity, evidence, token, canRemove, busy = false, onRemove }) {
+function EvidenceList({ activity, evidence, onOpenFile, canRemove, busy = false, onRemove }) {
   const t = useT();
   if (!evidence.length) {
     return <div className="empty-state"><strong>{t('empty.noEvidence')}</strong><span>{t('empty.noEvidenceHint')}</span></div>;
@@ -826,10 +833,10 @@ function EvidenceList({ activity, evidence, token, canRemove, busy = false, onRe
       <td data-label={t('field.uploadedBy')}>{item.uploadedByName || '—'}</td>
       <td data-label={t('table.date')}>{formatDateTime(item.createdAt)}</td>
       <td className="card-actions">
-        {/* A plain link cannot carry an Authorization header, so the file route
-            also accepts the token as a query parameter. */}
-        <a className="text-btn" target="_blank" rel="noreferrer"
-          href={`/api/activities/${encodeURIComponent(activity.id)}/evidence/${item.id}/file?token=${encodeURIComponent(token)}`}>{t('action.view')}</a>
+        {/* Opened through a short-lived file link asked for on the click; the
+            session token never goes into an address. */}
+        <button className="text-btn" type="button"
+          onClick={() => onOpenFile(`/api/activities/${encodeURIComponent(activity.id)}/evidence/${item.id}/file`)}>{t('action.view')}</button>
         {canRemove && <button className="danger-btn" type="button" disabled={busy} onClick={() => onRemove(item)}>{t('action.remove')}</button>}
       </td>
     </tr>)}</tbody>

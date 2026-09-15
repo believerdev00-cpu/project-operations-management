@@ -6,6 +6,7 @@
 
 import bcrypt from 'bcryptjs';
 import { pool } from '../server/db/database.js';
+import { directorSession } from './director.mjs';
 const API = process.env.API || 'http://localhost:5000';
 
 let passed = 0;
@@ -93,7 +94,7 @@ try {
   section('setup');
   const farmingManagerId = await seedManager('zz-test-farming', 'Test Farming Manager', 'farming');
   const agriManagerId = await seedManager('zz-test-agri', 'Test Agriculture Manager', 'agriculture');
-  const adminToken = await login('admin', process.env.ADMIN_PASSWORD || 'admin123');
+  const { token: adminToken } = await directorSession();
   const farmingToken = await login('zz-test-farming', 'test-pass-123');
   const agriToken = await login('zz-test-agri', 'test-pass-123');
   const directorId = (await pool.query("SELECT id FROM users WHERE role = 'super-admin' ORDER BY id LIMIT 1")).rows[0].id;
@@ -149,6 +150,16 @@ try {
   });
   check('even the Director cannot approve what names a manager', directorSteal.status === 403,
     `${directorSteal.status} ${directorSteal.body.message}`);
+  // The Director's wider status form used to reach Approved too, and started on it.
+  const decisionSteal = await api(adminToken, `/api/activities/${act1.id}/decision`, {
+    method: 'PATCH', body: JSON.stringify({ status: 'Approved', adminNote: 'Just a note.' })
+  });
+  check('nor approve it through the status form', decisionSteal.status === 409 && decisionSteal.body.code === 'DECISION_PENDING',
+    `${decisionSteal.status} ${decisionSteal.body.message}`);
+  const decisionBudget = await api(adminToken, `/api/activities/${act1.id}/decision`, {
+    method: 'PATCH', body: JSON.stringify({ approvedBudget: 1, adminNote: 'Trim it.' })
+  });
+  check('nor move its budget before the decision', decisionBudget.status === 409, `${decisionBudget.status} ${decisionBudget.body.message}`);
   const stillPending = (await api(adminToken, `/api/activities/${act1.id}`)).body.activity;
   check('the record is untouched after the refused attempts', stillPending.approvalStatus === 'pending');
 
@@ -320,6 +331,16 @@ try {
 
   const movQueue = (await api(adminToken, '/api/approval-queue')).body;
   check('it is in the Director\'s movement queue', movQueue.movements.some((item) => item.id === mov.id));
+  const movMarkRejected = await api(adminToken, `/api/movements/${mov.id}/status`, {
+    method: 'PATCH', body: JSON.stringify({ status: 'Rejected', reason: 'Not this month.' })
+  });
+  check('an undecided movement cannot be refused with a status button', movMarkRejected.status === 409,
+    `${movMarkRejected.status} ${movMarkRejected.body.message}`);
+  const movCancelNoReason = await api(adminToken, `/api/movements/${mov.id}/status`, {
+    method: 'PATCH', body: JSON.stringify({ status: 'Cancelled' })
+  });
+  check('cancelling a movement needs a reason', movCancelNoReason.status === 400,
+    `${movCancelNoReason.status} ${movCancelNoReason.body.message}`);
   const movStolen = await api(farmingToken, `/api/movements/${mov.id}/approval`, {
     method: 'PATCH', body: JSON.stringify({ action: 'approve' })
   });

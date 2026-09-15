@@ -9,7 +9,7 @@ import {
   validNumber, sectorIds
 } from '../lib/http.js';
 import { MOVEMENT_STATUSES } from '../db/movementSchema.js';
-import { canApprove, pendingForMeSql, resolveDirector, APPROVER_ROLE_LABELS } from '../lib/approvals.js';
+import { canApprove, decisionOpen, pendingForMeSql, resolveDirector, APPROVER_ROLE_LABELS } from '../lib/approvals.js';
 import { CURRENCIES, convertAmount, getCurrentRate, round2 } from '../lib/rates.js';
 
 const router = express.Router();
@@ -69,8 +69,10 @@ class MovementError extends Error {
 }
 
 function canCreate(user) {
-  // An all-operations manager covers Logistics & Facilitation like any other.
-  return hasFullScope(user) || user.sector === 'movement';
+  // An all-operations manager covers Movements & Facilitation like any other. A
+  // team member in the operation follows its trips but does not raise one: that
+  // would put a funding request in the Director's queue, which only managers do.
+  return hasFullScope(user) || (user.role === 'manager' && user.sector === 'movement');
 }
 
 // Section 7 keeps approval, funds and final expenditure with the Director.
@@ -928,11 +930,21 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
     && existing.status === 'Draft'
     && status === 'Pending Approval';
   if (!selfSubmit) requireAdmin(req.user, 'change the status of a movement');
-  // Approving is a decision, not a status edit: it has to name its approver and
-  // be authorised against them, which is what /approval does.
-  if (status === 'Approved' && existing.approval_required && existing.approval_status === 'pending'
-    && !canApprove(req.user, existing)) {
-    return res.status(403).json({ message: 'Only the person this movement is waiting on can approve it.' });
+  // Approving and refusing are decisions, not status edits: they have to name
+  // their approver and be authorised against them, which is what /approval
+  // does. Only approving was checked here, so "Mark Rejected" was a second way
+  // to refuse a movement -- open to someone it was not waiting on, and with the
+  // reason optional where the decision form requires one.
+  if (['Approved', 'Rejected'].includes(status) && decisionOpen(existing)) {
+    return res.status(409).json({
+      code: 'DECISION_PENDING',
+      message: 'This movement is waiting for a decision. Approve or reject it with the decision buttons instead.'
+    });
+  }
+  // Refusing or cancelling has to say why, or the person who raised it has
+  // nothing to act on.
+  if (['Rejected', 'Cancelled'].includes(status) && !requiredText(req.body.reason)) {
+    return res.status(400).json({ message: 'Say why when you reject or cancel a movement.' });
   }
 
   const fields = ['status = $2', 'updated_at = NOW()'];
@@ -1167,7 +1179,9 @@ router.post('/:id/evidence', authorizeEvidenceUpload, upload.array('files', 10),
     }
   } catch (error) {
     await Promise.all(stored.map((item) => deleteFile(EVIDENCE_FOLDER, item.storedName)));
-    return res.status(502).json({ message: error.message });
+    // The disk error names the absolute folder on the server; log it, don't send it.
+    console.error('Evidence could not be stored:', error);
+    return res.status(502).json({ message: 'The file could not be saved. Please try again.' });
   }
 
   const client = await pool.connect();

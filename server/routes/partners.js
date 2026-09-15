@@ -11,14 +11,13 @@
 // runs.
 
 import express from 'express';
-import bcrypt from 'bcryptjs';
 import { pool } from '../db/database.js';
 import { asyncRoute, isAdmin, parseId, requiredText, sectorIds } from '../lib/http.js';
+import { hashPassword, passwordProblem } from '../lib/passwords.js';
 import { operationById } from '../../shared/businessOperations.js';
 
 const router = express.Router();
 
-const MINIMUM_PASSWORD_LENGTH = 6;
 export const PARTNER_STATUSES = ['active', 'suspended', 'revoked'];
 
 router.use((req, res, next) => {
@@ -109,9 +108,8 @@ router.post('/', asyncRoute(async (req, res) => {
   if (!requiredText(email) || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) {
     return res.status(400).json({ message: 'A valid email address is required.' });
   }
-  if (typeof password !== 'string' || password.trim().length < MINIMUM_PASSWORD_LENGTH) {
-    return res.status(400).json({ message: `The password must be at least ${MINIMUM_PASSWORD_LENGTH} characters.` });
-  }
+  const weak = passwordProblem(password, { username });
+  if (weak) return res.status(400).json({ message: weak });
   if (!validOperation(operation)) {
     return res.status(400).json({ message: 'Choose one business operation: Farming, Agriculture, Mining, or Movements & Facilitation.' });
   }
@@ -125,9 +123,11 @@ router.post('/', asyncRoute(async (req, res) => {
 
   try {
     const inserted = await pool.query(
-      `INSERT INTO users (username, password_hash, name, email, role, sector, status, access_level)
-       VALUES ($1, $2, $3, $4, 'partner', $5, 'active', 'view-only') RETURNING id`,
-      [username.trim(), bcrypt.hashSync(password.trim(), 10), name.trim(), email.trim(), operation]
+      // Temporary, like every password the Director sets: the partner chooses
+      // their own at first sign-in.
+      `INSERT INTO users (username, password_hash, name, email, role, sector, status, access_level, must_change_password)
+       VALUES ($1, $2, $3, $4, 'partner', $5, 'active', 'view-only', TRUE) RETURNING id`,
+      [username.trim(), await hashPassword(password), name.trim(), email.trim(), operation]
     );
     res.status(201).json(await loadPartner(inserted.rows[0].id));
   } catch (error) {
@@ -179,14 +179,13 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
 
 router.patch('/:id/password', asyncRoute(async (req, res) => {
   const { password } = req.body || {};
-  if (typeof password !== 'string' || password.trim().length < MINIMUM_PASSWORD_LENGTH) {
-    return res.status(400).json({ message: `The new password must be at least ${MINIMUM_PASSWORD_LENGTH} characters.` });
-  }
+  const weak = passwordProblem(password);
+  if (weak) return res.status(400).json({ message: weak });
   // Stamped from the Node clock for the same reason as the account register:
   // this value is compared against a JWT `iat` minted by this process.
   const result = await pool.query(
-    "UPDATE users SET password_hash = $2, password_changed_at = $3 WHERE id = $1 AND role = 'partner' RETURNING id",
-    [req.params.id, bcrypt.hashSync(password.trim(), 10), new Date()]
+    "UPDATE users SET password_hash = $2, password_changed_at = $3, must_change_password = TRUE WHERE id = $1 AND role = 'partner' RETURNING id",
+    [req.params.id, await hashPassword(password), new Date()]
   );
   if (!result.rowCount) return res.status(404).json({ message: 'External partner not found.' });
 

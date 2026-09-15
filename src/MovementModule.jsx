@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ApprovalPanel, approverName, canApproveRecord, formatTrailValue, labelForField, trailActionLabel } from './ActivityReview.jsx';
+import { ApprovalPanel, approverName, canApproveRecord, decisionIsOpen, formatTrailValue, labelForField, trailActionLabel } from './ActivityReview.jsx';
 import { displayLanguage, fill, translate, useT } from './i18n.js';
 import { operationName } from '../shared/businessOperations.js';
 import { DetailView, useBusy, useDialog } from './ui.jsx';
@@ -144,14 +144,15 @@ function movementToForm(movement) {
   };
 }
 
-export default function MovementModule({ user, token, fetchJson, upload, openId = null, onOpen, onClose, onChanged, onMessage, onError }) {
+export default function MovementModule({ user, onOpenFile, fetchJson, upload, openId = null, onOpen, onClose, onChanged, onMessage, onError }) {
   const t = useT();
   const dialog = useDialog();
   const [busy, run] = useBusy();
   const isDirector = user.role === 'super-admin';
   // An all-operations manager covers Movements & Facilitation like any other.
   const coversMovements = Boolean(user.coversAllSectors) || user.sector === 'movement';
-  const canCreate = isDirector || coversMovements;
+  // Team members follow the trips but do not raise them; the API refuses them too.
+  const canCreate = isDirector || (coversMovements && user.role === 'manager');
   // The open movement lives in the address (#/movements/MOV-...), so a link from
   // the approval queue opens it directly and the back button closes it.
   const closeRef = useRef(onClose);
@@ -265,18 +266,24 @@ export default function MovementModule({ user, token, fetchJson, upload, openId 
   });
 
   const changeStatus = (movement, status, extra = {}) => run(async () => {
-    // Refusing or cancelling a movement stops the work, so it is confirmed.
+    // Refusing or cancelling a movement stops the work, so it is confirmed --
+    // and it has to say why, which the API insists on too: the person who
+    // raised it is otherwise left with nothing to act on.
+    let reason;
     if (['Rejected', 'Cancelled'].includes(status)) {
-      const confirmed = await dialog.confirm({
+      reason = await dialog.prompt({
         title: `${t('action.markAs')} ${t(`status.${status}`)}`,
         message: `${movement.ref} — ${movement.purpose}`,
+        label: t('field.reason'),
+        required: true,
+        multiline: true,
         confirmLabel: `${t('action.markAs')} ${t(`status.${status}`)}`,
         danger: true
       });
-      if (!confirmed) return;
+      if (reason === null) return;
     }
     try {
-      await fetchJson(`/api/movements/${encodeURIComponent(movement.id)}/status`, { method: 'PATCH', body: JSON.stringify({ status, ...extra }) });
+      await fetchJson(`/api/movements/${encodeURIComponent(movement.id)}/status`, { method: 'PATCH', body: JSON.stringify({ status, ...extra, ...(reason ? { reason } : {}) }) });
       onMessage(fill(t('msg.movementStatus'), { ref: movement.ref, status: t(`status.${status}`) }));
       await refreshDetail(movement.id);
     } catch (statusError) {
@@ -290,6 +297,31 @@ export default function MovementModule({ user, token, fetchJson, upload, openId 
     try {
       await fetchJson(`/api/movements/${encodeURIComponent(movement.id)}/approval`, { method: 'PATCH', body: JSON.stringify(body) });
       onMessage(fill(body.action === 'approve' ? t('msg.movementApproved') : t('msg.movementRejected'), { ref: movement.ref }));
+      await refreshDetail(movement.id);
+    } catch (approvalError) {
+      onError(approvalError.message);
+    }
+  });
+
+  // Rejecting asks for the reason in a dialog, the same one the approval queue
+  // and the activity screen use, rather than a box that sits empty on every
+  // record waiting for a decision.
+  const rejectApproval = (movement) => run(async () => {
+    const reason = await dialog.prompt({
+      title: t('approval.reject'),
+      message: `${movement.ref} — ${movement.purpose}`,
+      label: t('msg.rejectReason'),
+      required: true,
+      multiline: true,
+      danger: true,
+      confirmLabel: t('approval.reject')
+    });
+    if (reason === null) return;
+    try {
+      await fetchJson(`/api/movements/${encodeURIComponent(movement.id)}/approval`, {
+        method: 'PATCH', body: JSON.stringify({ action: 'reject', rejectionReason: reason })
+      });
+      onMessage(fill(t('msg.movementRejected'), { ref: movement.ref }));
       await refreshDetail(movement.id);
     } catch (approvalError) {
       onError(approvalError.message);
@@ -476,13 +508,14 @@ export default function MovementModule({ user, token, fetchJson, upload, openId 
         key={detail.movement.id}
         detail={detail}
         user={user}
-        token={token}
+        onOpenFile={onOpenFile}
         isDirector={isDirector}
         busy={busy}
         onClose={() => onClose?.()}
         onEdit={(movement) => setFormState({ mode: 'edit', movement, values: movementToForm(movement) })}
         onStatus={changeStatus}
         onApprove={decideApproval}
+        onReject={rejectApproval}
         onFinance={updateFinance}
         onVisibility={setVisibility}
         onUpload={uploadEvidence}
@@ -722,7 +755,7 @@ function MovementForm({ mode, movement, initialValues, rate, isDirector, busy = 
 }
 
 // Sections 6, 7 and 8: workflow actions, accountability figures, evidence, history.
-function MovementDetail({ detail, user, token, isDirector, busy = false, onClose, onEdit, onStatus, onApprove, onFinance, onVisibility, onUpload, onRemoveEvidence, onDelete }) {
+function MovementDetail({ detail, user, onOpenFile, isDirector, busy = false, onClose, onEdit, onStatus, onApprove, onReject, onFinance, onVisibility, onUpload, onRemoveEvidence, onDelete }) {
   const t = useT();
   const { movement, evidence, history } = detail;
   const [finance, setFinance] = useState({
@@ -730,11 +763,9 @@ function MovementDetail({ detail, user, token, isDirector, busy = false, onClose
     actualExpense: String(movement.actualExpense),
     evidenceStatus: movement.evidenceStatus
   });
-  const [reason, setReason] = useState('');
   const [approval, setApproval] = useState({
     approvedBudget: String(movement.estimatedTotal),
     adminNote: '',
-    rejectionReason: ''
   });
 
   // The detail stays mounted while the record is saved and re-read, so the
@@ -749,8 +780,7 @@ function MovementDetail({ detail, user, token, isDirector, busy = false, onClose
       actualExpense: String(movement.actualExpense),
       evidenceStatus: movement.evidenceStatus
     });
-    setApproval({ approvedBudget: String(movement.estimatedTotal), adminNote: '', rejectionReason: '' });
-    setReason('');
+    setApproval({ approvedBudget: String(movement.estimatedTotal), adminNote: '' });
   }, [movement.updatedAt, movement.fundsReleased, movement.actualExpense, movement.evidenceStatus, movement.estimatedTotal]);
 
   const coversMovements = Boolean(user.coversAllSectors) || user.sector === 'movement';
@@ -763,8 +793,9 @@ function MovementDetail({ detail, user, token, isDirector, busy = false, onClose
   const typedBudget = Number(approval.approvedBudget || 0);
   const budgetChanged = canChangeBudget && typedBudget !== Number(movement.estimatedTotal);
   const nextStatuses = (STATUS_FLOW[movement.status] || []).filter((status) => {
-    // Approving is a decision with a named approver, not a status button.
-    if (status === 'Approved' && movement.approvalRequired && movement.approvalStatus === 'pending') return false;
+    // Approving and refusing are decisions with a named approver, not status
+    // buttons: while the decision is open they happen in the decision form.
+    if (['Approved', 'Rejected'].includes(status) && decisionIsOpen(movement)) return false;
     if (isDirector) return true;
     return movement.status === 'Draft' && status === 'Pending Approval' && movement.createdBy === user.id;
   });
@@ -819,10 +850,6 @@ function MovementDetail({ detail, user, token, isDirector, busy = false, onClose
           <textarea rows="2"
             value={approval.adminNote} onChange={(event) => setApproval({ ...approval, adminNote: event.target.value })} />
         </label>
-        <label className="form-field form-field-wide"><span>{t('review.reasonIfReject')}</span>
-          <input
-            value={approval.rejectionReason} onChange={(event) => setApproval({ ...approval, rejectionReason: event.target.value })} />
-        </label>
       </div>
       {budgetChanged && <p className="decision-hint">
         {formatMoney(movement.estimatedTotal, movement.currency)} &rarr; {formatMoney(typedBudget, movement.currency)}
@@ -830,8 +857,8 @@ function MovementDetail({ detail, user, token, isDirector, busy = false, onClose
       <div className="button-row">
         <button className="primary-btn" type="submit" disabled={busy}>{t('approval.approve')}</button>
         <button className="danger-btn outlined" type="button"
-          disabled={busy || !approval.rejectionReason.trim()}
-          onClick={() => onApprove(movement, { action: 'reject', rejectionReason: approval.rejectionReason.trim() })}>
+          disabled={busy}
+          onClick={() => onReject(movement)}>
           {t('approval.reject')}
         </button>
       </div>
@@ -905,7 +932,7 @@ function MovementDetail({ detail, user, token, isDirector, busy = false, onClose
     <EvidenceList
       movement={movement}
       evidence={evidence}
-      token={token}
+      onOpenFile={onOpenFile}
       canRemove={isDirector}
       busy={busy}
       onRemove={(item) => onRemoveEvidence(movement, item)}
@@ -921,12 +948,10 @@ function MovementDetail({ detail, user, token, isDirector, busy = false, onClose
             type="button"
             disabled={busy}
             onClick={() => onStatus(movement, status, {
-              reason: reason || undefined,
               ...(status === 'Funds Released' ? { fundsReleased: Number(finance.fundsReleased) || Number(movement.estimatedTotal) } : {}),
               ...(status === 'Completed' ? { actualExpense: Number(finance.actualExpense) || 0 } : {})
             })}
           >{status === 'Pending Approval' && movement.status === 'Draft' ? t('action.submitForApproval') : `${t('action.markAs')} ${t(`status.${status}`)}`}</button>)}
-          {isDirector && <input className="reason-input" aria-label={`${t('field.reason')} (${t('field.optional')})`} placeholder={`${t('field.reason')} (${t('field.optional')})`} value={reason} onChange={(event) => setReason(event.target.value)} />}
         </div>
       : <p className="detail-notes">{t('movement.noFurtherStatus')}</p>}
 
@@ -994,7 +1019,7 @@ function EvidenceUpload({ movement, busy = false, onUpload }) {
   </form>;
 }
 
-function EvidenceList({ movement, evidence, token, canRemove, busy = false, onRemove }) {
+function EvidenceList({ movement, evidence, onOpenFile, canRemove, busy = false, onRemove }) {
   const t = useT();
   if (!evidence.length) {
     return <div className="empty-state"><strong>{t('empty.noEvidence')}</strong><span>{t('empty.noEvidenceHint')}</span></div>;
@@ -1009,12 +1034,8 @@ function EvidenceList({ movement, evidence, token, canRemove, busy = false, onRe
       <td data-label={t('field.uploadedBy')}>{item.uploadedByName || '—'}</td>
       <td data-label={t('table.date')}>{formatDateTime(item.createdAt)}</td>
       <td className="card-actions">
-        <a
-          className="text-btn"
-          href={`/api/movements/${encodeURIComponent(movement.id)}/evidence/${item.id}/file?token=${encodeURIComponent(token)}`}
-          target="_blank"
-          rel="noreferrer"
-        >{t('action.view')}</a>
+        <button className="text-btn" type="button"
+          onClick={() => onOpenFile(`/api/movements/${encodeURIComponent(movement.id)}/evidence/${item.id}/file`)}>{t('action.view')}</button>
         {canRemove && <button className="danger-btn" type="button" disabled={busy} onClick={() => onRemove(item)}>{t('action.remove')}</button>}
       </td>
     </tr>)}</tbody>

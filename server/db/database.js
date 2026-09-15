@@ -208,6 +208,12 @@ export async function initDatabase() {
     // local time, which pushes it into the future and rejects valid new tokens.
     await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMPTZ');
     await pool.query('ALTER TABLE users ALTER COLUMN password_changed_at TYPE TIMESTAMPTZ');
+    // Set whenever a password was chosen by somebody other than its owner: the
+    // seeded Director, and every account the Director creates or resets. Until
+    // the owner picks their own, authMiddleware lets the account reach nothing
+    // but the password route -- otherwise the Director knew every password, and
+    // could sign in as a manager to approve their own request.
+    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE');
     // Who a user reports to. A sector manager reports to nobody; a team member
     // reports to one of the managers working the same sector. Pointing an
     // account at itself is refused here; longer loops are refused by the API.
@@ -316,13 +322,17 @@ export async function initDatabase() {
   // The display name is not written back either, for the same reason: it is the
   // owner's to set, and forcing 'Director Admin' on every boot silently undid
   // any rename.
-  const director = await pool.query("SELECT id FROM users WHERE role = 'super-admin' ORDER BY id LIMIT 1");
+  const director = await pool.query(
+    "SELECT id, password_hash, password_changed_at FROM users WHERE role = 'super-admin' ORDER BY id LIMIT 1"
+  );
   if (director.rowCount === 0) {
     if (!process.env.ADMIN_PASSWORD) {
       throw new Error('ADMIN_PASSWORD is required to seed the initial admin account.');
     }
+    // The seed password sits in a file on disk, so it is only good for the first
+    // sign-in: the Director is sent straight to choosing their own.
     await pool.query(
-      'INSERT INTO users (username, password_hash, name, role) VALUES ($1, $2, $3, $4)',
+      'INSERT INTO users (username, password_hash, name, role, must_change_password) VALUES ($1, $2, $3, $4, TRUE)',
       ['admin', bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10), 'Director Admin', 'super-admin']
     );
   } else if (process.env.ADMIN_PASSWORD_RESET === 'true' && process.env.ADMIN_PASSWORD) {
@@ -330,11 +340,21 @@ export async function initDatabase() {
     // reverted any rotation and pinned the account to whatever .env happened to
     // hold. Set ADMIN_PASSWORD_RESET=true for a single deliberate recovery boot,
     // which acts on whichever account currently holds the role.
-    await pool.query('UPDATE users SET password_hash = $2 WHERE id = $1', [
+    //
+    // A recovery reset is usually done because the account may be in the wrong
+    // hands, so it also ends every session issued before it and asks for a new
+    // password at the next sign-in.
+    await pool.query('UPDATE users SET password_hash = $2, password_changed_at = $3, must_change_password = TRUE WHERE id = $1', [
       director.rows[0].id,
-      bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10)
+      bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10),
+      new Date()
     ]);
     console.warn('ADMIN_PASSWORD_RESET is set: the Director password was reset. Unset it and restart.');
+  } else if (process.env.ADMIN_PASSWORD && !director.rows[0].password_changed_at
+    && await bcrypt.compare(process.env.ADMIN_PASSWORD, director.rows[0].password_hash)) {
+    // A Director seeded before the rule above existed, still on the password
+    // from the env file (admin123 in the example), is asked to change it too.
+    await pool.query('UPDATE users SET must_change_password = TRUE WHERE id = $1', [director.rows[0].id]);
   }
 
 }
