@@ -544,7 +544,7 @@ function AppShell({
         <button className="icon-btn drawer-close" type="button" onClick={closeDrawer} aria-label={t('app.closeMenu')}>&times;</button>
       </div>
       {nav.length > 0 && <nav aria-label={navLabel}>
-        {[['main', t('app.workspace')], ['more', t('nav.more')]].map(([group, groupLabel]) => {
+        {[['main', t('app.workspace')], ['review', t('nav.groupReview')], ['manage', t('nav.groupManage')], ['more', t('nav.more')]].map(([group, groupLabel]) => {
           const items = nav.filter((item) => (item[3] || 'main') === group);
           if (!items.length) return null;
           return <div key={group} className="nav-group">
@@ -603,11 +603,15 @@ function AppShell({
           <span className="bottom-nav-label">{label}{count > 0 && <span className="sr-only"> {fill(t('app.waitingOnYou'), { count })}</span>}</span>
         </button>;
       })}
-      <button ref={menuButton} type="button" className={drawerActive || !bottomNav.includes(activeId) ? 'bottom-nav-item active' : 'bottom-nav-item'}
+      {/* "More" is only worth a slot when something is actually behind it. A team
+          member's whole menu is in the bar, so the button used to open a drawer
+          holding nothing but their own name. */}
+      {nav.some(([id]) => !bottomNav.includes(id)) && <button ref={menuButton} type="button"
+        className={drawerActive || !bottomNav.includes(activeId) ? 'bottom-nav-item active' : 'bottom-nav-item'}
         aria-expanded={drawerActive} aria-controls="app-sidebar" onClick={() => setDrawerOpen(true)}>
         <span className="bottom-nav-icon"><NavIcon id="more" /></span>
         <span className="bottom-nav-label">{t('nav.more')}</span>
-      </button>
+      </button>}
     </nav>}
   </div>;
 }
@@ -745,7 +749,13 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const [accountForm, setAccountForm] = useState(emptyAccount);
   const [userSearch, setUserSearch] = useState('');
   const [userRoleFilter, setUserRoleFilter] = useState('All');
-  const [activityStatusFilter, setActivityStatusFilter] = useState('All');
+  // A team member's register opens on their own work. Scoping is by business
+  // operation, so "All" handed them every activity in Farming -- hundreds of
+  // other people's rows with their own three buried somewhere inside. The whole
+  // operation is still one choice away in the same dropdown.
+  const [activityStatusFilter, setActivityStatusFilter] = useState(
+    user.role === 'staff' ? 'Assigned to me' : 'All'
+  );
   const [activitySearch, setActivitySearch] = useState('');
   const [registerPage, setRegisterPage] = useState(emptyRegisterPage);
   const [activityDetail, setActivityDetail] = useState(null);
@@ -767,24 +777,64 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // first thing the client found confusing. Only people who approve anything --
   // the Director and managers -- get the approvals page at all.
   const approves = isDirector || isManager;
-  const navItems = [
-    // The fifth entry is the short name used in the phone's bottom bar.
-    ['dashboard', t('nav.home'), 0, 'main', t('nav.home')],
-    ...(approves ? [['approval-queue', t('nav.approvalQueue'), approvalCount, 'main', t('nav.shortApprovals')]] : []),
-    ['activities', t('nav.activities'), 0, 'main', t('nav.activities')],
-    ['monthly', t('nav.monthlyPlans'), 0, 'main', t('nav.shortBudget')],
-    ['movements', operationName('movement', language), 0, 'main', t('nav.shortTrips')],
-    ['reports', t('nav.reports'), 0, 'more'],
-    ['projects', t('nav.projects'), 0, 'more'],
-    ['approvals', t('nav.approvals'), 0, 'more'],
-    ...(isDirector ? [['users', t('nav.users'), 0, 'more'], ['partners', t('nav.partners'), 0, 'more']] : [])
-  ];
-  // The bar along the bottom of a phone: four pages and More. Someone who works
-  // in Movements & Facilitation gets their trips there instead of activities.
-  const tripsFirst = !isDirector && !user.coversAllSectors && user.sector === 'movement';
-  const bottomNav = approves
-    ? ['dashboard', 'approval-queue', tripsFirst ? 'movements' : 'activities', 'monthly']
-    : ['dashboard', 'activities', 'monthly', 'movements'];
+  // A menu is a list of a person's job, not a list of the software's features.
+  //
+  // Every account used to get almost the same nine or ten items, and the
+  // difference between a team member and a manager was which buttons were hidden
+  // once they got there. So a team member had "Projects" (nothing they can do),
+  // "Other requests" (cannot decide, cannot raise -- the server answers 403),
+  // "Monthly budget" (every control hidden, the operation's budget on show) and
+  // "Reports" (a whole-operation budget export). Four of their seven items led
+  // nowhere. Each role now gets the pages it works in and nothing else.
+  const coversTrips = isDirector || Boolean(user.coversAllSectors) || user.sector === 'movement';
+  let navItems;
+  if (isDirector) {
+    // The Director runs the whole organisation, so they do see every page --
+    // but in named groups rather than one "More" pile, so the daily pages and
+    // the set-up pages are not the same kind of thing on the same list.
+    navItems = [
+      ['dashboard', t('nav.home'), 0, 'main', t('nav.home')],
+      ['approval-queue', t('nav.approvalQueue'), approvalCount, 'main', t('nav.shortApprovals')],
+      ['monthly', t('nav.monthlyPlans'), 0, 'main', t('nav.shortBudget')],
+      ['activities', t('nav.activities'), 0, 'main', t('nav.activities')],
+      ['movements', operationName('movement', language), 0, 'main', t('nav.shortTrips')],
+      ['reports', t('nav.reports'), 0, 'review'],
+      ['approvals', t('nav.approvals'), 0, 'review'],
+      ['projects', t('nav.projects'), 0, 'manage'],
+      ['users', t('nav.users'), 0, 'manage'],
+      ['partners', t('nav.partners'), 0, 'manage']
+    ];
+  } else if (isManager) {
+    // A manager's job is the month they were given: the plan is the front door,
+    // then what needs their approval, then the wider register. Projects is gone
+    // -- every control on it is the Director's, so it was a read-only page that
+    // repeated what the plan and the register already say.
+    navItems = [
+      ['dashboard', t('nav.home'), 0, 'main', t('nav.home')],
+      ['monthly', t('nav.myMonth'), 0, 'main', t('nav.shortMonth')],
+      ['approval-queue', t('nav.approvalQueue'), approvalCount, 'main', t('nav.shortApprovals')],
+      ['activities', t('nav.allWork'), 0, 'main', t('nav.activities')],
+      ...(coversTrips ? [['movements', operationName('movement', language), 0, 'main', t('nav.shortTrips')]] : []),
+      ...(coversTrips ? [] : [['movements', operationName('movement', language), 0, 'more']]),
+      ['reports', t('nav.reports'), 0, 'more'],
+      ['approvals', t('nav.myRequests'), 0, 'more']
+    ];
+  } else {
+    // A team member has one job: the work they were given. Two pages, and the
+    // first one is the list of it.
+    navItems = [
+      ['dashboard', t('nav.myWork'), 0, 'main', t('nav.myWork')],
+      ['activities', t('nav.myActivities'), 0, 'main', t('nav.myActivities')]
+    ];
+  }
+  // The bar along the bottom of a phone. Someone who works in Movements &
+  // Facilitation gets their trips in it; a team member gets their two pages and
+  // no "More" pile behind them.
+  const bottomNav = isDirector
+    ? ['dashboard', 'approval-queue', 'monthly', 'activities']
+    : isManager
+      ? ['dashboard', 'monthly', 'approval-queue', coversTrips ? 'movements' : 'activities']
+      : ['dashboard', 'activities'];
   // An address naming a page this account does not have -- a manager following
   // a Director's link to #/users -- lands on the home page instead of a blank page.
   const view = navItems.some(([id]) => id === route.view) ? route.view : 'dashboard';
@@ -1751,6 +1801,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       onAddActivity={addActivity}
       onAddMovement={() => navigate(buildHash('movements', 'new'))}
       onOpenActivity={openActivity}
+      onStartWork={(activity) => changeActivityStatus(activity, 'In Progress')}
       onOpenQueueItem={openQueueItem}
       onDecide={decideFromQueue}
       onOpenPlan={openPlanRoute}
@@ -1793,7 +1844,11 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   } else if (view === 'activities') {
     content = <>
       <section className="context-strip">
-        <div><span className="eyebrow">{t('activities.eyebrow')}</span><h2>{t('activities.title')}</h2><p>{isDirector ? t('activities.directorBlurb') : t('activities.managerBlurb')}</p></div>
+        {/* Each role is told what this page is FOR them. A team member used to be
+            shown the manager's description of it. */}
+        <div><span className="eyebrow">{t('activities.eyebrow')}</span>
+          <h2>{isDirector || isManager ? t('activities.title') : t('nav.myActivities')}</h2>
+          <p>{isDirector ? t('activities.directorBlurb') : isManager ? t('activities.managerBlurb') : t('activities.staffBlurb')}</p></div>
         {canAddActivity && <button className="primary-btn" type="button" onClick={addActivity}>{isDirector ? t('action.assignActivity') : t('action.raiseActivity')}</button>}
       </section>
 
@@ -1952,6 +2007,8 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       people={people}
       rate={rate}
       planId={routeId}
+      onStartWork={(activity) => changeActivityStatus(activity, 'In Progress')}
+      onOpenActivity={openActivity}
       onOpenPlan={openPlanRoute}
       onClosePlan={closePlanRoute}
       onChanged={onModuleChanged}

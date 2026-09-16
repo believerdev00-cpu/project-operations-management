@@ -86,6 +86,75 @@ export function Journey({ journey }) {
 
 // ---- what happens next --------------------------------------------------------
 
+// ---- the one thing to do next ------------------------------------------------
+//
+// "What do I do now?" answered in one place, so a work card, a planned activity
+// and the record screen itself can never offer different answers for the same
+// row. Before this, the record screen worked it out and every list showed a
+// status badge instead -- so somebody had to open a record to find out whether
+// there was anything for them to do in it.
+//
+// It returns the SINGLE most useful step, never a menu. Everything else a person
+// may do stays reachable on the record; this is the one that moves the work on.
+//
+//   key     what the caller should run
+//   label   the button text, already translated
+//   done    true when there is nothing left for this reader to do
+//
+// Nothing here decides permission. Each key maps to an API call that checks the
+// caller again, and the conditions below are the same ones the record screen
+// uses to draw its buttons, so a button is never offered that the server refuses.
+export function nextAction(activity, user, t) {
+  const isDirector = user.role === 'super-admin';
+  const mine = activity.assignedTo === null
+    ? user.role === 'manager'
+    : Number(activity.assignedTo) === Number(user.id);
+  const handedBack = Boolean(activity.completionSubmittedAt) && activity.status !== 'Completed';
+  const monthOpen = activity.planStatus !== 'Closed';
+  // Work in a month the Director has not confirmed has no budget behind it yet,
+  // and the API refuses to start it.
+  const monthReady = !activity.monthlyPlanId || activity.planStatus === 'Confirmed';
+  const waiting = activity.approvalRequired && activity.approvalStatus === 'pending'
+    && !['Draft', 'Cancelled', 'On Hold'].includes(activity.status);
+
+  if (!monthOpen) return { key: 'none', label: t('do.monthClosed'), done: true };
+  if (['Rejected', 'Cancelled'].includes(activity.status)) {
+    return { key: 'none', label: t(`journey.${activity.status === 'Rejected' ? 'refused' : 'cancelled'}`), done: true };
+  }
+  if (activity.status === 'Completed') return { key: 'none', label: t('journey.done'), done: true };
+  if (activity.status === 'On Hold') return { key: 'none', label: t('journey.paused'), done: true };
+  if (Number(activity.workCount) > 0) return { key: 'none', label: t('do.throughTheDays'), done: true };
+  if (activity.status === 'Draft') {
+    return (isDirector || activity.createdBy === user.id)
+      ? { key: 'send', label: t('action.submitForApproval') }
+      : { key: 'none', label: t('journey.draft'), done: true };
+  }
+  if (handedBack) {
+    return isDirector
+      ? { key: 'check', label: t('do.check') }
+      : { key: 'none', label: t('journey.handedBack'), done: true };
+  }
+  if (waiting) {
+    // Only the named approver is offered the decision.
+    const iDecide = Number(activity.approvalRequiredFrom) === Number(user.id)
+      || (isDirector && activity.approvalRequiredRole === 'director');
+    return iDecide ? { key: 'decide', label: t('do.decide') } : { key: 'none', label: t('journey.requested'), done: true };
+  }
+  if (!(mine || isDirector)) return { key: 'none', label: t('journey.underway'), done: true };
+  if (!monthReady) return { key: 'none', label: t('do.waitingForMonth'), done: true };
+  // Not started: the one button is to start.
+  if (['Approved', 'Budget Adjusted'].includes(activity.status)) {
+    return { key: 'start', label: t('action.startWork'), state: t('journey.notStarted') };
+  }
+  if (activity.status === 'Needs Correction') return { key: 'open', label: t('do.fix') };
+  // Under way. Proof first, because the API will not accept the work without it,
+  // and being refused at the last step is the worst place to learn that.
+  if (activity.evidenceRequired !== false && !(activity.activityEvidenceCount || activity.evidenceCount)) {
+    return { key: 'proof', label: t('do.addProof') };
+  }
+  return { key: 'finish', label: t('action.submitCompleted') };
+}
+
 // One box near the top of a record: who the record is waiting on, in a sentence,
 // and the button for the next step when the reader is the one to take it.
 export function NextStep({ tone = 'info', title, children, actions }) {

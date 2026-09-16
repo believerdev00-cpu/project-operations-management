@@ -4,7 +4,7 @@ import { OTHER_CATEGORY, categoriesForOperation } from '../shared/categories.js'
 import { fill, useI18n } from './i18n.js';
 import { categoryLabel, trailActionLabel } from './ActivityReview.jsx';
 import { DetailView, useBusy, useDialog } from './ui.jsx';
-import { FilePicker, activityJourney, formatLocal, journeyLabel, journeyTone } from './journey.jsx';
+import { FilePicker, activityJourney, formatLocal, journeyLabel, journeyTone, nextAction } from './journey.jsx';
 
 // Monthly planning, allocation and month-end review.
 //
@@ -87,7 +87,7 @@ const emptyActivity = {
 };
 
 export default function MonthlyPlans({
-  user, fetchJson, managers, people = [], rate = null,
+  user, fetchJson, managers, people = [], rate = null, onStartWork, onOpenActivity,
   planId = null, onOpenPlan, onClosePlan, onChanged, onMessage, onError
 }) {
   const { language, t } = useI18n();
@@ -274,6 +274,20 @@ export default function MonthlyPlans({
         await load();
         onChanged?.();
       } catch (workError) { onError(workError.message); }
+    });
+  };
+
+  // The manager gets on with the work the Director planned, from the plan
+  // itself. The record screen has always allowed this; the month did not show it,
+  // so the only thing a manager could see to do with their own plan was hand a
+  // day of it to somebody else.
+  const startPlannedWork = (activity) => {
+    run(async () => {
+      const moved = await onStartWork?.(activity);
+      if (moved === false) return;
+      if (openPlanId) await loadPlan(openPlanId);
+      await load();
+      onChanged?.();
     });
   };
 
@@ -525,6 +539,8 @@ export default function MonthlyPlans({
         workForms={workForms}
         setWorkForms={setWorkForms}
         onAddWork={addWork}
+        onStartWork={startPlannedWork}
+        onOpenActivity={onOpenActivity}
         onAddActivity={addActivity}
         onConfirm={confirmPlan}
         onReopen={reopenPlan}
@@ -563,13 +579,25 @@ function planTone(status) {
 // finish it; and both of them read the same block -- what was promised, what has
 // been given out to the days, what has been spent, and how many of those days are
 // done. The Director watching the month is watching this.
-function PlannedActivity({ item, plan, t, language, busy, people, canAssignWork, form, setForm, onAddWork }) {
+function PlannedActivity({
+  item, plan, user, t, language, busy, people, canAssignWork, form, setForm, onAddWork, onStart, onOpen
+}) {
   const [open, setOpen] = useState(false);
+  // Giving the work to somebody else is a choice, not the only way in. The form
+  // used to be the only thing on a planned activity, so a manager looking at the
+  // month the Director had planned for them could not tell that they were simply
+  // meant to get on with it -- there was no "start" anywhere, only a form asking
+  // them to invent work that had already been planned.
+  const [delegating, setDelegating] = useState(false);
   const journey = activityJourney(item);
   const dead = ['Rejected', 'Cancelled'].includes(item.status);
   // Nothing left to give out means no form: an empty form that can only be
   // refused is worse than no form at all.
   const canAssign = canAssignWork && !dead && item.uncommitted > 0;
+  // The one thing to do on this activity, from the same rule the record screen
+  // and the work cards use. Starting happens here in a tap; anything needing a
+  // photo or a figure opens the record, where the form for it lives.
+  const step = nextAction({ ...item, monthlyPlanId: plan.id, planStatus: plan.status }, user, t);
   const missing = [
     !form.activity.trim() && t('table.activity'),
     !form.description.trim() && t('field.description'),
@@ -582,9 +610,12 @@ function PlannedActivity({ item, plan, t, language, busy, people, canAssignWork,
       <div>
         <strong>{item.activity}</strong>
         <small>{categoryLabel(item.category, t)} · {t(`form.priority${item.priority}`)}
-          {item.deadline ? ` · ${t('monthly.expectedCompletion')} ${formatDate(item.deadline, language)}` : ''}</small>
+          {item.deadline ? ` · ${t('monthly.dueBy')} ${formatWorkDay(item.deadline, language)}` : ''}</small>
       </div>
-      <span className={`status-badge ${journeyTone(journey)}`}>{journeyLabel(journey, t)}</span>
+      {/* "Not started" where the journey would say "Approved". Beside a Start
+          button, the reader is asking how far along the work is, not what the
+          approval system did to it. */}
+      <span className={`status-badge ${journeyTone(journey)}`}>{step.state || journeyLabel(journey, t)}</span>
     </header>
     {item.description && <p className="planned-description">{item.description}</p>}
 
@@ -594,9 +625,20 @@ function PlannedActivity({ item, plan, t, language, busy, people, canAssignWork,
       <span><small>{t('monthly.approvedAllocation')}</small><strong>{formatUsd(item.approvedBudget)}</strong></span>
       <span><small>{t('monthly.givenToWork')}</small><strong>{formatUsd(item.committedToWork)}</strong></span>
       <span><small>{t('monthly.totalSpent')}</small><strong>{formatUsd(item.spent)}</strong></span>
-      <span><small>{t('expense.remainingOnActivity')}</small>
+      <span><small>{t('money.left')}</small>
         <strong className={item.remaining < 0 ? 'over-budget' : undefined}>{formatUsd(item.remaining)}</strong></span>
     </div>
+
+    {/* The one button. It is the first thing under the money, because "what do I
+        do with this?" is the question somebody opening the month is asking. */}
+    {!step.done && <div className="planned-do">
+      {step.key === 'start' && onStart
+        ? <button type="button" className="primary-btn" disabled={busy} onClick={() => onStart(item)}>{step.label}</button>
+        : <button type="button" className="primary-btn" onClick={() => onOpen(item.id)}>{step.label}</button>}
+      {canAssign && !delegating && <button type="button" className="text-btn" onClick={() => setDelegating(true)}>
+        {t('monthly.giveToSomeone')}
+      </button>}
+    </div>}
 
     {/* How far along it is, by the days finished underneath it. */}
     {item.workCount > 0 && <div className="planned-progress">
@@ -631,10 +673,11 @@ function PlannedActivity({ item, plan, t, language, busy, people, canAssignWork,
           </td>
         </tr>)}</tbody>
       </table></div>}
-    </> : <p className="planned-empty">{canAssignWork ? t('monthly.noWorkYetAssign') : t('monthly.noWorkYet')}</p>}
+    </> : <p className="planned-empty">{canAssignWork && delegating ? t('monthly.noWorkYetAssign') : t('monthly.noWorkYet')}</p>}
 
-    {/* The manager's form: the day, the person, what it costs. */}
-    {canAssign && <form className="work-form" onSubmit={(event) => { event.preventDefault(); onAddWork(item, form); }}>
+    {/* The manager's form for giving a day of this work to somebody else, opened
+        only when they ask for it. */}
+    {canAssign && delegating && <form className="work-form" onSubmit={(event) => { event.preventDefault(); onAddWork(item, form); }}>
       <h4>{t('monthly.assignWork')}</h4>
       <div className="form-grid">
         <label className="form-field form-field-wide"><span>{t('table.activity')}</span>
@@ -678,12 +721,15 @@ function PlannedActivity({ item, plan, t, language, busy, people, canAssignWork,
     </form>}
 
     <a className="text-btn planned-open" href={`#/activities/${encodeURIComponent(item.id)}`}>{t('monthly.openFullRecord')}</a>
+    {step.done && canAssign && !delegating && <button type="button" className="text-btn planned-open" onClick={() => setDelegating(true)}>
+      {t('monthly.giveToSomeone')}
+    </button>}
   </article>;
 }
 
 function PlanDetail({
   detail, user, isDirector, language, t, busy, managers = [], people = [], rate = null, activityForm, setActivityForm,
-  workForms = {}, setWorkForms, onAddWork,
+  workForms = {}, setWorkForms, onAddWork, onStartWork, onOpenActivity,
   onAddActivity, onConfirm, onReopen, onSubmitReport, onDecideReport, onClose, onAttach, onUpdatePlan, offPlanActivities = []
 }) {
   const { plan, activities, history, report } = detail;
@@ -772,6 +818,7 @@ function PlanDetail({
       key={item.id}
       item={item}
       plan={plan}
+      user={user}
       t={t}
       language={language}
       busy={busy}
@@ -780,6 +827,8 @@ function PlanDetail({
       form={workForms[item.id] || emptyWork}
       setForm={(next) => setWorkForms({ ...workForms, [item.id]: next })}
       onAddWork={onAddWork}
+      onStart={onStartWork}
+      onOpen={onOpenActivity}
     />)}</div> : <div className="empty-state">
       <strong>{t('monthly.noActivitiesInPlan')}</strong><span>{t('table.noData')}</span>
     </div>}
