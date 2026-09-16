@@ -605,6 +605,10 @@ function planTone(status) {
 // photos, and the completion route for finishing. Only the progress fields are
 // new, and they are columns on the activity, not a system of their own.
 function Workspace({ activity, plan, user, t, language, busy, fetchJson, upload, onOpenFile, onChanged, onError, onMessage }) {
+  // Once a planned activity has days of work under it, the money and the photos
+  // belong to the days -- the expense route refuses the heading, which is what
+  // stops the same budget appearing to be available twice.
+  const hasDays = Number(activity.workCount) > 0;
   const [detail, setDetail] = useState(null);
   const [failed, setFailed] = useState(false);
   const [form, setForm] = useState(null);
@@ -776,10 +780,11 @@ function Workspace({ activity, plan, user, t, language, busy, fetchJson, upload,
       <span><small>{t('money.left')}</small>
         <strong className={remaining < 0 ? 'over-budget' : undefined}>{formatUsd(remaining)}</strong></span>
     </div>
+    {hasDays && <p className="workspace-waiting">{t('work.moneyOnTheDays')}</p>}
     <ExpensePanel
       expenses={expenses}
       summary={{ totalSpent: spent, remaining }}
-      canRecord={canWork}
+      canRecord={canWork && !hasDays}
       onRecord={recordExpense}
       canRemove={false}
       busy={busy}
@@ -863,8 +868,7 @@ function PlannedActivity({
   const missing = [
     !form.activity.trim() && t('table.activity'),
     !form.description.trim() && t('field.description'),
-    !form.scheduledFor && t('monthly.dayOfWork'),
-    !form.assignedTo && t('field.whoDoesIt')
+    !form.scheduledFor && t('monthly.dayOfWork')
   ].filter(Boolean);
 
   return <article className={`planned-activity${dead ? ' planned-activity-dead' : ''}`}>
@@ -897,8 +901,8 @@ function PlannedActivity({
         the month is asking. */}
     <div className="planned-do">
       {workButton}
-      {canAssign && !delegating && <button type="button" className="text-btn" onClick={() => setDelegating(true)}>
-        {t('monthly.giveToSomeone')}
+      {canAssign && !delegating && <button type="button" className="secondary-btn" onClick={() => setDelegating(true)}>
+        {t('work.addDay')}
       </button>}
     </div>
 
@@ -935,7 +939,7 @@ function PlannedActivity({
 
     {item.workCount > 0 ? <>
       <button type="button" className="text-btn planned-toggle" onClick={() => setOpen(!open)}>
-        {open ? t('monthly.hideWork') : fill(t('monthly.showWork'), { count: item.workCount })}
+        {open ? t('monthly.hideWork') : fill(t('work.showDays'), { count: item.workCount })}
       </button>
       {open && <div className="table-wrap"><table className="card-table">
         <thead><tr>
@@ -965,7 +969,8 @@ function PlannedActivity({
     {/* The manager's form for giving a day of this work to somebody else, opened
         only when they ask for it. */}
     {canAssign && delegating && <form className="work-form" onSubmit={(event) => { event.preventDefault(); onAddWork(item, form); }}>
-      <h4>{t('monthly.assignWork')}</h4>
+      <h4>{t('work.addDay')}</h4>
+      <p className="field-hint">{t('work.addDayHint')}</p>
       <div className="form-grid">
         <label className="form-field form-field-wide"><span>{t('table.activity')}</span>
           <input required maxLength="200" placeholder={t('monthly.workPlaceholder')} value={form.activity}
@@ -982,8 +987,8 @@ function PlannedActivity({
             onChange={(event) => setForm({ ...form, scheduledFor: event.target.value })} />
         </label>
         <label className="form-field"><span>{t('field.whoDoesIt')}</span>
-          <select required value={form.assignedTo} onChange={(event) => setForm({ ...form, assignedTo: event.target.value })}>
-            <option value="">{t('monthly.selectPerson')}</option>
+          <select value={form.assignedTo} onChange={(event) => setForm({ ...form, assignedTo: event.target.value })}>
+            <option value="">{t('work.myselfOption')}</option>
             {people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}
           </select>
         </label>
@@ -1008,8 +1013,8 @@ function PlannedActivity({
     </form>}
 
     <a className="text-btn planned-open" href={`#/activities/${encodeURIComponent(item.id)}`}>{t('monthly.openFullRecord')}</a>
-    {step.done && canAssign && !delegating && <button type="button" className="text-btn planned-open" onClick={() => setDelegating(true)}>
-      {t('monthly.giveToSomeone')}
+    {step.done && canAssign && !delegating && <button type="button" className="secondary-btn" onClick={() => setDelegating(true)}>
+      {t('work.addDay')}
     </button>}
   </article>;
 }
@@ -1098,6 +1103,17 @@ function PlanDetail({
         value={plan.workCount ? `${plan.workCompletedCount}/${plan.workCount}` : '—'} />
       <Fact label={t('review.expensesWithoutEvidence')} value={plan.expensesWithoutEvidence} />
     </div>
+    {/* A month with no activities on it is a heading and a budget: the manager
+        opening it has nothing to do and no way to know why. Said here, where the
+        Director is looking, instead of leaving them to find the form below. */}
+    {isDirector && open && !activities.length && <p className="next-step next-step-action plan-next">
+      <strong>{t('monthly.nextAddActivities')}</strong>
+      <span>{t('monthly.nextAddActivitiesText')}</span>
+    </p>}
+    {isDirector && open && activities.length > 0 && plan.status === 'Draft' && <p className="next-step next-step-action plan-next">
+      <strong>{t('monthly.nextConfirm')}</strong>
+      <span>{t('monthly.nextConfirmText')}</span>
+    </p>}
     {plan.category && <p className="detail-notes"><strong>{t('monthly.businessCategory')}:</strong> {categoryLabel(plan.category, t)}</p>}
     {plan.objective && <p className="detail-notes"><strong>{t('monthly.objectives')}:</strong> {plan.objective}</p>}
     {plan.notes && <p className="detail-notes">{plan.notes}</p>}
@@ -1131,7 +1147,8 @@ function PlanDetail({
       onMessage={onMessage}
     />)}</div> : <div className="empty-state">
       <strong>{isDirector ? t('monthly.noActivitiesInPlan') : t('work.nonePlannedForYou')}</strong>
-      <span>{isDirector ? t('table.noData') : t('work.nonePlannedForYouHint')}</span>
+      <span>{isDirector ? t('monthly.noActivitiesHint')
+        : plan.status === 'Draft' ? t('work.monthStillDraft') : t('work.nonePlannedForYouHint')}</span>
     </div>}
     {activities.length > 0 && <>
       <div className="totals-line">

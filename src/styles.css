@@ -880,3 +880,8 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .progress-row input[type="range"] { flex: 1; min-height: 44px; padding: 0; background: transparent; border: 0; }
 .progress-row strong { flex: none; min-width: 52px; color: var(--navy); font-size: 1.05rem; text-align: right; }
 .work-done { align-self: center; }
+
+/* The Director's next step on a month that cannot be worked yet. */
+.plan-next { display: block; margin-top: 16px; }
+.plan-next strong { display: block; color: var(--navy); font-size: .92rem; }
+.plan-next span { display: block; margin-top: 4px; color: var(--ink); font-size: .84rem; line-height: 1.5; }
