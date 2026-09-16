@@ -30,11 +30,8 @@ export function formatUsdShort(value) {
   return `${amount < 0 ? '-' : ''}$${new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Math.abs(amount))}`;
 }
 
-function greetingKey() {
-  const hour = new Date().getHours();
-  if (hour < 12) return 'home.goodMorning';
-  if (hour < 18) return 'home.goodAfternoon';
-  return 'home.goodEvening';
+function todayLabel(language) {
+  return new Date().toLocaleDateString(language, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 }
 
 export default function Home({
@@ -72,23 +69,22 @@ export default function Home({
   const tiles = [
     approves && {
       id: 'approvals', count: approvalCount, tone: approvalCount ? 'urgent' : 'calm',
-      title: t('home.tileApprovals'), text: approvalCount ? t('home.tileApprovalsText') : t('home.nothingWaiting'),
+      title: t('home.tileApprovals'),
       onClick: () => onGo('approval-queue')
     },
     !isDirector && {
       id: 'work', count: counts.myOpenWork || 0, tone: counts.myOpenWork ? 'active' : 'calm',
-      title: t('home.tileWork'), text: counts.myOpenWork ? t('home.tileWorkText') : t('home.noWork'),
+      title: t('home.tileWork'),
       onClick: () => onGo('activities', 'work')
     },
     (isDirector || user.role === 'manager') && {
       id: 'checks', count: counts.finalChecksWaiting || 0, tone: counts.finalChecksWaiting ? 'active' : 'calm',
       title: isDirector ? t('home.tileChecks') : t('home.tileChecksManager'),
-      text: counts.finalChecksWaiting ? t('home.tileChecksText') : t('home.nothingWaiting'),
       onClick: () => onGo('activities', 'final-check')
     },
     isDirector && {
       id: 'reports', count: counts.monthEndReportsWaiting || 0, tone: counts.monthEndReportsWaiting ? 'active' : 'calm',
-      title: t('home.tileMonthEnd'), text: counts.monthEndReportsWaiting ? t('home.tileMonthEndText') : t('home.nothingWaiting'),
+      title: t('home.tileMonthEnd'),
       onClick: () => onGo('monthly')
     }
   ].filter(Boolean);
@@ -102,17 +98,15 @@ export default function Home({
   return <div className="home">
     <section className="home-hello">
       <div>
-        <h2>{fill(t(greetingKey()), { name: user.name.split(' ')[0] })}</h2>
-        <p>{isDirector
-          ? t('home.subtitleDirector')
-          : fill(t('home.subtitleOperation'), { operation: user.coversAllSectors ? t('user.allOperations') : operationName(user.sector, language) })}</p>
+        <h2>{isDirector || user.coversAllSectors ? t('user.allOperations') : operationName(user.sector, language)}</h2>
+        <p>{todayLabel(language)}</p>
       </div>
       {(canAddActivity || canAddMovement) && <div className="home-quick">
         {canAddActivity && <button className="primary-btn" type="button" onClick={onAddActivity}>
-          <span aria-hidden="true">+</span> {isDirector ? t('action.assignActivity') : t('action.raiseActivity')}
+          {isDirector ? t('action.assignActivity') : t('action.raiseActivity')}
         </button>}
         {canAddMovement && <button className="secondary-btn" type="button" onClick={onAddMovement}>
-          <span aria-hidden="true">+</span> {t('home.newTrip')}
+          {t('home.newTrip')}
         </button>}
       </div>}
     </section>
@@ -121,8 +115,7 @@ export default function Home({
     <div className="home-tiles">
       {tiles.map((tile) => <button key={tile.id} type="button" className={`home-tile home-tile-${tile.tone}`} onClick={tile.onClick}>
         <span className="home-tile-count">{tile.count}</span>
-        <span className="home-tile-text"><strong>{tile.title}</strong><small>{tile.text}</small></span>
-        <span className="home-tile-arrow" aria-hidden="true">&rsaquo;</span>
+        <span className="home-tile-text">{tile.title}</span>
       </button>)}
     </div>
 
@@ -151,7 +144,6 @@ export default function Home({
         const row = rowFor(operation.id);
         return <article key={operation.id} className={`operation-card operation-${operation.id}`}>
           <header>
-            <span className="operation-mark" aria-hidden="true">{operationName(operation.id, 'en').charAt(0)}</span>
             <div>
               <h4>{operationName(operation.id, language)}</h4>
               <small>{plan?.managerName ? fill(t('home.runBy'), { name: plan.managerName }) : t('home.noPlanYet')}</small>

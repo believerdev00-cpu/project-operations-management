@@ -118,10 +118,16 @@ try {
     quantity: 1, costUsd: 25, costRwf: 36250, costCdf: 71250, scheduledFor: '2099-02-31'
   });
   check('  a date that does not exist is refused', badDate.status === 400, String(badDate.status));
-  const moved = await patch(admin, `/api/activities/${dated.body.id}/assignment`, { scheduledFor: '2099-11-06', deadline: '2099-11-10' });
-  check('  the Director can move it, with the deadline beside it',
-    moved.status === 200 && moved.body.scheduledFor === '2099-11-06' && moved.body.deadline === '2099-11-10',
-    `${moved.status} ${moved.body.scheduledFor} / ${moved.body.deadline}`);
+  // The Director plans the month and sets the deadline; the manager doing the
+  // work says which day it happens, and can move it as the work moves.
+  const deadline = await patch(admin, `/api/activities/${dated.body.id}/assignment`, { deadline: '2099-11-10' });
+  check('  the Director sets the deadline', deadline.status === 200 && deadline.body.deadline === '2099-11-10',
+    `${deadline.status} ${deadline.body.deadline}`);
+  const moved = await patch(farming.token, `/api/activities/${dated.body.id}/schedule`, { scheduledFor: '2099-11-06' });
+  check('  the manager moves the date of the work', moved.status === 200 && moved.body.scheduledFor === '2099-11-06',
+    `${moved.status} ${moved.body.scheduledFor}`);
+  const otherManager = await patch(logistics.token, `/api/activities/${dated.body.id}/schedule`, { scheduledFor: '2099-11-07' });
+  check('  a manager from another operation cannot', [403, 404].includes(otherManager.status), String(otherManager.status));
   const trail = (await api(admin, `/api/activities/${dated.body.id}`)).body.history || [];
   check('  and the change is in the record\'s history', trail.some((entry) => entry.field === 'scheduledFor'));
 

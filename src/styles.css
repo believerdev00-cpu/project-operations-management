@@ -414,40 +414,31 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 
 .home { padding-bottom: 8px; }
 .home-hello { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px 20px; margin-top: 26px; }
-.home-hello h2 { margin: 0; color: var(--navy); font-size: 1.6rem; }
+.home-hello h2 { margin: 0; color: var(--navy); font-size: 1.45rem; }
 .home-hello p { margin: 4px 0 0; color: var(--muted); font-size: .95rem; }
 .home-quick { display: flex; flex-wrap: wrap; gap: 10px; }
 .home-quick button span { font-size: 1.15rem; font-weight: 800; }
-.home-heading { margin: 28px 0 12px; color: var(--navy); font-size: 1.02rem; font-weight: 800; }
+.home-heading { margin: 26px 0 10px; color: var(--muted); font-size: .76rem; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
 .home-more { margin-top: 6px; }
 
-.home-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
-.home-tile { display: flex; align-items: center; gap: 14px; min-height: 92px; padding: 16px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-left-width: 5px; border-radius: 10px; box-shadow: 0 4px 14px rgba(16,43,70,.04); text-align: left; }
-.home-tile:hover { border-color: #b9cfe4; }
-.home-tile-count { display: grid; flex: none; place-items: center; min-width: 52px; height: 52px; padding: 0 8px; color: var(--navy); background: var(--blue-soft); border-radius: 12px; font-size: 1.5rem; font-weight: 800; }
-.home-tile-text { flex: 1; min-width: 0; }
-.home-tile-text strong { display: block; font-size: 1rem; }
-.home-tile-text small { display: block; margin-top: 3px; color: var(--muted); font-size: .84rem; line-height: 1.35; }
-.home-tile-arrow { flex: none; color: var(--muted); font-size: 1.8rem; line-height: 1; }
-.home-tile-urgent { border-left-color: var(--red); }
-.home-tile-urgent .home-tile-count { color: white; background: var(--red); }
-.home-tile-active { border-left-color: var(--blue); }
-.home-tile-active .home-tile-count { color: white; background: var(--blue); }
-.home-tile-calm { border-left-color: var(--line); }
-.home-tile-calm .home-tile-count { color: var(--muted); background: #eef2f6; }
+/* Counts first, name under them: a figure a Director can scan down, not a
+   card with a headline and a sentence. */
+.home-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.home-tile { display: grid; align-content: start; gap: 4px; padding: 14px 16px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; text-align: left; }
+.home-tile:hover { border-color: #b9cfe4; background: #fbfdff; }
+.home-tile-count { color: var(--navy); font-size: 1.7rem; font-weight: 800; line-height: 1.1; }
+.home-tile-text { color: var(--muted); font-size: .8rem; font-weight: 650; line-height: 1.35; }
+.home-tile-urgent .home-tile-count { color: var(--red); }
+.home-tile-active .home-tile-count { color: var(--blue); }
+.home-tile-calm .home-tile-count { color: var(--muted); }
 
 .home-operations { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.operation-card { display: grid; gap: 4px; align-content: start; padding: 16px; background: var(--surface); border: 1px solid var(--line); border-top: 4px solid var(--blue); border-radius: 10px; }
+.operation-card { display: grid; gap: 4px; align-content: start; padding: 16px; background: var(--surface); border: 1px solid var(--line); border-top: 3px solid var(--blue); border-radius: 6px; }
 .operation-farming { border-top-color: #2e7d32; }
 .operation-agriculture { border-top-color: #9e7c16; }
 .operation-mining { border-top-color: #6d4c41; }
 .operation-movement { border-top-color: #1565c0; }
 .operation-card header { display: flex; align-items: center; gap: 12px; }
-.operation-mark { display: grid; flex: none; place-items: center; width: 40px; height: 40px; color: white; background: var(--navy); border-radius: 10px; font-weight: 800; }
-.operation-farming .operation-mark { background: #2e7d32; }
-.operation-agriculture .operation-mark { background: #8a6c12; }
-.operation-mining .operation-mark { background: #6d4c41; }
-.operation-movement .operation-mark { background: #1565c0; }
 .operation-card h4 { margin: 0; color: var(--navy); font-size: 1.02rem; }
 .operation-card header small { display: block; margin-top: 2px; color: var(--muted); font-size: .8rem; }
 .operation-card .money-bar { margin-top: 12px; padding: 12px; }
@@ -461,7 +452,7 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 
 /* A decision waiting on this person, as a card: what, how much, who asked. */
 .decision-list, .work-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
-.decision-card { background: var(--surface); border: 1px solid var(--line); border-left: 5px solid #c9962c; border-radius: 10px; overflow: hidden; }
+.decision-card { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid #c9962c; border-radius: 6px; overflow: hidden; }
 .decision-card-main { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; width: 100%; padding: 14px 16px 10px; color: var(--ink); background: none; border: 0; text-align: left; }
 .decision-card-kind { grid-column: 1 / -1; color: var(--muted); font-size: .76rem; font-weight: 700; }
 .decision-card-main strong { grid-column: 1; font-size: 1rem; overflow-wrap: anywhere; }
@@ -469,7 +460,7 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .decision-card-amount { grid-column: 2; grid-row: 2 / span 2; align-self: center; color: var(--navy); font-size: 1.1rem; font-weight: 800; white-space: nowrap; }
 .decision-card-actions { display: flex; gap: 8px; padding: 0 16px 14px; }
 .decision-card-actions button { flex: 1; }
-.work-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 64px; padding: 12px 16px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; text-align: left; }
+.work-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 64px; padding: 12px 16px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; text-align: left; }
 .work-card:hover { border-color: #b9cfe4; }
 .work-card-text { min-width: 0; }
 .work-card-text strong { display: block; overflow-wrap: anywhere; }
@@ -499,7 +490,7 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .journey-side-sentBack, .journey-side-paused, .journey-side-draft { color: #7a5416; background: #fff6dd; }
 
 /* The one box that says what happens next, and holds the button for it. */
-.next-step { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 18px; margin-top: 16px; padding: 16px 18px; border: 1px solid var(--line); border-left-width: 5px; border-radius: 8px; background: #f7fafc; }
+.next-step { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 18px; margin-top: 16px; padding: 14px 16px; border: 1px solid var(--line); border-left-width: 4px; border-radius: 6px; background: #f7fafc; }
 .next-step-text { flex: 1 1 280px; min-width: 0; }
 .next-step-text strong { display: block; color: var(--navy); font-size: 1.02rem; }
 .next-step-text p { margin: 5px 0 0; color: #3e5064; font-size: .88rem; line-height: 1.5; overflow-wrap: anywhere; }
@@ -512,7 +503,7 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .next-step-muted { border-left-color: var(--muted); }
 
 /* Approved, spent and left, with a bar that fills as money is used. */
-.money-bar { margin-top: 16px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.money-bar { margin-top: 16px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
 .money-title { display: block; margin-bottom: 8px; color: var(--navy); font-size: .9rem; font-weight: 800; }
 .money-figures { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .money-figures span { display: block; color: var(--muted); font-size: .76rem; font-weight: 700; }
@@ -523,11 +514,14 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .money-track span { display: block; height: 100%; background: var(--blue); border-radius: inherit; }
 .money-over .money-track span { background: var(--red); }
 .money-equivalent { display: block; margin-top: 3px; color: var(--muted); font-size: .78rem; font-weight: 600; }
+.work-date { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-top: 16px; padding: 14px 16px; background: #f7fafc; border: 1px solid var(--line); border-radius: 6px; }
+.work-date .form-field { flex: 1 1 200px; max-width: 280px; }
+.work-date button { min-height: 42px; }
 .money-note { margin: 8px 0 0; color: var(--muted); font-size: .82rem; }
 .money-note:empty { display: none; }
 
 /* A part of a record that folds away. */
-.record-section { margin-top: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.record-section { margin-top: 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
 .record-section > summary { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 12px 16px; color: var(--navy); cursor: pointer; font-size: .95rem; font-weight: 800; list-style: none; }
 .record-section > summary::-webkit-details-marker { display: none; }
 .record-section > summary::after { content: ''; flex: none; width: 9px; height: 9px; margin-left: auto; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(45deg); transition: transform .15s ease; }

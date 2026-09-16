@@ -1141,6 +1141,52 @@ router.patch('/:id/decision', asyncRoute(async (req, res) => {
 
 // ---- status moves ---------------------------------------------------------
 
+// The day the manager is doing the work. The Director plans the month and sets
+// the deadline; the manager carrying the work says when, within that month, it
+// actually happens -- so this is theirs to set and change as the work moves.
+router.patch('/:id/schedule', asyncRoute(async (req, res) => {
+  const existing = await loadActivity(req.params.id, req.user);
+  assertPlanOpen(existing);
+  // The same people who may start the work and record its spending.
+  const carriesIt = isAdmin(req.user) || (
+    withinScope(req.user, existing.sector)
+    && (existing.assigned_to === null ? req.user.role === 'manager' : existing.assigned_to === req.user.id)
+  );
+  if (!carriesIt) {
+    return res.status(403).json({ message: 'Only the manager carrying out this activity can set its date.' });
+  }
+  if (['Rejected', 'Cancelled'].includes(existing.status)) {
+    return res.status(400).json({ message: `A ${existing.status} activity has no date to set.` });
+  }
+
+  const payload = req.body || {};
+  const scheduledFor = payload.scheduledFor ? String(payload.scheduledFor).slice(0, 10) : null;
+  if (scheduledFor && !isValidDate(scheduledFor)) {
+    return res.status(400).json({ message: 'The date of the activity must be a real date.' });
+  }
+  const previous = toDateOnly(existing.scheduled_for);
+  if (scheduledFor === previous) {
+    return res.status(400).json({ message: 'That is already the date of this activity.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('UPDATE activities SET scheduled_for = $2::date, updated_at = NOW() WHERE id = $1', [existing.id, scheduledFor]);
+    await logHistory(client, existing.id, req.user, [
+      { action: 'Date changed', field: 'scheduledFor', oldValue: previous, newValue: scheduledFor }
+    ]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  res.json(mapActivity(await loadActivity(existing.id, req.user)));
+}));
+
 router.patch('/:id/status', asyncRoute(async (req, res) => {
   const existing = await loadActivity(req.params.id, req.user);
   const { status } = req.body || {};

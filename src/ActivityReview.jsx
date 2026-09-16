@@ -159,7 +159,7 @@ export function ActivityReview({
   detail, user, onOpenFile, sectorLabel, managers = [], busy = false,
   onClose, onDecision, onStatus, onAssign, onUpload, onRemoveEvidence, onSubmitCompletion, onApprove, onReject,
   onVisibility, onRecordExpense, onRemoveExpense, onRequestBudget, onDecideBudget, onDelete, onSendDraft,
-  onFinish, onSendBack, onReopen
+  onFinish, onSendBack, onReopen, onSchedule
 }) {
   const { language, t } = useI18n();
   const { activity, evidence, history, expenses = [], expenseSummary = null, budgetRequests = [] } = detail;
@@ -188,9 +188,11 @@ export function ActivityReview({
   const [assignment, setAssignment] = useState({
     assignedTo: activity.assignedTo === null ? '' : String(activity.assignedTo),
     deadline: activity.deadline || '',
-    scheduledFor: activity.scheduledFor || '',
     instructions: activity.instructions || ''
   });
+  // The manager's own date for the work, changed from the record as the work
+  // is planned and re-planned.
+  const [workDate, setWorkDate] = useState(activity.scheduledFor || '');
 
   // Reopening a different activity must not leave the previous decision in the
   // form, and a saved decision should read back what was actually stored.
@@ -207,9 +209,9 @@ export function ActivityReview({
     setAssignment({
       assignedTo: activity.assignedTo === null ? '' : String(activity.assignedTo),
       deadline: activity.deadline || '',
-      scheduledFor: activity.scheduledFor || '',
       instructions: activity.instructions || ''
     });
+    setWorkDate(activity.scheduledFor || '');
   }, [
     activity.id, activity.approvedBudget, activity.status, activity.adminNote, activity.requestedBudget,
     activity.assignedTo, activity.deadline, activity.scheduledFor, activity.instructions
@@ -255,7 +257,6 @@ export function ActivityReview({
   const nextManager = assignment.assignedTo === '' ? null : Number(assignment.assignedTo);
   if (nextManager !== activity.assignedTo) assignmentChanges.assignedTo = nextManager;
   if ((assignment.deadline || '') !== (activity.deadline || '')) assignmentChanges.deadline = assignment.deadline || null;
-  if ((assignment.scheduledFor || '') !== (activity.scheduledFor || '')) assignmentChanges.scheduledFor = assignment.scheduledFor || null;
   if (assignment.instructions.trim() !== (activity.instructions || '')) assignmentChanges.instructions = assignment.instructions.trim();
   const hasAssignmentChanges = Object.keys(assignmentChanges).length > 0;
 
@@ -292,6 +293,10 @@ export function ActivityReview({
     && (!activity.approvalRequired || activity.approvalStatus === 'approved')
     && !['Rejected', 'Cancelled'].includes(activity.status)
     && monthOpen && monthConfirmed;
+  // The manager carrying the work says which day they are doing it, while the
+  // work is live and its month is open.
+  const canSetDate = Boolean(onSchedule) && monthOpen && (isDirector || carriesIt)
+    && !['Rejected', 'Cancelled', 'Completed'].includes(activity.status);
   // A draft is sent on by whoever wrote it, or the Director.
   const canSendDraft = monthOpen && activity.status === 'Draft' && (isDirector || activity.createdBy === user.id);
   // The Director may delete; the author may withdraw a request nobody has
@@ -402,6 +407,16 @@ export function ActivityReview({
     <Journey journey={journey} />
 
     <NextStep tone={next.tone} title={next.title} actions={next.actions}>{next.text}</NextStep>
+
+    {canSetDate && <form className="work-date" onSubmit={(event) => { event.preventDefault(); onSchedule(activity, workDate); }}>
+      <label className="form-field">
+        <span>{t('review.whenWillYouDoIt')}</span>
+        <input type="date" value={workDate} onChange={(event) => setWorkDate(event.target.value)} />
+      </label>
+      <button className="secondary-btn" type="submit" disabled={busy || (workDate || '') === (activity.scheduledFor || '')}>
+        {t('action.saveDate')}
+      </button>
+    </form>}
 
     <MoneyBar
       approved={activity.approvedBudget}
@@ -598,10 +613,6 @@ export function ActivityReview({
               <option value="">{t('form.nobodyYet')}</option>
               {managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}
             </select>
-          </label>
-          <label className="form-field"><span>{t('field.activityDate')}</span>
-            <input type="date" value={assignment.scheduledFor}
-              onChange={(event) => setAssignment({ ...assignment, scheduledFor: event.target.value })} />
           </label>
           <label className="form-field"><span>{t('field.deadline')}</span>
             <input type="date" value={assignment.deadline}

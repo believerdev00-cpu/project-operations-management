@@ -214,7 +214,11 @@ export function FilePicker({ files, onChange, disabled = false, single = false }
   return <div className="file-picker">
     <div className="file-picker-buttons">
       <button type="button" className="secondary-btn camera-btn" disabled={disabled} onClick={() => cameraInput.current?.click()}>
-        <span aria-hidden="true">📷</span> {t('files.takePhoto')}
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8"
+          strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M4 8h3l1.5-2h7L17 8h3v11H4z" /><circle cx="12" cy="13" r="3.2" />
+        </svg>
+        {t('files.takePhoto')}
       </button>
       <button type="button" className="secondary-btn" disabled={disabled} onClick={() => fileInput.current?.click()}>
         {single ? t('files.chooseFile') : t('files.chooseFiles')}

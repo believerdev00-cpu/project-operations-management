@@ -1452,6 +1452,19 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     } catch (reopenError) { fail(reopenError.message); }
   });
 
+  // The manager says which day they are doing the work. The Director's deadline
+  // is set from the assignment form and is not touched here.
+  const scheduleActivity = act(async (activity, scheduledFor) => {
+    setError('');
+    try {
+      await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/schedule`, {
+        method: 'PATCH', body: JSON.stringify({ scheduledFor: scheduledFor || null })
+      });
+      notify(scheduledFor ? fill(t('msg.dateSet'), { date: formatDate(scheduledFor) }) : t('msg.dateCleared'));
+      await refreshActivity(activity.id);
+    } catch (dateError) { fail(dateError.message); }
+  });
+
   const sendDraft = act(async (activity) => {
     setError('');
     try {
@@ -1849,6 +1862,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
           onDecideBudget={decideBudgetRequest}
           onDelete={deleteActivity}
           onSendDraft={sendDraft}
+          onSchedule={scheduleActivity}
           onFinish={finishActivity}
           onSendBack={sendBackActivity}
           onReopen={reopenActivity}
@@ -2344,11 +2358,12 @@ function ActivityForm({ form, setForm, projects, selectedProject, managers, isDi
       <Field label={t('field.quantity')}>
         <input required type="number" inputMode="decimal" min="0.01" step="0.01" value={form.quantity} onChange={(event) => setForm({ ...form, quantity: event.target.value })} />
       </Field>
-      {/* When the work happens -- the planting day, the meeting, the trip --
-          which is a different question from the deadline it must be done by. */}
-      <Field label={t('field.activityDate')}>
+      {/* When the manager will do the work -- the planting day, the meeting,
+          the trip. The Director does not set this; they set the deadline
+          below, and the manager schedules the work inside it. */}
+      {!isDirector && <Field label={t('field.activityDate')}>
         <input type="date" value={form.scheduledFor} onChange={(event) => setForm({ ...form, scheduledFor: event.target.value })} />
-      </Field>
+      </Field>}
       {/* One question, not two: every project belongs to a business operation,
           so choosing the project sets the operation, the categories offered and
           the managers who can be given the work. The operation was a second
