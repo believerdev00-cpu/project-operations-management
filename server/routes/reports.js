@@ -385,6 +385,17 @@ export async function buildReport(user, period) {
 
 router.use((req, res, next) => {
   if (!req.user) return res.status(401).json({ message: 'Authentication required.' });
+  // A period report is a management reading of a whole business operation: every
+  // activity in it, what each was given, what each spent, and who ran it. That is
+  // the Director's job and the operation manager's job, not a team member's.
+  //
+  // The comment on the routes below always said "a manager may ask for one",
+  // but nothing enforced it: sector scoping alone let a team member pull -- and
+  // export to Excel or PDF -- the entire budget and spend of their operation.
+  // Scope answers "whose data?"; it was never an answer to "who may ask?".
+  if (!isAdmin(req.user) && req.user.role !== 'manager') {
+    return res.status(403).json({ message: 'Only a manager or the Director can run a report.' });
+  }
   next();
 });
 

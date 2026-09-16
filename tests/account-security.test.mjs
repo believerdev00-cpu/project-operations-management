@@ -13,7 +13,7 @@ const API = process.env.API || 'http://localhost:5000';
 
 let passed = 0;
 let failed = 0;
-const created = { users: [] };
+const created = { users: [], movements: [] };
 
 const check = (label, condition, detail = '') => {
   if (condition) { passed += 1; console.log(`  PASS  ${label}`); }
@@ -173,6 +173,38 @@ try {
   const staffReads = await api(staffToken, '/api/activities?limit=5');
   check('a team member can still follow their operation\'s work', staffReads.status === 200, String(staffReads.status));
 
+  // A period report reads a whole business operation: every activity, what each
+  // was given, what each spent, who ran it. Sector scoping answered "whose
+  // data?" and was mistaken for an answer to "who may ask?", so a team member
+  // could pull it -- and export it to Excel or PDF.
+  const staffReport = await api(staffToken, '/api/reports/activities?period=monthly');
+  check('a team member cannot run a report on their operation', staffReport.status === 403,
+    `${staffReport.status} ${staffReport.body.message}`);
+  const staffExport = await fetch(`${API}/api/reports/activities/export?period=monthly&format=xlsx`, {
+    headers: { Authorization: `Bearer ${staffToken}` }
+  });
+  check('  nor export one', staffExport.status === 403, String(staffExport.status));
+  const managerReport = await api(backIn.body.token, '/api/reports/activities?period=monthly');
+  check('  but a manager still can', managerReport.status === 200, String(managerReport.status));
+
+  // Running the movements operation is what earns the organisation-wide view of
+  // it, and that is a job, not a location. This account is filed under
+  // 'movement' and is a team member, so it sees its own area's trips like
+  // anybody else -- not every trip in the organisation.
+  const farmingTrip = await api(adminToken, '/api/movements', {
+    method: 'POST',
+    body: JSON.stringify({
+      purpose: 'ZZTEST trip for another area', origin: 'Kigali', destination: 'Rubavu',
+      relatedArea: 'farming', estimatedTotal: 50, currency: 'USD'
+    })
+  });
+  if (farmingTrip.status === 201) created.movements.push(farmingTrip.body.id);
+  const staffTrips = await api(staffToken, '/api/movements?limit=100');
+  check('a team member in Movements does not see another area\'s trips',
+    farmingTrip.status === 201 && Array.isArray(staffTrips.body)
+      && !staffTrips.body.some((trip) => trip.id === farmingTrip.body.id),
+    `${farmingTrip.status} / ${staffTrips.status}`);
+
   // ---- evidence links --------------------------------------------------------
   section('Evidence links never carry the session token');
   const filePath = '/api/activities/ACT-NOT-REAL/evidence/999999/file';
@@ -201,6 +233,8 @@ try {
   console.error('\nUNCAUGHT:', error.message, '\n', error.stack);
 } finally {
   section('cleanup');
+  for (const id of created.movements) await pool.query('DELETE FROM movements WHERE id = $1', [id]);
+  await pool.query("DELETE FROM movements WHERE purpose LIKE 'ZZTEST %'");
   for (const id of created.users) await pool.query('DELETE FROM users WHERE id = $1', [id]);
   await pool.query("DELETE FROM users WHERE username LIKE 'zz-sec-%'");
   console.log(`  removed ${created.users.length} accounts`);

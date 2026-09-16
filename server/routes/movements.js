@@ -244,7 +244,15 @@ const SELECT_MOVEMENT = `
 // module; a manager of another area sees the movements that supported it
 // (section 5), which is the only movement data that concerns them.
 function visibilityScope(user, values) {
-  if (hasFullScope(user) || user.sector === 'movement') return '';
+  // Running the movements operation is what earns the whole-organisation view,
+  // and that is a job, not a location. The test used to be on the sector alone,
+  // so a TEAM MEMBER filed under 'movement' -- who can create nothing here and
+  // decide nothing -- was shown every trip in the organisation and every money
+  // figure with it, while their colleague in Farming saw only their own area.
+  // Whoever carries the work still sees their own records through the
+  // assigned/created checks on each route; this is only the broad listing.
+  if (hasFullScope(user)) return '';
+  if (user.sector === 'movement' && user.role === 'manager') return '';
   values.push(user.sector);
   return `m.related_area = $${values.length}`;
 }
