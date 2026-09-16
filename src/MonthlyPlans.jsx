@@ -522,6 +522,7 @@ export default function MonthlyPlans({
               onChange={(event) => setNewPlan({ ...newPlan, objective: event.target.value })} />
           </label>
         </div>
+        <p className="field-hint">{t('monthly.createHint')}</p>
         {!managerOptions.length && <p className="decision-hint">{t('form.noManagerCovers')}</p>}
         <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy || !managerOptions.length}>{t('monthly.createPlan')}</button></div>
       </form>}
