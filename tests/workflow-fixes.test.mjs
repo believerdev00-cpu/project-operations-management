@@ -105,6 +105,26 @@ try {
   const workCount = (await api(farming.token, '/api/summary')).body.summary.myOpenWork;
   check('  it is in the manager\'s "Your work" list', workList.body.some((item) => item.id === request.body.id));
   check('  and the home count matches that list', workCount === workList.body.length, `${workCount} vs ${workList.body.length}`);
+  // When the work happens is its own date, kept apart from the deadline.
+  const dated = await post(farming.token, '/api/activities', {
+    projectId: 'PRJ-GISUMA', sector: 'farming', category: 'Planting and sowing', activity: 'ZZTEST dated work',
+    quantity: 1, costUsd: 25, costRwf: 36250, costCdf: 71250, scheduledFor: '2099-11-04'
+  });
+  created.activities.push(dated.body.id);
+  check('work can say when it takes place', dated.status === 201 && dated.body.scheduledFor === '2099-11-04',
+    `${dated.status} ${dated.body.scheduledFor}`);
+  const badDate = await post(farming.token, '/api/activities', {
+    projectId: 'PRJ-GISUMA', sector: 'farming', category: 'Planting and sowing', activity: 'ZZTEST bad date',
+    quantity: 1, costUsd: 25, costRwf: 36250, costCdf: 71250, scheduledFor: '2099-02-31'
+  });
+  check('  a date that does not exist is refused', badDate.status === 400, String(badDate.status));
+  const moved = await patch(admin, `/api/activities/${dated.body.id}/assignment`, { scheduledFor: '2099-11-06', deadline: '2099-11-10' });
+  check('  the Director can move it, with the deadline beside it',
+    moved.status === 200 && moved.body.scheduledFor === '2099-11-06' && moved.body.deadline === '2099-11-10',
+    `${moved.status} ${moved.body.scheduledFor} / ${moved.body.deadline}`);
+  const trail = (await api(admin, `/api/activities/${dated.body.id}`)).body.history || [];
+  check('  and the change is in the record\'s history', trail.some((entry) => entry.field === 'scheduledFor'));
+
   // Reports carry the rate they were built with, so the same figures can be
   // read in Rwandan and Congolese francs.
   const month = new Date().toISOString().slice(0, 7);

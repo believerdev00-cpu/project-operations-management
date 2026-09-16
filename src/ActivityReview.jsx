@@ -188,6 +188,7 @@ export function ActivityReview({
   const [assignment, setAssignment] = useState({
     assignedTo: activity.assignedTo === null ? '' : String(activity.assignedTo),
     deadline: activity.deadline || '',
+    scheduledFor: activity.scheduledFor || '',
     instructions: activity.instructions || ''
   });
 
@@ -206,11 +207,12 @@ export function ActivityReview({
     setAssignment({
       assignedTo: activity.assignedTo === null ? '' : String(activity.assignedTo),
       deadline: activity.deadline || '',
+      scheduledFor: activity.scheduledFor || '',
       instructions: activity.instructions || ''
     });
   }, [
     activity.id, activity.approvedBudget, activity.status, activity.adminNote, activity.requestedBudget,
-    activity.assignedTo, activity.deadline, activity.instructions
+    activity.assignedTo, activity.deadline, activity.scheduledFor, activity.instructions
   ]);
 
   const typedBudget = Number(decision.approvedBudget || 0);
@@ -253,6 +255,7 @@ export function ActivityReview({
   const nextManager = assignment.assignedTo === '' ? null : Number(assignment.assignedTo);
   if (nextManager !== activity.assignedTo) assignmentChanges.assignedTo = nextManager;
   if ((assignment.deadline || '') !== (activity.deadline || '')) assignmentChanges.deadline = assignment.deadline || null;
+  if ((assignment.scheduledFor || '') !== (activity.scheduledFor || '')) assignmentChanges.scheduledFor = assignment.scheduledFor || null;
   if (assignment.instructions.trim() !== (activity.instructions || '')) assignmentChanges.instructions = assignment.instructions.trim();
   const hasAssignmentChanges = Object.keys(assignmentChanges).length > 0;
 
@@ -382,6 +385,7 @@ export function ActivityReview({
   const peopleLine = [
     `${t('people.requestedBy')}: ${activity.createdByName || '—'}`,
     `${t('people.assignedTo')}: ${activity.assignedToName || t('form.nobodyYet')}`,
+    activity.scheduledFor ? `${t('field.activityDate')}: ${formatDate(activity.scheduledFor)}` : null,
     activity.deadline ? `${t('table.deadline')}: ${formatDate(activity.deadline)}` : null
   ].filter(Boolean).join(' · ');
 
@@ -419,6 +423,9 @@ export function ActivityReview({
         <Fact label={t('field.project')} value={activity.projectName || activity.projectId} />
         <Fact label={t('table.category')} value={categoryLabel(activity.category, t)} />
         <Fact label={t('field.quantity')} value={activity.quantity} />
+        <Fact label={t('field.activityDate')} value={activity.scheduledFor
+          ? formatDate(activity.scheduledFor)
+          : <span className="muted-cell">{t('review.noActivityDate')}</span>} />
         <Fact label={t('table.deadline')} value={activity.deadline
           ? <>{formatDate(activity.deadline)}{due && due.tone !== 'ok' && <small className={`deadline-flag deadline-${due.tone}`}>{due.text}</small>}</>
           : <span className="muted-cell">{t('review.noDeadline')}</span>} />
@@ -591,6 +598,10 @@ export function ActivityReview({
               <option value="">{t('form.nobodyYet')}</option>
               {managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}
             </select>
+          </label>
+          <label className="form-field"><span>{t('field.activityDate')}</span>
+            <input type="date" value={assignment.scheduledFor}
+              onChange={(event) => setAssignment({ ...assignment, scheduledFor: event.target.value })} />
           </label>
           <label className="form-field"><span>{t('field.deadline')}</span>
             <input type="date" value={assignment.deadline}

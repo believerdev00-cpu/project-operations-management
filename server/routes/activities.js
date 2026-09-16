@@ -209,6 +209,7 @@ export function mapActivity(row) {
     // A DATE column arrives as a Date at local midnight; sending it on as a
     // timestamp shifts the calendar day for a reader in another zone.
     deadline: toDateOnly(row.deadline),
+    scheduledFor: toDateOnly(row.scheduled_for),
     pendingBudgetRequests: row.pending_budget_requests === undefined ? undefined : Number(row.pending_budget_requests),
     signed: row.signed,
     approved: row.approved,
@@ -523,6 +524,12 @@ router.post('/', asyncRoute(async (req, res) => {
   // belong to the assignee -- so an approved request had no way to record money.
   let assignedTo = assigning ? null : req.user.id;
   let deadline = null;
+  // When the work is to happen. Anyone raising or assigning work may set it,
+  // unlike the deadline, which is the Director's to impose.
+  const scheduledFor = payload.scheduledFor ? String(payload.scheduledFor).slice(0, 10) : null;
+  if (scheduledFor && !isValidDate(scheduledFor)) {
+    return res.status(400).json({ message: 'The date of the activity must be a real date.' });
+  }
   if (assigning) {
     assignedTo = parseId(payload.assignedTo);
     if (!assignedTo) {
@@ -587,7 +594,7 @@ router.post('/', asyncRoute(async (req, res) => {
       `INSERT INTO activities
          (id, project_id, sector, category, activity, description, materials, quantity,
           cost_usd, cost_rwf, cost_cdf, requested_budget, approved_budget, signed, approved, status,
-          created_by, created_by_name, origin, assigned_to, assigned_at, deadline, instructions,
+          created_by, created_by_name, origin, assigned_to, assigned_at, deadline, scheduled_for, instructions,
           reviewed_by, reviewed_at,
           approval_required, approval_required_from, approval_required_role, approval_status,
           approved_by, approved_at)
@@ -596,7 +603,7 @@ router.post('/', asyncRoute(async (req, res) => {
        -- unable to settle on a type for the parameter, and the whole insert is
        -- rejected with "inconsistent types deduced for parameter $18".
        SELECT $1, p.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::text, $19,
-              CASE WHEN $19::int IS NULL THEN NULL ELSE NOW() END, $20::date, $21,
+              CASE WHEN $19::int IS NULL THEN NULL ELSE NOW() END, $20::date, $27::date, $21,
               CASE WHEN $18::text = 'assigned' THEN $16::int ELSE NULL END,
               CASE WHEN $18::text = 'assigned' THEN NOW() ELSE NULL END,
               $23, $24, $25, $26::text,
@@ -613,7 +620,7 @@ router.post('/', asyncRoute(async (req, res) => {
         budget, approvedBudget, Boolean(payload.signed), !approvalRequired, status,
         req.user.id, req.user.name, assigning ? 'assigned' : 'requested', assignedTo,
         deadline, optionalText(payload.instructions, 4000), payload.projectId,
-        approvalRequired, approvalFrom, approvalRole, approvalStatus
+        approvalRequired, approvalFrom, approvalRole, approvalStatus, scheduledFor
       ]
     );
     if (!result.rowCount) {
@@ -691,7 +698,7 @@ router.put('/:id', asyncRoute(async (req, res) => {
       `UPDATE activities
        SET project_id = $2, sector = $3, category = $4, activity = $5, description = $6, materials = $7,
            quantity = $8, cost_usd = $9, cost_rwf = $10, cost_cdf = $11, requested_budget = $12,
-           signed = $13, updated_at = NOW()
+           signed = $13, scheduled_for = $16::date, updated_at = NOW()
        -- Checked against what was read above: an edit that lands just after the
        -- Director decided the request would change a budget already approved.
        WHERE id = $1 AND status = $14::text AND approval_status = $15::text`,
@@ -699,7 +706,8 @@ router.put('/:id', asyncRoute(async (req, res) => {
         existing.id, payload.projectId, sector, payload.category, payload.activity, payload.description || '',
         optionalText(payload.materials, 2000), Number(payload.quantity || 0),
         requestedBudget, Number(payload.costRwf || 0), Number(payload.costCdf ?? payload.costFco ?? 0),
-        requestedBudget, Boolean(payload.signed), existing.status, existing.approval_status
+        requestedBudget, Boolean(payload.signed), existing.status, existing.approval_status,
+        payload.scheduledFor === undefined ? toDateOnly(existing.scheduled_for) : (payload.scheduledFor || null)
       ]
     );
     if (!edited.rowCount) {
@@ -1290,9 +1298,10 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
 
   const managerGiven = Object.prototype.hasOwnProperty.call(payload, 'assignedTo');
   const deadlineGiven = Object.prototype.hasOwnProperty.call(payload, 'deadline');
+  const scheduledGiven = Object.prototype.hasOwnProperty.call(payload, 'scheduledFor');
   const instructionsGiven = Object.prototype.hasOwnProperty.call(payload, 'instructions');
-  if (!managerGiven && !deadlineGiven && !instructionsGiven) {
-    return res.status(400).json({ message: 'Provide a manager, a deadline, or instructions.' });
+  if (!managerGiven && !deadlineGiven && !scheduledGiven && !instructionsGiven) {
+    return res.status(400).json({ message: 'Provide a manager, a date, a deadline, or instructions.' });
   }
 
   let assignedTo = existing.assigned_to;
@@ -1314,6 +1323,13 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
     }
   }
 
+  let scheduledFor = toDateOnly(existing.scheduled_for);
+  if (scheduledGiven) {
+    scheduledFor = payload.scheduledFor ? String(payload.scheduledFor).slice(0, 10) : null;
+    if (scheduledFor && !isValidDate(scheduledFor)) {
+      return res.status(400).json({ message: 'The date of the activity must be a real date.' });
+    }
+  }
   let deadline = toDateOnly(existing.deadline);
   if (deadlineGiven) {
     deadline = payload.deadline ? String(payload.deadline).slice(0, 10) : null;
@@ -1330,6 +1346,9 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
   if (deadlineGiven && deadline !== toDateOnly(existing.deadline)) {
     entries.push({ action: 'Deadline changed', field: 'deadline', oldValue: toDateOnly(existing.deadline), newValue: deadline });
   }
+  if (scheduledGiven && scheduledFor !== toDateOnly(existing.scheduled_for)) {
+    entries.push({ action: 'Date changed', field: 'scheduledFor', oldValue: toDateOnly(existing.scheduled_for), newValue: scheduledFor });
+  }
   if (instructionsGiven && instructions !== (existing.instructions || '')) {
     entries.push({ action: 'Instructions updated', field: 'instructions', oldValue: existing.instructions || null, newValue: instructions });
   }
@@ -1340,7 +1359,7 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
     await client.query('BEGIN');
     await client.query(
       `UPDATE activities
-       SET assigned_to = $2, deadline = $3::date, instructions = $4,
+       SET assigned_to = $2, deadline = $3::date, instructions = $4, scheduled_for = $5::date,
            assigned_at = CASE WHEN $2::int IS DISTINCT FROM assigned_to THEN NOW() ELSE assigned_at END,
            accepted_at = CASE WHEN $2::int IS DISTINCT FROM assigned_to THEN NULL ELSE accepted_at END,
            -- Handing the work to someone else hands the decision over with it,
@@ -1351,7 +1370,7 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
              ELSE approval_required_from END,
            updated_at = NOW()
        WHERE id = $1`,
-      [existing.id, assignedTo, deadline, instructions]
+      [existing.id, assignedTo, deadline, instructions, scheduledFor]
     );
     await logHistory(client, existing.id, req.user, entries);
     await client.query('COMMIT');

@@ -59,6 +59,10 @@ const statements = [
   `ALTER TABLE activities ADD COLUMN IF NOT EXISTS assigned_to INTEGER REFERENCES users(id) ON DELETE SET NULL`,
   `ALTER TABLE activities ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ`,
   `ALTER TABLE activities ADD COLUMN IF NOT EXISTS deadline DATE`,
+  // The day the work actually happens -- the planting, the meeting, the trip to
+  // the supplier -- which is a different question from the deadline it must be
+  // finished by, and the one people asked for when scheduling work.
+  `ALTER TABLE activities ADD COLUMN IF NOT EXISTS scheduled_for DATE`,
   `ALTER TABLE activities ADD COLUMN IF NOT EXISTS instructions TEXT NOT NULL DEFAULT ''`,
   `ALTER TABLE activities ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ`,
   // Which way round the record was created. Rows predating the assignment flow

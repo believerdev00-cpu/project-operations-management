@@ -76,7 +76,7 @@ const emptyProject = { name: '', sector: 'agriculture', location: '', owner: '',
 // three fields are theirs, and what they assign is funded from the start.
 // Quantity starts at 1: most requests are for one thing, and it was one more
 // box every manager had to fill before the form would send.
-const emptyActivity = { projectId: '', sector: 'agriculture', categoryChoice: '', category: '', activity: '', description: '', materials: '', quantity: '1', costUsd: '', signed: false, assignedTo: '', deadline: '', instructions: '' };
+const emptyActivity = { projectId: '', sector: 'agriculture', categoryChoice: '', category: '', activity: '', description: '', materials: '', quantity: '1', costUsd: '', scheduledFor: '', signed: false, assignedTo: '', deadline: '', instructions: '' };
 // The statuses that mean assigned work is still on the manager's desk. Closed
 // and refused records drop out of their queue.
 const OPEN_ASSIGNMENT_STATUSES = ['Pending Approval', 'Approved', 'Budget Adjusted', 'In Progress', 'Needs Correction'];
@@ -2176,7 +2176,7 @@ function ProjectTable({ projects, managers, isDirector, busy, onShowActivities, 
 function ActivityTable({ activities, isDirector, openId, onOpen, empty }) {
   const t = useT();
   return activities.length ? <div className="table-wrap"><table className="card-table"><thead><tr>
-    <th>{t('table.activity')}</th><th>{t('table.category')}</th><th>{t('activities.originalBudget')}</th><th>{t('approval.approved')}</th><th>{t('activities.adjustment')}</th><th>{t('table.status')}</th><th>{t('field.evidence')}</th><th>{t('people.requestedBy')}</th><th>{t('people.assignedTo')}</th><th>{t('table.actions')}</th>
+    <th>{t('table.activity')}</th><th>{t('table.category')}</th><th>{t('field.activityDate')}</th><th>{t('activities.originalBudget')}</th><th>{t('approval.approved')}</th><th>{t('activities.adjustment')}</th><th>{t('table.status')}</th><th>{t('field.evidence')}</th><th>{t('people.requestedBy')}</th><th>{t('people.assignedTo')}</th><th>{t('table.actions')}</th>
   </tr></thead><tbody>
     {activities.map((activity) => {
       const awaiting = activity.status === 'Pending Approval' || (activity.completionSubmittedAt && activity.status !== 'Completed');
@@ -2184,6 +2184,7 @@ function ActivityTable({ activities, isDirector, openId, onOpen, empty }) {
       return <tr key={activity.id} className={activity.id === openId ? 'row-selected' : undefined}>
         <td className="card-title-cell"><strong>{activity.activity}</strong><small>{activity.description || t('review.noDescription')}</small></td>
         <td className="card-optional" data-label={t('table.category')}>{categoryLabel(activity.category, t)}</td>
+        <td className="card-optional" data-label={t('field.activityDate')}>{activity.scheduledFor ? formatDate(activity.scheduledFor) : <span className="muted-cell">&mdash;</span>}</td>
         <td className="card-optional" data-label={t('activities.originalBudget')}>{formatUsd(activity.requestedBudget)}</td>
         {/* In the local currencies as well, at the rate the record carries. */}
         <td data-label={t('approval.approved')}>{activity.approvedBudget === null
@@ -2342,6 +2343,11 @@ function ActivityForm({ form, setForm, projects, selectedProject, managers, isDi
       </Field>
       <Field label={t('field.quantity')}>
         <input required type="number" inputMode="decimal" min="0.01" step="0.01" value={form.quantity} onChange={(event) => setForm({ ...form, quantity: event.target.value })} />
+      </Field>
+      {/* When the work happens -- the planting day, the meeting, the trip --
+          which is a different question from the deadline it must be done by. */}
+      <Field label={t('field.activityDate')}>
+        <input type="date" value={form.scheduledFor} onChange={(event) => setForm({ ...form, scheduledFor: event.target.value })} />
       </Field>
       {/* One question, not two: every project belongs to a business operation,
           so choosing the project sets the operation, the categories offered and
