@@ -876,7 +876,7 @@ export function ApprovalPanel({ record, sectorLabel }) {
 // the expense itself carries the amount. A receipt is linked to an expense --
 // the most recent one without a receipt is suggested -- so the month's review
 // can count expenses that have their paperwork.
-function EvidenceUpload({ onUpload, expenses = [], busy = false }) {
+export function EvidenceUpload({ onUpload, expenses = [], busy = false }) {
   const t = useT();
   // What the file is for. This was the only real difference between the two
   // forms this replaces, so it is the first question rather than a heading the
@@ -948,7 +948,7 @@ function EvidenceUpload({ onUpload, expenses = [], busy = false }) {
   </form>;
 }
 
-function EvidenceList({ activity, evidence, onOpenFile, canRemove, busy = false, onRemove }) {
+export function EvidenceList({ activity, evidence, onOpenFile, canRemove, busy = false, onRemove }) {
   const t = useT();
   if (!evidence.length) {
     return <div className="empty-state"><strong>{t('empty.noEvidence')}</strong><span>{t('empty.noEvidenceHint')}</span></div>;

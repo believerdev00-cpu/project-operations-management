@@ -2003,6 +2003,8 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     content = <MonthlyPlans
       user={user}
       fetchJson={fetchJson}
+      upload={upload}
+      onOpenFile={openEvidenceFile}
       managers={managers}
       people={people}
       rate={rate}

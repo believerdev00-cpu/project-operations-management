@@ -64,6 +64,28 @@ const statements = [
   // finished by, and the one people asked for when scheduling work.
   `ALTER TABLE activities ADD COLUMN IF NOT EXISTS scheduled_for DATE`,
   `ALTER TABLE activities ADD COLUMN IF NOT EXISTS instructions TEXT NOT NULL DEFAULT ''`,
+
+  // ---- what the person carrying the work writes down as they do it ---------
+  //
+  // The Director plans an activity and the manager executes THAT activity --
+  // there is no second record for the doing of it. These four columns are the
+  // manager's side of the same row: how far along it is, what was actually
+  // done, how many days it took and anything they want the Director to read.
+  //
+  // They are deliberately not a status. `status` says where the record is in the
+  // workflow and who it is waiting on; `progress` says how much of the work is
+  // finished, which is the manager's own account of it and moves independently.
+  `ALTER TABLE activities ADD COLUMN IF NOT EXISTS progress SMALLINT NOT NULL DEFAULT 0`,
+  `ALTER TABLE activities DROP CONSTRAINT IF EXISTS activities_progress_check`,
+  `ALTER TABLE activities ADD CONSTRAINT activities_progress_check CHECK (progress BETWEEN 0 AND 100)`,
+  `ALTER TABLE activities ADD COLUMN IF NOT EXISTS work_performed TEXT NOT NULL DEFAULT ''`,
+  // Days, not hours: a half day is the smallest unit anybody reports in.
+  `ALTER TABLE activities ADD COLUMN IF NOT EXISTS days_worked NUMERIC(6,2) NOT NULL DEFAULT 0`,
+  `ALTER TABLE activities DROP CONSTRAINT IF EXISTS activities_days_worked_check`,
+  `ALTER TABLE activities ADD CONSTRAINT activities_days_worked_check CHECK (days_worked >= 0)`,
+  // The manager's own note. `admin_note` is the Director's and `instructions` is
+  // what the Director told them; neither is a place for the manager to write.
+  `ALTER TABLE activities ADD COLUMN IF NOT EXISTS manager_note TEXT NOT NULL DEFAULT ''`,
   `ALTER TABLE activities ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ`,
   // Which way round the record was created. Rows predating the assignment flow
   // were all raised by a manager, which is the default.

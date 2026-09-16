@@ -421,6 +421,104 @@ try {
   check('  what grows is the committed figure, to $3,400', attached.body.committedBudget === 3400,
     String(attached.body.committedBudget));
 
+  // ---- the manager executes the Director's own planned activity -----------
+  //
+  // The whole point of the workflow: the Director plans an activity, and the
+  // manager's progress, days, notes, expenses and photos all land on THAT row.
+  // No second work record is created, so the Director reviewing the month later
+  // is looking at the thing they planned with the doing of it attached.
+  section('The manager works the Director\'s planned activity, on the same record');
+  const transport = managerView.body.activities.find((a) => a.activity.includes('Transport'));
+  check('the planned activity starts at nothing done',
+    transport.progress === 0 && transport.daysWorked === 0 && transport.status === 'Approved',
+    `${transport.progress} / ${transport.daysWorked} / ${transport.status}`);
+
+  const beforeIds = new Set(
+    (await api(adminToken, `/api/monthly-plans/${farmingId}`)).body.activities.map((a) => a.id)
+  );
+
+  // Recording progress starts the work: one action, not "press start, then type".
+  const firstSave = await api(farmingManager.token, `/api/activities/${transport.id}/progress`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      progress: 30, workPerformed: 'Loaded and moved the first two trips.',
+      daysWorked: 1.5, managerNote: 'The lorry was late on the first day.'
+    })
+  });
+  check('recording progress starts the work and saves it', firstSave.status === 200,
+    `${firstSave.status} ${firstSave.body.message}`);
+  check('  the activity is now under way', firstSave.body.status === 'In Progress', firstSave.body.status);
+  check('  and carries what was typed',
+    firstSave.body.progress === 30 && firstSave.body.daysWorked === 1.5
+      && firstSave.body.workPerformed.startsWith('Loaded')
+      && firstSave.body.managerNote.startsWith('The lorry'),
+    JSON.stringify(firstSave.body).slice(0, 160));
+
+  // The expense and the photo go on the SAME activity.
+  const workSpend = await api(farmingManager.token, `/api/activities/${transport.id}/expenses`, {
+    method: 'POST',
+    body: JSON.stringify({ amount: 120, spentOn: '2099-09-12', paymentMethod: 'Cash', description: 'Lorry hire, two trips.' })
+  });
+  check('an expense recorded while working belongs to that activity', workSpend.status === 201,
+    JSON.stringify(workSpend.body).slice(0, 160));
+  const workProof = new FormData();
+  workProof.append('kind', 'Photograph');
+  workProof.append('evidenceType', 'activity');
+  workProof.append('files', new Blob(['ZZTEST loaded lorry'], { type: 'image/png' }), 'lorry.png');
+  const proofSaved = await fetch(`${API}/api/activities/${transport.id}/evidence`, {
+    method: 'POST', headers: { Authorization: `Bearer ${farmingManager.token}` }, body: workProof
+  });
+  check('  and so does a photo added while working', proofSaved.status === 201, String(proofSaved.status));
+
+  // Nothing new was created anywhere: same row, same plan.
+  const afterWork = (await api(adminToken, `/api/monthly-plans/${farmingId}`)).body;
+  const afterIds = afterWork.activities.map((a) => a.id);
+  check('no second work record was created',
+    afterIds.length === beforeIds.size && afterIds.every((id) => beforeIds.has(id)),
+    `${beforeIds.size} -> ${afterIds.length}`);
+
+  // Everything survives a reload, because it is on the record and not in a form.
+  const reread = afterWork.activities.find((a) => a.id === transport.id);
+  check('the work is still there when the month is read again',
+    reread.progress === 30 && reread.daysWorked === 1.5 && reread.spent === 120,
+    `${reread.progress} / ${reread.daysWorked} / ${reread.spent}`);
+
+  // The Director sees the manager's work on the activity they planned.
+  const asDirector = (await api(adminToken, `/api/activities/${transport.id}`)).body;
+  check('the Director sees the progress on the activity they planned',
+    asDirector.activity.progress === 30 && asDirector.activity.workPerformed.startsWith('Loaded'),
+    String(asDirector.activity.progress));
+  const directorMoney = (await api(adminToken, `/api/activities/${transport.id}/expenses`)).body;
+  check('  the expense', directorMoney.expenses.some((e) => Number(e.amount) === 120),
+    JSON.stringify(directorMoney.expenses || []).slice(0, 120));
+  check('  and the photo', asDirector.evidence.some((e) => e.evidenceType === 'activity'), '');
+
+  // Finishing hands it to the Director, who does the final check. The manager
+  // cannot mark their own work Completed -- that control already existed.
+  const finish = await api(farmingManager.token, `/api/activities/${transport.id}/completion`, {
+    method: 'POST', body: JSON.stringify({ note: 'All three trips done.' })
+  });
+  check('marking it completed sends it for the Director\'s final check', finish.status === 200,
+    `${finish.status} ${finish.body.message}`);
+  check('  it is not Completed until the Director says so', finish.body.status !== 'Completed', finish.body.status);
+  const directorCompletes = await api(adminToken, `/api/activities/${transport.id}/decision`, {
+    method: 'PATCH', body: JSON.stringify({ status: 'Completed' })
+  });
+  check('  and the Director completes it', directorCompletes.status === 200 && directorCompletes.body.status === 'Completed',
+    `${directorCompletes.status} ${directorCompletes.body.status}`);
+
+  // Guards on the new route.
+  const otherManagerProgress = await api(managers.mining.token, `/api/activities/${transport.id}/progress`, {
+    method: 'PATCH', body: JSON.stringify({ progress: 90 })
+  });
+  check('a manager from another operation cannot record progress on it',
+    [403, 404].includes(otherManagerProgress.status), String(otherManagerProgress.status));
+  const toolsRow = managerView.body.activities.find((a) => a.activity.includes('tools'));
+  const silly = await api(farmingManager.token, `/api/activities/${toolsRow.id}/progress`, {
+    method: 'PATCH', body: JSON.stringify({ progress: 140 })
+  });
+  check('progress beyond 100% is refused', silly.status === 400, silly.body.message);
+
   // ---- 5, 6, 8: expenses, evidence and the budget block ------------------
   section('5-6. Recording an actual expense');
   const fertilizer = managerView.body.activities.find((a) => a.activity.includes('fertilizer'));
@@ -523,12 +621,12 @@ try {
   check('  Farming shows the manager', Boolean(farmingRow.managerName), farmingRow.managerName);
   check('  approved $4,000', farmingRow.approvedBudget === 4000, String(farmingRow.approvedBudget));
   check('  committed $3,400', farmingRow.committedBudget === 3400, String(farmingRow.committedBudget));
-  check('  spent $1,480', farmingRow.totalSpent === 1480, String(farmingRow.totalSpent));
-  check('  remaining $2,520', farmingRow.remainingBalance === 2520, String(farmingRow.remainingBalance));
+  check('  spent $1,600', farmingRow.totalSpent === 1600, String(farmingRow.totalSpent));
+  check('  remaining $2,400', farmingRow.remainingBalance === 2400, String(farmingRow.remainingBalance));
   check('  counts planned activities, not the days under them', farmingRow.activityCount === 5,
     String(farmingRow.activityCount));
   check('  and counts the days of work separately', farmingRow.workCount === 2, String(farmingRow.workCount));
-  check('  flags expenses with no payment evidence', farmingRow.expensesWithoutEvidence === 2,
+  check('  flags expenses with no payment evidence', farmingRow.expensesWithoutEvidence === 3,
     String(farmingRow.expensesWithoutEvidence));
   check('  the four operations total correctly',
     review.body.totals.approvedBudget === 4000 + 1000 * 3, String(review.body.totals.approvedBudget));
@@ -603,12 +701,12 @@ try {
   });
   check('the manager can submit the month-end report', report.status === 201, JSON.stringify(report.body).slice(0, 200));
   check('  it snapshots the approved budget', report.body.approvedBudget === 3600, String(report.body.approvedBudget));
-  check('  it snapshots the spend', report.body.totalSpent === 1480, String(report.body.totalSpent));
-  check('  it snapshots the remaining balance', report.body.remainingBalance === 2120, String(report.body.remainingBalance));
+  check('  it snapshots the spend', report.body.totalSpent === 1600, String(report.body.totalSpent));
+  check('  it snapshots the remaining balance', report.body.remainingBalance === 2000, String(report.body.remainingBalance));
   // Two photos of work by now: the manager's, and the one the team member added
   // themselves when they finished their own day.
   check('  it counts both kinds of evidence',
-    report.body.paymentEvidenceCount === 1 && report.body.activityEvidenceCount === 2,
+    report.body.paymentEvidenceCount === 1 && report.body.activityEvidenceCount === 3,
     `payment ${report.body.paymentEvidenceCount}, activity ${report.body.activityEvidenceCount}`);
 
   const otherReport = await api(managers.mining.token, `/api/monthly-plans/${farmingId}/report`, {

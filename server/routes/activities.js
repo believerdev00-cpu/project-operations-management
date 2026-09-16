@@ -184,6 +184,15 @@ export function mapActivity(row) {
     workCompletedCount: row.work_completed_count === undefined ? undefined : Number(row.work_completed_count),
     // Whether finishing it needs something to show for it.
     evidenceRequired: row.evidence_required !== false,
+
+    // ---- the manager's account of doing the work -------------------------
+    // On the same row the Director planned: their execution state, not a second
+    // record. Progress is the manager's own measure and moves independently of
+    // the status field, which says who the record is waiting on.
+    progress: Number(row.progress || 0),
+    workPerformed: row.work_performed || '',
+    daysWorked: Number(row.days_worked || 0),
+    managerNote: row.manager_note || '',
     // Section 5: remaining = approved - actual, derived from the expense rows.
     actualSpent: row.actual_spent === undefined ? undefined : round2(row.actual_spent),
     remainingBudget: row.actual_spent === undefined
@@ -1260,6 +1269,117 @@ router.patch('/:id/schedule', asyncRoute(async (req, res) => {
     await logHistory(client, existing.id, req.user, [
       { action: 'Date changed', field: 'scheduledFor', oldValue: previous, newValue: scheduledFor }
     ]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  res.json(mapActivity(await loadActivity(existing.id, req.user)));
+}));
+
+// What the person doing the work writes down while they do it: how far along,
+// what was actually done, how many days, and a note for the Director.
+//
+// This writes to the SAME row the Director planned. There is no separate work
+// record and no second activity: the plan is the source of truth and this is its
+// execution state, so the Director reviewing the activity later sees the
+// progress, the expenses and the evidence on the thing they planned.
+//
+// Starting is part of it. A planned activity sits at 'Approved' until somebody
+// begins, and making the manager press one button to start and another to save
+// what they had already typed loses the typing. Saving progress on approved work
+// starts it, through the same guard the status route uses.
+router.patch('/:id/progress', asyncRoute(async (req, res) => {
+  const existing = await loadActivity(req.params.id, req.user);
+  assertPlanOpen(existing);
+  // Whoever carries it: the person it was handed to, a manager of its operation
+  // for work nobody was handed, or the Director. The same rule as recording a
+  // spend and handing the work back, so the three cannot drift apart.
+  const carriesIt = isAdmin(req.user) || (
+    withinScope(req.user, existing.sector)
+    && (existing.assigned_to === null ? req.user.role === 'manager' : existing.assigned_to === req.user.id)
+  );
+  if (!carriesIt) {
+    return res.status(403).json({ message: 'Only the person carrying out this activity can record progress on it.' });
+  }
+  if (!WORKABLE_STATUSES.includes(existing.status)) {
+    return res.status(400).json({ message: `A ${existing.status} activity is not being worked on.` });
+  }
+  // A month the Director has not confirmed has no budget behind it yet, which is
+  // the same reason the status route refuses to start work in one.
+  if (existing.plan_status === 'Draft') {
+    return res.status(409).json({ message: 'This month has not been confirmed yet. Ask the Director to confirm it before starting the work.' });
+  }
+  if (existing.approval_required && existing.approval_status !== 'approved') {
+    return res.status(403).json({ message: 'This activity has not been approved yet.' });
+  }
+
+  const payload = req.body || {};
+  const has = (key) => Object.prototype.hasOwnProperty.call(payload, key);
+
+  let progress = Number(existing.progress || 0);
+  if (has('progress')) {
+    const next = Number(payload.progress);
+    if (!Number.isFinite(next) || next < 0 || next > 100) {
+      return res.status(400).json({ message: 'Progress must be a number between 0 and 100.' });
+    }
+    progress = Math.round(next);
+  }
+  let daysWorked = Number(existing.days_worked || 0);
+  if (has('daysWorked')) {
+    const next = Number(payload.daysWorked === '' || payload.daysWorked === null ? 0 : payload.daysWorked);
+    if (!Number.isFinite(next) || next < 0 || next > 9999) {
+      return res.status(400).json({ message: 'Days worked must be a number that is not negative.' });
+    }
+    daysWorked = Math.round(next * 100) / 100;
+  }
+  const workPerformed = has('workPerformed') ? optionalText(payload.workPerformed, 4000) : existing.work_performed;
+  const managerNote = has('managerNote') ? optionalText(payload.managerNote, 4000) : existing.manager_note;
+
+  // Work that is still only approved is under way the moment somebody records
+  // anything against it.
+  const starting = ['Approved', 'Budget Adjusted'].includes(existing.status);
+  const status = starting ? 'In Progress' : existing.status;
+
+  const entries = [];
+  if (progress !== Number(existing.progress || 0)) {
+    entries.push({ action: 'Progress recorded', field: 'progress', oldValue: existing.progress, newValue: progress });
+  }
+  if (daysWorked !== Number(existing.days_worked || 0)) {
+    entries.push({ action: 'Days worked recorded', field: 'daysWorked', oldValue: existing.days_worked, newValue: daysWorked });
+  }
+  if (workPerformed !== (existing.work_performed || '')) {
+    entries.push({ action: 'Work recorded', field: 'workPerformed', oldValue: existing.work_performed || null, newValue: workPerformed });
+  }
+  if (managerNote !== (existing.manager_note || '')) {
+    entries.push({ action: 'Note recorded', field: 'managerNote', oldValue: existing.manager_note || null, newValue: managerNote });
+  }
+  if (starting) {
+    entries.push({ action: 'Status changed', field: 'status', oldValue: existing.status, newValue: status });
+  }
+  if (!entries.length) return res.status(400).json({ message: 'Nothing to save.' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const written = await client.query(
+      `UPDATE activities
+       SET progress = $2, days_worked = $3, work_performed = $4, manager_note = $5,
+           status = $6::text, updated_at = NOW()
+       WHERE id = $1 AND status = $7::text`,
+      [existing.id, progress, daysWorked, workPerformed, managerNote, status, existing.status]
+    );
+    // Somebody moved the record between the read and the write -- the Director
+    // sending it back, say. The save is refused rather than landing on top of a
+    // state it was not written against.
+    if (!written.rowCount) {
+      await safeRollback(client);
+      return res.status(409).json({ message: 'This activity changed a moment ago. Refresh and try again.' });
+    }
+    await logHistory(client, existing.id, req.user, entries);
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);

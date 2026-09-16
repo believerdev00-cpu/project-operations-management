@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BUSINESS_OPERATIONS, operationName } from '../shared/businessOperations.js';
 import { OTHER_CATEGORY, categoriesForOperation } from '../shared/categories.js';
 import { fill, useI18n } from './i18n.js';
-import { categoryLabel, trailActionLabel } from './ActivityReview.jsx';
+import { EvidenceList, EvidenceUpload, categoryLabel, trailActionLabel } from './ActivityReview.jsx';
 import { DetailView, useBusy, useDialog } from './ui.jsx';
 import { FilePicker, activityJourney, formatLocal, journeyLabel, journeyTone, nextAction } from './journey.jsx';
 
@@ -87,7 +87,7 @@ const emptyActivity = {
 };
 
 export default function MonthlyPlans({
-  user, fetchJson, managers, people = [], rate = null, onStartWork, onOpenActivity,
+  user, fetchJson, upload, onOpenFile, managers, people = [], rate = null, onStartWork, onOpenActivity,
   planId = null, onOpenPlan, onClosePlan, onChanged, onMessage, onError
 }) {
   const { language, t } = useI18n();
@@ -281,6 +281,14 @@ export default function MonthlyPlans({
   // itself. The record screen has always allowed this; the month did not show it,
   // so the only thing a manager could see to do with their own plan was hand a
   // day of it to somebody else.
+  // Re-read the month after anything the workspace changed, so the figures on
+  // the card and at the top of the page move with the work.
+  const reloadMonth = useCallback(async () => {
+    if (openPlanId) await loadPlan(openPlanId);
+    await load();
+    onChanged?.();
+  }, [openPlanId, loadPlan, load, onChanged]);
+
   const startPlannedWork = (activity) => {
     run(async () => {
       const moved = await onStartWork?.(activity);
@@ -543,6 +551,12 @@ export default function MonthlyPlans({
         onAddWork={addWork}
         onStartWork={startPlannedWork}
         onOpenActivity={onOpenActivity}
+        fetchJson={fetchJson}
+        upload={upload}
+        onOpenFile={onOpenFile}
+        onReload={reloadMonth}
+        onError={onError}
+        onMessage={onMessage}
         onAddActivity={addActivity}
         onConfirm={confirmPlan}
         onReopen={reopenPlan}
@@ -574,6 +588,218 @@ function planTone(status) {
   return 'tone-waiting';
 }
 
+// The workspace: the Director's own planned activity, opened for work.
+//
+// THE POINT OF IT: the manager executes the activity the Director planned. There
+// is no second record, no "work request", nothing created when they press Work --
+// the same row gains a progress figure, what was actually done, the days it took,
+// its expenses and its photos. So the Director reviewing the month afterwards is
+// looking at the thing they planned, with the doing of it attached.
+//
+// It opens inside the card. Nothing about the address, the sidebar or the page
+// changes, because leaving the month to record a day's work was the thing that
+// made the month feel like somebody else's screen.
+//
+// Everything below reuses what already exists: GET /api/activities/:id for the
+// record, ExpensePanel for the spending, EvidenceUpload/EvidenceList for the
+// photos, and the completion route for finishing. Only the progress fields are
+// new, and they are columns on the activity, not a system of their own.
+function Workspace({ activity, plan, user, t, language, busy, fetchJson, upload, onOpenFile, onChanged, onError, onMessage }) {
+  const [detail, setDetail] = useState(null);
+  const [failed, setFailed] = useState(false);
+  const [form, setForm] = useState(null);
+  const dialog = useDialog();
+  // Each load is numbered so a slow answer for a card opened earlier cannot
+  // overwrite the one the reader is looking at now.
+  const latest = useRef(0);
+
+  const load = useCallback(async () => {
+    const request = ++latest.current;
+    try {
+      const [result, money] = await Promise.all([
+        fetchJson(`/api/activities/${encodeURIComponent(activity.id)}`),
+        fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/expenses`)
+      ]);
+      if (request !== latest.current) return;
+      setDetail({ ...result, ...money });
+      setFailed(false);
+      setForm({
+        progress: String(result.activity.progress ?? 0),
+        workPerformed: result.activity.workPerformed || '',
+        daysWorked: result.activity.daysWorked ? String(result.activity.daysWorked) : '',
+        managerNote: result.activity.managerNote || ''
+      });
+    } catch (loadError) {
+      if (request !== latest.current) return;
+      setFailed(true);
+      onError(loadError.message);
+    }
+  }, [fetchJson, activity.id, onError]);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (failed) return <div className="workspace"><p className="planned-empty">{t('work.couldNotOpen')}</p></div>;
+  if (!detail || !form) return <div className="workspace"><p className="planned-empty">{t('app.loading')}</p></div>;
+
+  const record = detail.activity;
+  const expenses = detail.expenses || [];
+  const evidence = detail.evidence || [];
+  // The API is the judge of the money: its own totals rather than a sum worked
+  // out here, which could disagree with what the spend check enforces.
+  const spent = detail.totalSpent ?? 0;
+  const remaining = detail.remaining ?? Math.round(((detail.approvedBudget ?? 0) - spent) * 100) / 100;
+  const open = plan.status !== 'Closed';
+  const live = !['Completed', 'Rejected', 'Cancelled'].includes(record.status);
+  const handedBack = Boolean(record.completionSubmittedAt) && record.status !== 'Completed';
+  const canWork = open && live && !handedBack;
+
+  const changed = form.progress !== String(record.progress ?? 0)
+    || form.workPerformed.trim() !== (record.workPerformed || '')
+    || (form.daysWorked === '' ? 0 : Number(form.daysWorked)) !== Number(record.daysWorked || 0)
+    || form.managerNote.trim() !== (record.managerNote || '');
+
+  const saveProgress = async () => {
+    try {
+      await fetchJson(`/api/activities/${encodeURIComponent(record.id)}/progress`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          progress: Number(form.progress || 0),
+          workPerformed: form.workPerformed,
+          daysWorked: form.daysWorked === '' ? 0 : Number(form.daysWorked),
+          managerNote: form.managerNote
+        })
+      });
+      onMessage(t('work.saved'));
+      await load();
+      await onChanged();
+    } catch (saveError) { onError(saveError.message); }
+  };
+
+  const recordExpense = async (payload, reset, receipts) => {
+    try {
+      const saved = await fetchJson(`/api/activities/${encodeURIComponent(record.id)}/expenses`, {
+        method: 'POST', body: JSON.stringify(payload)
+      });
+      // The receipt is attached to the expense it belongs to, exactly as the
+      // record screen does it, so the Director sees the two together.
+      for (const file of receipts || []) {
+        const data = new FormData();
+        data.append('kind', 'Receipt');
+        data.append('evidenceType', 'payment');
+        data.append('expenseId', String(saved.expense.id));
+        data.append('files', file);
+        await upload(`/api/activities/${encodeURIComponent(record.id)}/evidence`, data);
+      }
+      onMessage(fill(t('msg.expenseRecorded'), {
+        amount: formatUsd(payload.amount),
+        remaining: formatUsd(Math.round((remaining - Number(payload.amount || 0)) * 100) / 100)
+      }));
+      reset?.();
+      await load();
+      await onChanged();
+      return true;
+    } catch (expenseError) { onError(expenseError.message); return false; }
+  };
+
+  const uploadEvidence = async (formData) => {
+    try {
+      await upload(`/api/activities/${encodeURIComponent(record.id)}/evidence`, formData);
+      onMessage(t('work.evidenceAdded'));
+      await load();
+      await onChanged();
+      return true;
+    } catch (uploadError) { onError(uploadError.message); return false; }
+  };
+
+  const markCompleted = async () => {
+    const note = await dialog.prompt({
+      title: t('work.markCompleted'),
+      message: record.activity,
+      label: t('review.noteForDirector'),
+      multiline: true,
+      confirmLabel: t('work.markCompleted')
+    });
+    if (note === null) return;
+    try {
+      await fetchJson(`/api/activities/${encodeURIComponent(record.id)}/completion`, {
+        method: 'POST', body: JSON.stringify({ note })
+      });
+      onMessage(t('work.sentForCheck'));
+      await load();
+      await onChanged();
+    } catch (finishError) { onError(finishError.message); }
+  };
+
+  return <div className="workspace">
+    <h4>{t('work.workspace')}</h4>
+
+    {handedBack && <p className="workspace-waiting">{t('work.waitingForDirector')}</p>}
+    {record.status === 'Needs Correction' && <p className="workspace-waiting">
+      {record.adminNote || t('review.sentBackToYou')}
+    </p>}
+
+    <div className="form-grid">
+      <label className="form-field form-field-wide"><span>{t('work.progress')}</span>
+        {/* A slider, because a percentage is the one number people guess at and
+            typing it on a phone keyboard is the slowest way to say "about half". */}
+        <span className="progress-row">
+          <input type="range" min="0" max="100" step="5" value={form.progress} disabled={!canWork}
+            onChange={(event) => setForm({ ...form, progress: event.target.value })} />
+          <strong>{form.progress}%</strong>
+        </span>
+      </label>
+      <label className="form-field form-field-wide"><span>{t('work.workPerformed')}</span>
+        <textarea rows="3" placeholder={t('work.workPerformedHint')} value={form.workPerformed} disabled={!canWork}
+          onChange={(event) => setForm({ ...form, workPerformed: event.target.value })} />
+      </label>
+      <label className="form-field"><span>{t('work.daysWorked')}</span>
+        <input type="number" inputMode="decimal" min="0" step="0.5" value={form.daysWorked} disabled={!canWork}
+          onChange={(event) => setForm({ ...form, daysWorked: event.target.value })} />
+      </label>
+      <label className="form-field form-field-wide"><span>{t('work.notes')}</span>
+        <textarea rows="2" placeholder={t('work.notesHint')} value={form.managerNote} disabled={!canWork}
+          onChange={(event) => setForm({ ...form, managerNote: event.target.value })} />
+      </label>
+    </div>
+
+    {canWork && <div className="workspace-actions">
+      <button type="button" className="primary-btn" disabled={busy || !changed} onClick={saveProgress}>
+        {t('work.saveProgress')}
+      </button>
+    </div>}
+
+    {/* The money on this activity, recorded here and belonging to it. */}
+    <h4>{t('work.money')}</h4>
+    <div className="planned-figures">
+      <span><small>{t('money.approved')}</small><strong>{formatUsd(detail.approvedBudget ?? 0)}</strong></span>
+      <span><small>{t('monthly.totalSpent')}</small><strong>{formatUsd(spent)}</strong></span>
+      <span><small>{t('money.left')}</small>
+        <strong className={remaining < 0 ? 'over-budget' : undefined}>{formatUsd(remaining)}</strong></span>
+    </div>
+    <ExpensePanel
+      expenses={expenses}
+      summary={{ totalSpent: spent, remaining }}
+      canRecord={canWork}
+      onRecord={recordExpense}
+      canRemove={false}
+      busy={busy}
+      showSummary={false}
+    />
+
+    {/* And the photos and receipts, on the same activity. */}
+    <h4>{t('work.evidence')}</h4>
+    {canWork && <EvidenceUpload expenses={expenses} busy={busy} onUpload={uploadEvidence} />}
+    <EvidenceList activity={record} evidence={evidence} onOpenFile={onOpenFile} canRemove={false} busy={busy} />
+
+    {canWork && <div className="workspace-actions workspace-finish">
+      <button type="button" className="secondary-btn" disabled={busy} onClick={markCompleted}>
+        {t('work.markCompleted')}
+      </button>
+      <small>{t('work.markCompletedHint')}</small>
+    </div>}
+  </div>;
+}
+
 // One planned activity, with the days of work underneath it.
 //
 // This is the screen the whole two-level model exists for. The Director wrote the
@@ -582,9 +808,15 @@ function planTone(status) {
 // been given out to the days, what has been spent, and how many of those days are
 // done. The Director watching the month is watching this.
 function PlannedActivity({
-  item, plan, user, t, language, busy, people, canAssignWork, form, setForm, onAddWork, onStart, onOpen
+  item, plan, user, t, language, busy, people, canAssignWork, form, setForm, onAddWork, onStart, onOpen,
+  isMine, fetchJson, upload, onOpenFile, onReload, onError, onMessage
 }) {
   const [open, setOpen] = useState(false);
+  // Whether the workspace is open on this card. Held here and nowhere else: no
+  // address changes, no sidebar changes, no page changes -- opening the work is
+  // opening this card, which is what stopped the month feeling like somebody
+  // else's screen the moment there was anything to do in it.
+  const [working, setWorking] = useState(false);
   // Giving the work to somebody else is a choice, not the only way in. The form
   // used to be the only thing on a planned activity, so a manager looking at the
   // month the Director had planned for them could not tell that they were simply
@@ -600,6 +832,34 @@ function PlannedActivity({
   // and the work cards use. Starting happens here in a tap; anything needing a
   // photo or a figure opens the record, where the form for it lives.
   const step = nextAction({ ...item, monthlyPlanId: plan.id, planStatus: plan.status }, user, t);
+  // WORK -> CONTINUE WORK -> COMPLETED. The label follows the activity's own
+  // state, so leaving the month and coming back shows the same thing: the state
+  // lives on the record, not in this component.
+  const finished = item.status === 'Completed';
+  const waitingOnDirector = Boolean(item.completionSubmittedAt) && !finished;
+  const startedAlready = item.status === 'In Progress' || item.progress > 0
+    || item.status === 'Needs Correction';
+  let workButton = null;
+  if (!isMine) {
+    // Not this reader's work: the button belongs to whoever carries it.
+    workButton = !step.done
+      ? <button type="button" className="primary-btn" onClick={() => onOpen(item.id)}>{step.label}</button>
+      : null;
+  } else if (finished) {
+    workButton = <span className="status-badge tone-done work-done">{t('work.completed')}</span>;
+  } else if (waitingOnDirector) {
+    workButton = <span className="status-badge tone-waiting">{t('work.withDirector')}</span>;
+  } else if (dead) {
+    workButton = null;
+  } else if (plan.status === 'Draft') {
+    // Nothing to work against until the Director confirms the budget.
+    workButton = <span className="status-badge tone-waiting">{t('work.waitingForBudget')}</span>;
+  } else {
+    workButton = <button type="button" className="primary-btn" onClick={() => setWorking((current) => !current)}>
+      {working ? t('work.hide') : startedAlready ? t('work.continue') : t('work.start')}
+    </button>;
+  }
+
   const missing = [
     !form.activity.trim() && t('table.activity'),
     !form.description.trim() && t('field.description'),
@@ -631,16 +891,41 @@ function PlannedActivity({
         <strong className={item.remaining < 0 ? 'over-budget' : undefined}>{formatUsd(item.remaining)}</strong></span>
     </div>
 
-    {/* The one button. It is the first thing under the money, because "what do I
-        do with this?" is the question somebody opening the month is asking. */}
-    {!step.done && <div className="planned-do">
-      {step.key === 'start' && onStart
-        ? <button type="button" className="primary-btn" disabled={busy} onClick={() => onStart(item)}>{step.label}</button>
-        : <button type="button" className="primary-btn" onClick={() => onOpen(item.id)}>{step.label}</button>}
+    {/* The one button, and for the person the work belongs to it opens the work
+        itself rather than sending them somewhere. It is the first thing under the
+        money, because "what do I do with this?" is the question somebody opening
+        the month is asking. */}
+    <div className="planned-do">
+      {workButton}
       {canAssign && !delegating && <button type="button" className="text-btn" onClick={() => setDelegating(true)}>
         {t('monthly.giveToSomeone')}
       </button>}
+    </div>
+
+    {/* The Director's own activity, opened for work, inside this card. */}
+    {working && <Workspace
+      activity={item}
+      plan={plan}
+      user={user}
+      t={t}
+      language={language}
+      busy={busy}
+      fetchJson={fetchJson}
+      upload={upload}
+      onOpenFile={onOpenFile}
+      onChanged={onReload}
+      onError={onError}
+      onMessage={onMessage}
+    />}
+
+    {/* What the person doing it says about how far along it is. */}
+    {(item.progress > 0 || startedAlready) && <div className="planned-progress">
+      <div className="planned-progress-bar"><span style={{ width: `${item.progress}%` }} /></div>
+      <small>{fill(t('work.percentDone'), { percent: item.progress })}</small>
     </div>}
+    {item.daysWorked > 0 && <p className="planned-empty">
+      {fill(t('work.daysSoFar'), { days: item.daysWorked })}
+    </p>}
 
     {/* How far along it is, by the days finished underneath it. */}
     {item.workCount > 0 && <div className="planned-progress">
@@ -732,6 +1017,7 @@ function PlannedActivity({
 function PlanDetail({
   detail, user, isDirector, language, t, busy, managers = [], people = [], rate = null, activityForm, setActivityForm,
   workForms = {}, setWorkForms, onAddWork, onStartWork, onOpenActivity,
+  fetchJson, upload, onOpenFile, onReload, onError, onMessage,
   onAddActivity, onConfirm, onReopen, onSubmitReport, onDecideReport, onClose, onAttach, onUpdatePlan, offPlanActivities = []
 }) {
   const { plan, activities, history, report } = detail;
@@ -764,6 +1050,11 @@ function PlanDetail({
   const workPeople = (people.length ? people : managers)
     .filter((person) => person.coversAllSectors || person.sector === plan.operation);
   const operationManagers = managers.filter((manager) => manager.coversAllSectors || manager.sector === plan.operation || manager.id === plan.managerId);
+  // The Director reviews the whole month. A manager is shown the activities that
+  // were planned for THEM -- another manager's work in the same operation is
+  // theirs to read on the register, not to record progress against here.
+  const visible = isDirector ? activities : activities.filter((item) => Number(item.assignedTo) === Number(user.id));
+
   const settingsChanges = {};
   if ((settings.managerId || '') !== (plan.managerId ? String(plan.managerId) : '')) settingsChanges.managerId = settings.managerId ? Number(settings.managerId) : null;
   if (settings.notes.trim() !== (plan.notes || '')) settingsChanges.notes = settings.notes.trim();
@@ -815,8 +1106,8 @@ function PlanDetail({
         the manager assigned to finish it. The two levels used to be one flat
         table, which is why a planned activity looked untouched however much work
         was going on inside it. */}
-    <h3 className="form-section-title">{t('monthly.plannedActivities')}</h3>
-    {activities.length ? <div className="planned-list">{activities.map((item) => <PlannedActivity
+    <h3 className="form-section-title">{isDirector ? t('monthly.plannedActivities') : t('work.plannedForYou')}</h3>
+    {visible.length ? <div className="planned-list">{visible.map((item) => <PlannedActivity
       key={item.id}
       item={item}
       plan={plan}
@@ -831,8 +1122,16 @@ function PlanDetail({
       onAddWork={onAddWork}
       onStart={onStartWork}
       onOpen={onOpenActivity}
+      isMine={isDirector || Number(item.assignedTo) === Number(user.id)}
+      fetchJson={fetchJson}
+      upload={upload}
+      onOpenFile={onOpenFile}
+      onReload={onReload}
+      onError={onError}
+      onMessage={onMessage}
     />)}</div> : <div className="empty-state">
-      <strong>{t('monthly.noActivitiesInPlan')}</strong><span>{t('table.noData')}</span>
+      <strong>{isDirector ? t('monthly.noActivitiesInPlan') : t('work.nonePlannedForYou')}</strong>
+      <span>{isDirector ? t('table.noData') : t('work.nonePlannedForYouHint')}</span>
     </div>}
     {activities.length > 0 && <>
       <div className="totals-line">

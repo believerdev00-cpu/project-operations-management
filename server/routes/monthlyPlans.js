@@ -401,6 +401,13 @@ function mapPlanActivity(activity) {
     adminNote: activity.admin_note || '',
     instructions: activity.instructions || '',
     evidenceRequired: activity.evidence_required !== false,
+    // The manager's own account of doing the work, on the row the Director
+    // planned -- so the month can show how far along each activity is without
+    // anybody opening it.
+    progress: Number(activity.progress || 0),
+    workPerformed: activity.work_performed || '',
+    daysWorked: Number(activity.days_worked || 0),
+    managerNote: activity.manager_note || '',
     assignedTo: activity.assigned_to ?? null,
     assignedToName: activity.assigned_to_name ?? null,
     assignedToRole: activity.assigned_to_role ?? null,
@@ -426,6 +433,7 @@ async function planDetail(planId, user) {
       `SELECT a.id, a.activity, a.description, a.category, a.sector, a.status, a.priority,
               COALESCE(a.approved_budget, a.requested_budget) AS approved_budget,
               a.deadline, a.scheduled_for, a.admin_note, a.instructions, a.evidence_required,
+              a.progress, a.work_performed, a.days_worked, a.manager_note,
               a.assigned_to, a.completed_at, a.completion_submitted_at, a.parent_activity_id,
               m.name AS assigned_to_name, m.role AS assigned_to_role,
               COALESCE((SELECT SUM(e.amount) FROM activity_expenses e WHERE e.activity_id = a.id), 0) AS spent,
