@@ -5,13 +5,17 @@
 //   monthly_plans        one per business operation per month, naming the
 //                        manager responsible and the budget the Director
 //                        approved for them
-//     └── activities     the planned work (the existing table, extended with
-//                        monthly_plan_id and priority -- there is no second
-//                        activity system)
-//           ├── activity_expenses    what was actually spent, one row per spend
-//           │     └── activity_evidence (evidence_type='payment')
-//           └── activity_evidence    (evidence_type='activity') proof the work
-//                                    was actually done
+//     └── activities     the planned activities the Director set for the month
+//                        (the existing table, extended with monthly_plan_id and
+//                        priority -- there is no second activity system)
+//           └── activities           the manager's day-by-day work towards that
+//                                    planned activity, by parent_activity_id:
+//                                    one row per day, with its date, the person
+//                                    doing it, its cost and its evidence
+//                 ├── activity_expenses    what was actually spent, one row per
+//                 │     └── activity_evidence (evidence_type='payment')  spend
+//                 └── activity_evidence    (evidence_type='activity') proof the
+//                                          work was actually done
 //   monthly_reports      the manager's account of the month, which the Director
 //                        reviews before closing it
 //
@@ -58,6 +62,19 @@ const statements = [
      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
    )`,
+  // What kind of work the month is about, from the operation's own category
+  // list -- the same list the activity form offers, so Farming's September is
+  // filed under a category a reader recognises rather than a phrase somebody
+  // typed. Blank on plans made before the column existed.
+  `ALTER TABLE monthly_plans ADD COLUMN IF NOT EXISTS category VARCHAR(100) NOT NULL DEFAULT ''`,
+  // What the month is meant to achieve. `notes` is the Director's running
+  // commentary; this is the objective the plan is judged against, which is a
+  // different thing and was being written into notes for want of a field.
+  `ALTER TABLE monthly_plans ADD COLUMN IF NOT EXISTS objective TEXT NOT NULL DEFAULT ''`,
+  // The project the month's work belongs to, when the operation runs more than
+  // one. Optional: with a single project per operation the activities already
+  // resolve it, and an existing plan must not be forced to name one.
+  `ALTER TABLE monthly_plans ADD COLUMN IF NOT EXISTS project_id VARCHAR(50) REFERENCES projects(id) ON DELETE SET NULL`,
   `ALTER TABLE monthly_plans DROP CONSTRAINT IF EXISTS monthly_plans_status_check`,
   `ALTER TABLE monthly_plans ADD CONSTRAINT monthly_plans_status_check
      CHECK (status IN (${PLAN_STATUSES.map((status) => `'${status}'`).join(', ')}))`,
@@ -94,6 +111,31 @@ const statements = [
   `ALTER TABLE activities ADD CONSTRAINT activities_priority_check
      CHECK (priority IN (${PLAN_PRIORITIES.map((priority) => `'${priority}'`).join(', ')}))`,
   `CREATE INDEX IF NOT EXISTS activities_monthly_plan_idx ON activities(monthly_plan_id)`,
+
+  // ---- the day-by-day work under a planned activity ------------------------
+  //
+  // Two levels, one table. A planned activity (parent_activity_id IS NULL) is
+  // what the Director set for the month with a budget against it. The day-by-day
+  // work the manager assigns to reach it hangs underneath, one row per day, each
+  // with its own date, assignee, cost and evidence. Adding them up is how the
+  // planned activity gets finished, and how the Director watches it progress.
+  //
+  // WHY NOT A SECOND TABLE: the daily work is an activity in every respect --
+  // it is assigned, started, spent against, evidenced, handed back and approved
+  // through the routes that already exist. A parallel table would have had to
+  // reimplement all of it.
+  //
+  // Both levels carry monthly_plan_id, so scoping and the closed-month guard
+  // reach the children too. Every plan-level BUDGET sum therefore has to filter
+  // parent_activity_id IS NULL or it would count the same money twice; spend is
+  // summed over both levels, because that is where it lands.
+  `ALTER TABLE activities ADD COLUMN IF NOT EXISTS parent_activity_id VARCHAR(50) REFERENCES activities(id) ON DELETE CASCADE`,
+  `CREATE INDEX IF NOT EXISTS activities_parent_idx ON activities(parent_activity_id)`,
+  // Whether finishing this needs something to show for it. Evidence has always
+  // been demanded before work can be handed back; a meeting or a supervision
+  // visit sometimes has nothing to photograph, and the rule had no way to say
+  // so. TRUE by default, so every row that already exists keeps today's rule.
+  `ALTER TABLE activities ADD COLUMN IF NOT EXISTS evidence_required BOOLEAN NOT NULL DEFAULT TRUE`,
 
   // ---- what was actually spent --------------------------------------------
   //

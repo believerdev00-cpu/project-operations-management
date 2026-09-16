@@ -117,6 +117,45 @@ export function fitsRemaining(amount, approvedBudget, alreadySpent) {
   return cents(amount) <= remaining;
 }
 
+// ---- the month's ceiling --------------------------------------------------
+//
+// The budget the Director approved for the month is a ceiling, not a running
+// total. Before this existed the plan's approved figure was recalculated from
+// whatever activities happened to be on it -- adding work after confirmation
+// quietly raised the allocation -- so the month could never be over budget and
+// this refusal could never happen. Now the figure is the Director's, and work
+// has to fit inside what is left of it.
+//
+// Committed is the sum of the budgets handed out, whether or not they have been
+// spent yet: money promised to an activity is not available to promise again.
+export function fitsBudget(amount, ceiling, alreadyCommitted) {
+  return cents(amount) <= cents(ceiling) - cents(alreadyCommitted);
+}
+
+// The amount still free to hand out.
+export function uncommitted(ceiling, alreadyCommitted) {
+  return fromCents(cents(ceiling) - cents(alreadyCommitted));
+}
+
+// Money is shown to people in the currency they approved it in, to the cent.
+export function formatUsd(value) {
+  const amount = Number(value || 0);
+  return `$${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+// What the manager is told when the work they are assigning does not fit. It
+// names the figure, because "over budget" without it leaves them to go and
+// work out how much room they actually have.
+export function overMonthlyBudgetMessage(remaining) {
+  return `This activity exceeds the remaining monthly budget of ${formatUsd(remaining)}.`;
+}
+
+// And the same refusal one level down: the day-by-day work a manager assigns
+// cannot add up to more than the planned activity it belongs to was given.
+export function overActivityBudgetMessage(remaining) {
+  return `This work exceeds the remaining budget of ${formatUsd(remaining)} on this planned activity.`;
+}
+
 // ---- statuses -------------------------------------------------------------
 
 // An activity counts as done when it reaches Completed. Everything else that is

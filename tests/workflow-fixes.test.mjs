@@ -87,6 +87,7 @@ try {
   section('A manager\'s approved request can carry its expenses');
   const request = await post(farming.token, '/api/activities', {
     projectId: 'PRJ-GISUMA', sector: 'farming', category: 'Meetings', activity: 'ZZTEST own request',
+    description: 'Raised by the manager for the workflow suite.',
     quantity: 1, costUsd: 100, costRwf: 145000, costCdf: 285000, id: 'ZZTEST-CHOSEN-ID'
   });
   check('the manager raises a request', request.status === 201, `${request.status} ${request.body.message}`);
@@ -108,6 +109,7 @@ try {
   // When the work happens is its own date, kept apart from the deadline.
   const dated = await post(farming.token, '/api/activities', {
     projectId: 'PRJ-GISUMA', sector: 'farming', category: 'Planting and sowing', activity: 'ZZTEST dated work',
+    description: 'Work with a day of its own.',
     quantity: 1, costUsd: 25, costRwf: 36250, costCdf: 71250, scheduledFor: '2099-11-04'
   });
   created.activities.push(dated.body.id);
@@ -115,6 +117,7 @@ try {
     `${dated.status} ${dated.body.scheduledFor}`);
   const badDate = await post(farming.token, '/api/activities', {
     projectId: 'PRJ-GISUMA', sector: 'farming', category: 'Planting and sowing', activity: 'ZZTEST bad date',
+    description: 'A day that does not exist.',
     quantity: 1, costUsd: 25, costRwf: 36250, costCdf: 71250, scheduledFor: '2099-02-31'
   });
   check('  a date that does not exist is refused', badDate.status === 400, String(badDate.status));
@@ -175,6 +178,7 @@ try {
   section('Refused work reopens to a decision, not a dead-end draft');
   const refusable = await post(farming.token, '/api/activities', {
     projectId: 'PRJ-GISUMA', sector: 'farming', category: 'Meetings', activity: 'ZZTEST refused request',
+    description: 'A request the Director will refuse.',
     quantity: 1, costUsd: 10, costRwf: 14500, costCdf: 28500
   });
   check('the manager raises a second request', refusable.status === 201, `${refusable.status} ${refusable.body.message}`);
@@ -189,15 +193,21 @@ try {
 
   // ---- planned work: month confirmation, refusal and deletion -----------------
   section('Planned work follows its month');
-  const plan = await post(admin, '/api/monthly-plans', { operation: 'farming', month: MONTH, managerId: farming.id });
+  const plan = await post(admin, '/api/monthly-plans', {
+    operation: 'farming', month: MONTH, managerId: farming.id,
+    // The Director's own figure for the month; everything below has to fit in it.
+    approvedBudget: 1000, category: 'Planned work', objective: 'ZZTEST month objectives.'
+  });
   check('the Director creates a plan', plan.status === 201, `${plan.status} ${plan.body.message}`);
   created.plans.push(plan.body.id);
   const withActivity = await post(admin, `/api/monthly-plans/${plan.body.id}/activities`, {
-    activity: 'ZZTEST planned work', category: 'Planned work', approvedBudget: 300, priority: 'High'
+    activity: 'ZZTEST planned work', category: 'Planned work', description: 'Planned for the month.',
+    approvedBudget: 300, priority: 'High'
   });
   check('  a planned activity is added', withActivity.status === 201, `${withActivity.status} ${withActivity.body.message}`);
   await post(admin, `/api/monthly-plans/${plan.body.id}/activities`, {
-    activity: 'ZZTEST planned extra', category: 'Planned work', approvedBudget: 200, priority: 'Low'
+    activity: 'ZZTEST planned extra', category: 'Planned work', description: 'Also planned for the month.',
+    approvedBudget: 200, priority: 'Low'
   });
   const planActivities = (await api(admin, `/api/monthly-plans/${plan.body.id}`)).body.activities || [];
   const planned = planActivities.find((item) => item.activity === 'ZZTEST planned work');
@@ -209,14 +219,20 @@ try {
   const confirmed = await post(admin, `/api/monthly-plans/${plan.body.id}/confirm`);
   check('the Director confirms the month', confirmed.status === 200, `${confirmed.status} ${confirmed.body.message}`);
   const allocation = Number(confirmed.body.approvedBudget);
+  const committed = Number(confirmed.body.committedBudget);
   const start = await patch(farming.token, `/api/activities/${planned.id}/status`, { status: 'In Progress' });
   check('  now the manager can start it', start.status === 200, `${start.status} ${start.body.message}`);
 
   const removed = await api(admin, `/api/activities/${extra.id}`, { method: 'DELETE' });
   check('deleting a planned activity in a confirmed month works', removed.status === 200, `${removed.status} ${removed.body.message}`);
   const afterDelete = (await api(admin, `/api/monthly-plans/${plan.body.id}`)).body;
-  check('  and gives its budget back to the month', Number(afterDelete.plan?.approvedBudget) === allocation - 200,
+  // The Director's approved budget is a ceiling and does not move; what the
+  // deleted activity gives back is the committed figure, so the month has that
+  // much free to plan with again.
+  check('  the approved budget is untouched', Number(afterDelete.plan?.approvedBudget) === allocation,
     `${allocation} -> ${afterDelete.plan?.approvedBudget}`);
+  check('  and its budget is free to commit again', Number(afterDelete.plan?.committedBudget) === committed - 200,
+    `${committed} -> ${afterDelete.plan?.committedBudget}`);
   check('  which the month\'s history records', afterDelete.history.some((entry) => /Activity deleted/.test(entry.note || '')));
 
   const refusePlanned = await patch(admin, `/api/activities/${planned.id}/decision`, { status: 'Rejected', adminNote: 'Dropped.' });

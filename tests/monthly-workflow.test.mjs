@@ -66,7 +66,22 @@ try {
     created.users.push(row.rows[0].id);
     managers[operation.id] = { id: row.rows[0].id, token: await login(`zz-mgr-${operation.id}`, 'test-pass-123') };
   }
-  console.log(`  four managers seeded for ${MONTH}`);
+  // A team member in Farming. The manager assigns the day-by-day work to
+  // people like this, which is the level the work actually happens at.
+  const staffRow = await pool.query(
+    `INSERT INTO users (username, password_hash, name, role, sector, manager_id)
+     VALUES ($1, $2, $3, 'staff', 'farming', $4) RETURNING id`,
+    [
+      'zz-staff-farming', bcrypt.hashSync('test-pass-123', 10), 'ZZ Farming Field Worker',
+      managers.farming.id
+    ]
+  );
+  created.users.push(staffRow.rows[0].id);
+  const farmingStaff = {
+    id: staffRow.rows[0].id,
+    token: await login('zz-staff-farming', 'test-pass-123')
+  };
+  console.log(`  four managers and one team member seeded for ${MONTH}`);
 
   // ---- 1 & 2: planning and confirmation, for all four operations ----------
   section('1-2. Monthly planning and confirmation, all four operations');
@@ -82,7 +97,15 @@ try {
   for (const operation of BUSINESS_OPERATIONS) {
     const created1 = await api(adminToken, '/api/monthly-plans', {
       method: 'POST',
-      body: JSON.stringify({ operation: operation.id, month: MONTH, managerId: managers[operation.id].id })
+      body: JSON.stringify({
+        operation: operation.id, month: MONTH, managerId: managers[operation.id].id,
+        // The Director states the budget they approve for the month. It used to
+        // be worked out from the activities at confirmation, so nobody ever set
+        // one and the month could not be over it.
+        approvedBudget: operation.id === 'farming' ? 4000 : 1000,
+        category: 'Planned work',
+        objective: `ZZTEST objectives for ${operation.name}.`
+      })
     });
     check(`create a ${operation.name} plan`, created1.status === 201, JSON.stringify(created1.body).slice(0, 160));
     if (created1.status !== 201) continue;
@@ -90,6 +113,10 @@ try {
     created.plans.push(created1.body.id);
     check(`  status is Draft`, created1.body.status === 'Draft', created1.body.status);
     check(`  names the manager`, created1.body.managerId === managers[operation.id].id);
+    check(`  carries the budget the Director approved`,
+      created1.body.approvedBudget === (operation.id === 'farming' ? 4000 : 1000),
+      String(created1.body.approvedBudget));
+    check(`  and what the month is for`, created1.body.objective.startsWith('ZZTEST objectives'), created1.body.objective);
 
     const rows = operation.id === 'farming'
       ? FARMING_PLAN
@@ -119,11 +146,37 @@ try {
     String(beforeConfirm.activities.length));
   check('the planned total is $3,000 (800+1200+500+500)', beforeConfirm.plan.plannedBudget === 3000,
     String(beforeConfirm.plan.plannedBudget));
+  check('  $3,000 of the $4,000 is committed', beforeConfirm.plan.committedBudget === 3000,
+    String(beforeConfirm.plan.committedBudget));
+  check('  leaving $1,000 uncommitted', beforeConfirm.plan.uncommittedBudget === 1000,
+    String(beforeConfirm.plan.uncommittedBudget));
+
+  // The ceiling, at the planning stage: $1,000 is free, so $1,500 of new work
+  // does not fit and the refusal names the figure.
+  const tooBig = await api(adminToken, `/api/monthly-plans/${farmingId}/activities`, {
+    method: 'POST',
+    body: JSON.stringify({
+      activity: 'ZZTEST oversized', category: 'Planned work', description: 'More than the month has.',
+      approvedBudget: 1500, priority: 'Low'
+    })
+  });
+  check('work beyond the approved budget is refused', tooBig.status === 400, String(tooBig.status));
+  check('  and the message names what is left',
+    tooBig.body.message === 'This activity exceeds the remaining monthly budget of $1,000.00.',
+    tooBig.body.message);
+  check('  a description is required on a planned activity',
+    (await api(adminToken, `/api/monthly-plans/${farmingId}/activities`, {
+      method: 'POST',
+      body: JSON.stringify({ activity: 'ZZTEST no description', category: 'Planned work', approvedBudget: 10 })
+    })).status === 400);
 
   const confirmed = await api(adminToken, `/api/monthly-plans/${farmingId}/confirm`, { method: 'POST' });
   check('the Director can confirm the plan', confirmed.status === 200, JSON.stringify(confirmed.body).slice(0, 160));
   check('  status becomes Confirmed', confirmed.body.status === 'Confirmed', confirmed.body.status);
-  check('  the approved allocation is $3,000', confirmed.body.approvedBudget === 3000, String(confirmed.body.approvedBudget));
+  check('  the approved allocation is the Director\'s $4,000', confirmed.body.approvedBudget === 4000,
+    String(confirmed.body.approvedBudget));
+  check('  confirming does not rewrite it from the activities', confirmed.body.committedBudget === 3000,
+    String(confirmed.body.committedBudget));
   check('  it is not confirmable twice', (await api(adminToken, `/api/monthly-plans/${farmingId}/confirm`, { method: 'POST' })).status === 409);
 
   // Confirm the rest so every operation is exercised end to end.
@@ -151,7 +204,10 @@ try {
   const managerView = await api(farmingManager.token, `/api/monthly-plans/${farmingId}`);
   check('the Farming manager can open their plan', managerView.status === 200, String(managerView.status));
   check('  sees four activities', managerView.body.activities.length === 4, String(managerView.body.activities.length));
-  check('  total approved budget is $3,000', managerView.body.plan.approvedBudget === 3000, String(managerView.body.plan.approvedBudget));
+  check('  the manager sees the budget the Director approved, $4,000',
+    managerView.body.plan.approvedBudget === 4000, String(managerView.body.plan.approvedBudget));
+  check('  and how much of it is already committed, $3,000',
+    managerView.body.plan.committedBudget === 3000, String(managerView.body.plan.committedBudget));
   check('  every activity is assigned to them',
     managerView.body.activities.every((a) => a.assignedTo === farmingManager.id));
 
@@ -163,13 +219,129 @@ try {
     managerList.body.every((plan) => plan.operation === 'farming'),
     [...new Set(managerList.body.map((p) => p.operation))].join(','));
 
-  // ---- 4: managers cannot create plan activities -------------------------
-  section('4. A manager cannot add activities to the approved plan');
+  // ---- 4: the manager works from the plan, and only from it ---------------
+  section('4. The manager assigns the day-by-day work inside the approved plan');
   const managerAdd = await api(farmingManager.token, `/api/monthly-plans/${farmingId}/activities`, {
-    method: 'POST', body: JSON.stringify({ activity: 'ZZTEST sneaky', category: 'X', approvedBudget: 5000 })
+    method: 'POST',
+    body: JSON.stringify({ activity: 'ZZTEST sneaky', category: 'X', description: 'x', approvedBudget: 5000 })
   });
-  check('adding a plan activity is refused for a manager', managerAdd.status === 403,
+  check('a manager cannot add a planned activity of their own', managerAdd.status === 403,
     `${managerAdd.status} ${managerAdd.body.message}`);
+
+  // What they CAN do: break a planned activity into the days that will finish it.
+  const landPrep = managerView.body.activities.find((a) => a.activity.includes('Prepare 2 hectares'));
+  check('the planned activity is $800 with nothing committed to work yet',
+    landPrep.approvedBudget === 800 && landPrep.committedToWork === 0 && landPrep.workCount === 0,
+    `${landPrep.approvedBudget} / ${landPrep.committedToWork} / ${landPrep.workCount}`);
+
+  const workUrl = `/api/monthly-plans/${farmingId}/activities/${landPrep.id}/work`;
+  const day1 = await api(farmingManager.token, workUrl, {
+    method: 'POST',
+    body: JSON.stringify({
+      activity: 'ZZTEST clear the north half', description: 'Clear and burn the scrub on the north half.',
+      scheduledFor: '2099-09-03', assignedTo: farmingStaff.id, budget: 300, notes: 'Start at first light.'
+    })
+  });
+  check('the manager assigns a day of work to a team member', day1.status === 201,
+    JSON.stringify(day1.body).slice(0, 200));
+  const dayIds = [day1.body.id];
+  const plannedAfterDay1 = day1.body.activities.find((a) => a.id === landPrep.id);
+  check('  it hangs under the planned activity', plannedAfterDay1.work.length === 1,
+    String(plannedAfterDay1.work.length));
+  check('  with its day, its description and the person doing it',
+    plannedAfterDay1.work[0].scheduledFor === '2099-09-03'
+      && plannedAfterDay1.work[0].description === 'Clear and burn the scrub on the north half.'
+      && plannedAfterDay1.work[0].assignedTo === farmingStaff.id,
+    JSON.stringify(plannedAfterDay1.work[0]).slice(0, 200));
+  check('  $300 of the planned activity\'s $800 is now committed',
+    plannedAfterDay1.committedToWork === 300 && plannedAfterDay1.uncommitted === 500,
+    `${plannedAfterDay1.committedToWork} / ${plannedAfterDay1.uncommitted}`);
+  check('  and the planned activity is under way', plannedAfterDay1.status === 'In Progress',
+    plannedAfterDay1.status);
+  check('  the month\'s committed total is unchanged at $3,000',
+    day1.body.plan.committedBudget === 3000, String(day1.body.plan.committedBudget));
+
+  const day2 = await api(farmingManager.token, workUrl, {
+    method: 'POST',
+    body: JSON.stringify({
+      activity: 'ZZTEST plough the south half', description: 'Ox plough, two passes.',
+      scheduledFor: '2099-09-05', assignedTo: farmingStaff.id, budget: 500, evidenceRequired: false
+    })
+  });
+  check('a second day fills the planned activity exactly', day2.status === 201, String(day2.status));
+  if (day2.status === 201) dayIds.push(day2.body.id);
+
+  // The refusal the specification asks for, one level down.
+  const day3 = await api(farmingManager.token, workUrl, {
+    method: 'POST',
+    body: JSON.stringify({
+      activity: 'ZZTEST one day too many', description: 'Nothing left to pay for it.',
+      scheduledFor: '2099-09-08', assignedTo: farmingStaff.id, budget: 1
+    })
+  });
+  check('work beyond what the planned activity has left is refused', day3.status === 400, String(day3.status));
+  check('  and the message names the $0.00 left',
+    day3.body.message === 'This work exceeds the remaining budget of $0.00 on this planned activity.',
+    day3.body.message);
+
+  const noDescription = await api(farmingManager.token, workUrl, {
+    method: 'POST',
+    body: JSON.stringify({ activity: 'ZZTEST silent', scheduledFor: '2099-09-09', budget: 0 })
+  });
+  check('a day of work without a description is refused', noDescription.status === 400, noDescription.body.message);
+  const noDay = await api(farmingManager.token, workUrl, {
+    method: 'POST',
+    body: JSON.stringify({ activity: 'ZZTEST undated', description: 'When?', budget: 0 })
+  });
+  check('a day of work without a date is refused', noDay.status === 400, noDay.body.message);
+  const wrongMonth = await api(farmingManager.token, workUrl, {
+    method: 'POST',
+    body: JSON.stringify({ activity: 'ZZTEST next month', description: 'Outside the month.', scheduledFor: '2099-10-03', budget: 0 })
+  });
+  check('a day outside the month is refused', wrongMonth.status === 400, wrongMonth.body.message);
+  const otherManagerWork = await api(managers.mining.token, workUrl, {
+    method: 'POST',
+    body: JSON.stringify({ activity: 'ZZTEST not mine', description: 'Another operation.', scheduledFor: '2099-09-04', budget: 0 })
+  });
+  check('a manager from another operation cannot assign work here',
+    [403, 404].includes(otherManagerWork.status), String(otherManagerWork.status));
+
+  // The team member carries it: it is theirs to start and to spend against.
+  const staffWork = await api(farmingStaff.token, '/api/activities?limit=50');
+  check('the team member sees the work assigned to them',
+    staffWork.body.some((a) => a.id === day1.body.id), String(staffWork.status));
+  const staffStart = await api(farmingStaff.token, `/api/activities/${day1.body.id}/status`, {
+    method: 'PATCH', body: JSON.stringify({ status: 'In Progress' })
+  });
+  check('  and can start it', staffStart.status === 200, `${staffStart.status} ${staffStart.body.message}`);
+  const staffSpend = await api(farmingStaff.token, `/api/activities/${day1.body.id}/expenses`, {
+    method: 'POST',
+    body: JSON.stringify({ amount: 280, spentOn: '2099-09-03', paymentMethod: 'Cash', description: 'Casual labour, four people.' })
+  });
+  check('  and record what it cost', staffSpend.status === 201, JSON.stringify(staffSpend.body).slice(0, 160));
+  const staffOverspend = await api(farmingStaff.token, `/api/activities/${day1.body.id}/expenses`, {
+    method: 'POST',
+    body: JSON.stringify({ amount: 100, spentOn: '2099-09-03', paymentMethod: 'Cash', description: 'Over the day\'s budget.' })
+  });
+  check('  but not past the day\'s own budget', staffOverspend.status === 400, String(staffOverspend.status));
+
+  // The Director watches the planned activity through the days underneath it.
+  const oversight = (await api(adminToken, `/api/monthly-plans/${farmingId}`)).body;
+  const watched = oversight.activities.find((a) => a.id === landPrep.id);
+  check('the Director sees the work under each planned activity',
+    watched.work.length === 2 && watched.workCount === 2, String(watched.work.length));
+  check('  with progress towards finishing it', watched.workProgress === 0, String(watched.workProgress));
+  check('  and the spend rolled up from the days', watched.spent === 280, String(watched.spent));
+  check('  who each day is assigned to', watched.work.every((day) => day.assignedToName), '');
+  const parentSpend = await api(adminToken, `/api/activities/${landPrep.id}/expenses`, {
+    method: 'POST',
+    body: JSON.stringify({ amount: 10, spentOn: '2099-09-04', paymentMethod: 'Cash', description: 'On the heading itself.' })
+  });
+  check('money is recorded on the day, not on the planned activity above it',
+    parentSpend.status === 400, `${parentSpend.status} ${parentSpend.body.message}`);
+  const deletePlanned = await api(adminToken, `/api/activities/${landPrep.id}`, { method: 'DELETE' });
+  check('a planned activity with work under it cannot be deleted', deletePlanned.status === 409,
+    `${deletePlanned.status} ${deletePlanned.body.message}`);
 
   // An activity a manager raises stays off-plan and spends none of the month.
   const raised = await api(farmingManager.token, '/api/activities', {
@@ -183,7 +355,7 @@ try {
   check('a manager may still raise an off-plan request', raised.status === 201, String(raised.status));
   check('  it carries no monthly plan', raised.body.monthlyPlanId === null, String(raised.body.monthlyPlanId));
   const afterRaise = (await api(adminToken, `/api/monthly-plans/${farmingId}`)).body;
-  check('  the approved allocation is unchanged at $3,000', afterRaise.plan.approvedBudget === 3000,
+  check('  the approved allocation is unchanged at $4,000', afterRaise.plan.approvedBudget === 4000,
     String(afterRaise.plan.approvedBudget));
   check('  it is not in the plan\'s activities', !afterRaise.activities.some((a) => a.id === raised.body.id));
 
@@ -198,7 +370,10 @@ try {
     method: 'POST', body: JSON.stringify({ reason: 'Agreed at mid-month review.' })
   });
   check('the Director can attach an approved off-plan activity', attached.status === 200, String(attached.status));
-  check('  the allocation grows to $3,400', attached.body.approvedBudget === 3400, String(attached.body.approvedBudget));
+  check('  the approved budget is untouched at $4,000', attached.body.approvedBudget === 4000,
+    String(attached.body.approvedBudget));
+  check('  what grows is the committed figure, to $3,400', attached.body.committedBudget === 3400,
+    String(attached.body.committedBudget));
 
   // ---- 5, 6, 8: expenses, evidence and the budget block ------------------
   section('5-6. Recording an actual expense');
@@ -300,14 +475,17 @@ try {
     String(review.body.operations.length));
   const farmingRow = review.body.operations.find((row) => row.operation === 'farming');
   check('  Farming shows the manager', Boolean(farmingRow.managerName), farmingRow.managerName);
-  check('  approved $3,400', farmingRow.approvedBudget === 3400, String(farmingRow.approvedBudget));
-  check('  spent $1,200', farmingRow.totalSpent === 1200, String(farmingRow.totalSpent));
-  check('  remaining $2,200', farmingRow.remainingBalance === 2200, String(farmingRow.remainingBalance));
-  check('  counts activities', farmingRow.activityCount === 5, String(farmingRow.activityCount));
-  check('  flags expenses with no payment evidence', farmingRow.expensesWithoutEvidence === 1,
+  check('  approved $4,000', farmingRow.approvedBudget === 4000, String(farmingRow.approvedBudget));
+  check('  committed $3,400', farmingRow.committedBudget === 3400, String(farmingRow.committedBudget));
+  check('  spent $1,480', farmingRow.totalSpent === 1480, String(farmingRow.totalSpent));
+  check('  remaining $2,520', farmingRow.remainingBalance === 2520, String(farmingRow.remainingBalance));
+  check('  counts planned activities, not the days under them', farmingRow.activityCount === 5,
+    String(farmingRow.activityCount));
+  check('  and counts the days of work separately', farmingRow.workCount === 2, String(farmingRow.workCount));
+  check('  flags expenses with no payment evidence', farmingRow.expensesWithoutEvidence === 2,
     String(farmingRow.expensesWithoutEvidence));
   check('  the four operations total correctly',
-    review.body.totals.approvedBudget === 3400 + 1000 * 3, String(review.body.totals.approvedBudget));
+    review.body.totals.approvedBudget === 4000 + 1000 * 3, String(review.body.totals.approvedBudget));
 
   const managerReview = await api(managers.mining.token, `/api/monthly-plans/review?month=${MONTH}`);
   check('a manager\'s review shows only their own operation',
@@ -338,14 +516,21 @@ try {
   });
   check('changing the allocation without a reason is refused', planChangeNoReason.status === 400,
     planChangeNoReason.body.message);
-  const planChanged = await api(adminToken, `/api/monthly-plans/${farmingId}`, {
-    method: 'PATCH', body: JSON.stringify({ approvedBudget: 3200, reason: 'Trimmed after the tools change.' })
+  // The tools activity was cut from $500 to $300 just above, so $3,200 is
+  // committed. The allocation cannot be taken below that.
+  const belowCommitted = await api(adminToken, `/api/monthly-plans/${farmingId}`, {
+    method: 'PATCH', body: JSON.stringify({ approvedBudget: 1000, reason: 'Too low.' })
   });
-  check('the allocation can be changed with a reason', planChanged.status === 200 && planChanged.body.approvedBudget === 3200,
+  check('the allocation cannot go below what is already committed', belowCommitted.status === 400,
+    belowCommitted.body.message);
+  const planChanged = await api(adminToken, `/api/monthly-plans/${farmingId}`, {
+    method: 'PATCH', body: JSON.stringify({ approvedBudget: 3600, reason: 'Trimmed after the tools change.' })
+  });
+  check('the allocation can be changed with a reason', planChanged.status === 200 && planChanged.body.approvedBudget === 3600,
     `${planChanged.status} ${planChanged.body.approvedBudget}`);
   const planTrail = (await api(adminToken, `/api/monthly-plans/${farmingId}`)).body.history;
   check('  the old allocation is kept in the plan trail',
-    planTrail.some((e) => e.field === 'approvedBudget' && e.oldValue === '3400' && e.newValue === '3200'),
+    planTrail.some((e) => e.field === 'approvedBudget' && e.oldValue === '4000' && e.newValue === '3600'),
     planTrail.map((e) => `${e.field}:${e.oldValue}->${e.newValue}`).join(' | ').slice(0, 200));
 
   // ---- 11: the month-end report ------------------------------------------
@@ -363,9 +548,9 @@ try {
     })
   });
   check('the manager can submit the month-end report', report.status === 201, JSON.stringify(report.body).slice(0, 200));
-  check('  it snapshots the approved budget', report.body.approvedBudget === 3200, String(report.body.approvedBudget));
-  check('  it snapshots the spend', report.body.totalSpent === 1200, String(report.body.totalSpent));
-  check('  it snapshots the remaining balance', report.body.remainingBalance === 2000, String(report.body.remainingBalance));
+  check('  it snapshots the approved budget', report.body.approvedBudget === 3600, String(report.body.approvedBudget));
+  check('  it snapshots the spend', report.body.totalSpent === 1480, String(report.body.totalSpent));
+  check('  it snapshots the remaining balance', report.body.remainingBalance === 2120, String(report.body.remainingBalance));
   check('  it counts both kinds of evidence',
     report.body.paymentEvidenceCount === 1 && report.body.activityEvidenceCount === 1,
     `payment ${report.body.paymentEvidenceCount}, activity ${report.body.activityEvidenceCount}`);
@@ -407,7 +592,7 @@ try {
   });
   check('the Director can reopen a closed month', reopened.status === 200 && reopened.body.status === 'Confirmed',
     `${reopened.status} ${reopened.body.status}`);
-  check('  reopening keeps the confirmed allocation', reopened.body.approvedBudget === 3200,
+  check('  reopening keeps the confirmed allocation', reopened.body.approvedBudget === 3600,
     String(reopened.body.approvedBudget));
 
   // ---- 12/14: no duplicate systems, no money movement ---------------------

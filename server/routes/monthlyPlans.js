@@ -3,22 +3,41 @@
 // The cycle this implements, and nothing beyond it:
 //
 //   PLANNING          the Director creates a plan per business operation for
-//                     the month, names the manager, and lists the activities
-//                     with a budget each
-//   CONFIRMATION      the Director reviews the total and confirms it. This
-//                     RECORDS an approved allocation. The money itself is
-//                     handed over outside the platform -- there is no
-//                     transaction, no transfer, no wallet, no gateway
-//   EXECUTION         the manager works the activities the Director set
-//   EXPENSE           the manager records what was actually spent, with
-//                     payment evidence, and cannot exceed what is left
-//   COMPLETION        the manager attaches evidence the work was really done
-//   REVIEW            the Director sees budget, spend, remaining and the
-//                     evidence gaps, per operation
+//                     the month, names the manager, states what the month is
+//                     for, TYPES THE BUDGET THEY APPROVE, and lists the
+//                     planned activities with a budget each
+//   CONFIRMATION      the Director confirms it. This RECORDS an approved
+//                     allocation. The money itself is handed over outside the
+//                     platform -- there is no transaction, no transfer, no
+//                     wallet, no gateway
+//   ASSIGNMENT        the manager opens the confirmed plan and assigns the
+//                     day-by-day work that will finish each planned activity:
+//                     what, which day, who does it, what it costs. This is the
+//                     manager's only way in -- they do not invent work outside
+//                     the plan, and nothing they assign can exceed what is
+//                     left of the Director's budget
+//   EXECUTION         the person it was assigned to does that day's work
+//   EXPENSE           what was actually spent is recorded against the day's
+//                     work, with payment evidence, and cannot exceed what is
+//                     left
+//   COMPLETION        evidence the work was really done is attached
+//   REVIEW            the Director watches each planned activity progress
+//                     through the days underneath it, and sees budget,
+//                     committed, spend, remaining and the evidence gaps
 //   MONTH-END         the manager reports; the Director closes the month
 //
-// Activities live in the existing `activities` table -- a planned activity is
-// one with a monthly_plan_id. There is no second activity system.
+// THE THREE THINGS THAT ARE NOT THE SAME, because they were being confused:
+//
+//   business operation  one of the four fixed operations (farming, agriculture,
+//                       mining, movement). A column, not a record.
+//   project             a named undertaking inside one operation. Activities
+//                       have always belonged to one.
+//   monthly plan        one operation's one month, with the budget approved for
+//                       it. This is the thing a manager works from.
+//
+// Activities live in the existing `activities` table, at two levels: a planned
+// activity has a monthly_plan_id and no parent, and the manager's day-by-day
+// work has both. There is no second activity system and no third entity.
 
 import express from 'express';
 import { pool, safeRollback } from '../db/database.js';
@@ -26,8 +45,9 @@ import { asyncRoute, hasFullScope, isAdmin, isValidDate, parseId, requiredText, 
 import { PLAN_PRIORITIES, REPORT_STATUSES } from '../db/monthlySchema.js';
 import { getCurrentRate, round2 } from '../lib/rates.js';
 import {
-  COMPLETED_STATUS, canReadPlan, cents, currentMonth, fromCents, isPlanOpen,
-  monthKey, monthStart, toDateOnly
+  COMPLETED_STATUS, canReadPlan, cents, currentMonth, fitsBudget, formatUsd, fromCents,
+  isPlanManager, isPlanOpen, monthKey, monthStart, overActivityBudgetMessage,
+  overMonthlyBudgetMessage, toDateOnly, uncommitted
 } from '../lib/monthly.js';
 
 const router = express.Router();
@@ -62,10 +82,84 @@ async function logPlanHistory(client, planId, user, entries) {
   }
 }
 
+// ---- the two budget ceilings ----------------------------------------------
+//
+// The Director's approved budget is the month's ceiling, and each planned
+// activity's budget is a ceiling for the day-by-day work underneath it. Both are
+// checked the same way: read the ceiling under a row lock, add up what has
+// already been promised against it, and refuse anything that does not fit.
+//
+// The lock matters. Two managers assigning work in the same second would
+// otherwise both read the same remaining figure and both fit inside it, and the
+// month would end up over budget with no single request to blame.
+
+// What the month has approved and what it has already given out. Only planned
+// activities count towards committed -- the work underneath them is already
+// counted through the planned activity it belongs to.
+async function planPosition(client, planId) {
+  const plan = await client.query(
+    'SELECT approved_budget, status FROM monthly_plans WHERE id = $1 FOR UPDATE',
+    [planId]
+  );
+  if (!plan.rowCount) throw new PlanError(404, 'Monthly plan not found.');
+  const committed = await client.query(
+    `SELECT COALESCE(SUM(COALESCE(approved_budget, requested_budget)), 0) AS committed
+     FROM activities
+     WHERE monthly_plan_id = $1 AND parent_activity_id IS NULL
+       AND status NOT IN ('Rejected', 'Cancelled')`,
+    [planId]
+  );
+  const approved = round2(Number(plan.rows[0].approved_budget || 0));
+  const alreadyCommitted = round2(Number(committed.rows[0].committed || 0));
+  return {
+    status: plan.rows[0].status,
+    approved,
+    committed: alreadyCommitted,
+    uncommitted: uncommitted(approved, alreadyCommitted)
+  };
+}
+
+// The same question one level down: what this planned activity was given, and
+// how much of it is already promised to the days underneath it. A spend recorded
+// directly on the planned activity counts as promised too, so a plan that
+// predates the day-by-day work cannot be over-committed by it.
+async function plannedActivityPosition(client, activityId) {
+  const activity = await client.query(
+    `SELECT id, activity, sector, status, monthly_plan_id, parent_activity_id,
+            COALESCE(approved_budget, requested_budget, 0) AS approved
+     FROM activities WHERE id = $1 FOR UPDATE`,
+    [activityId]
+  );
+  if (!activity.rowCount) throw new PlanError(404, 'Planned activity not found.');
+  const promised = await client.query(
+    `SELECT
+       COALESCE((SELECT SUM(COALESCE(approved_budget, requested_budget)) FROM activities
+                 WHERE parent_activity_id = $1 AND status NOT IN ('Rejected', 'Cancelled')), 0) AS children,
+       COALESCE((SELECT SUM(amount) FROM activity_expenses WHERE activity_id = $1), 0) AS own_spent`,
+    [activityId]
+  );
+  const approved = round2(Number(activity.rows[0].approved || 0));
+  const committed = round2(Number(promised.rows[0].children || 0) + Number(promised.rows[0].own_spent || 0));
+  return {
+    row: activity.rows[0],
+    approved,
+    committed,
+    uncommitted: uncommitted(approved, committed)
+  };
+}
+
 // Every figure the plan screens need, computed from the rows rather than stored
-// on the plan: the approved total is the sum of its activities' budgets, the
-// spend is the sum of their expenses, and the remaining balance falls out of
-// the two. Nothing can drift out of step with what it is made of.
+// on the plan -- except the approved budget itself, which is the Director's
+// decision and lives on monthly_plans.approved_budget. What is COMMITTED (money
+// handed out to planned activities) and what is SPENT are both derived, so
+// neither can drift out of step with the rows they are made of.
+//
+// Only planned activities (parent_activity_id IS NULL) are counted and summed
+// here. The manager's day-by-day work carries the same monthly_plan_id so that
+// scoping and the closed-month guard reach it, which means counting every row
+// would add each budget twice -- once on the planned activity and again on the
+// work underneath it. Spend is the exception: it is summed over both levels,
+// because a day's work is where money is actually recorded.
 const PLAN_TOTALS = `
   SELECT
     -- An activity approved without an explicit figure was approved at what it
@@ -73,10 +167,14 @@ const PLAN_TOTALS = `
     -- routes/activities.js); counting it here as zero let the plan show a
     -- negative balance for money that was, in fact, approved.
     COALESCE(SUM(COALESCE(a.approved_budget, a.requested_budget))
-      FILTER (WHERE a.status NOT IN ('Rejected', 'Cancelled')), 0) AS planned_budget,
-    COUNT(*) FILTER (WHERE a.status NOT IN ('Rejected', 'Cancelled'))::int AS activity_count,
-    COUNT(*) FILTER (WHERE a.status = 'Completed')::int AS completed_count,
-    COUNT(*) FILTER (WHERE a.status NOT IN ('Rejected', 'Cancelled', 'Completed'))::int AS outstanding_count,
+      FILTER (WHERE a.parent_activity_id IS NULL AND a.status NOT IN ('Rejected', 'Cancelled')), 0) AS planned_budget,
+    COUNT(*) FILTER (WHERE a.parent_activity_id IS NULL AND a.status NOT IN ('Rejected', 'Cancelled'))::int AS activity_count,
+    COUNT(*) FILTER (WHERE a.parent_activity_id IS NULL AND a.status = 'Completed')::int AS completed_count,
+    COUNT(*) FILTER (WHERE a.parent_activity_id IS NULL AND a.status NOT IN ('Rejected', 'Cancelled', 'Completed'))::int AS outstanding_count,
+    -- The day-by-day work underneath, so the Director can see the month moving
+    -- rather than only its planned activities sitting there.
+    COUNT(*) FILTER (WHERE a.parent_activity_id IS NOT NULL AND a.status NOT IN ('Rejected', 'Cancelled'))::int AS work_count,
+    COUNT(*) FILTER (WHERE a.parent_activity_id IS NOT NULL AND a.status = 'Completed')::int AS work_completed_count,
     COALESCE((SELECT SUM(e.amount) FROM activity_expenses e
               JOIN activities ea ON ea.id = e.activity_id
               WHERE ea.monthly_plan_id = p.id), 0) AS total_spent,
@@ -91,10 +189,14 @@ const PLAN_TOTALS = `
                 AND NOT EXISTS (SELECT 1 FROM activity_evidence ev
                                 WHERE ev.expense_id = e.id AND ev.evidence_type = 'payment')), 0)::int
       AS expenses_without_evidence,
-    -- And likewise finished work with nothing to show for it.
-    COUNT(*) FILTER (WHERE a.status = 'Completed'
+    -- And likewise finished work with nothing to show for it. A planned
+    -- activity's proof may sit on the day's work underneath it rather than on
+    -- the planned activity itself, so the subtree is what is searched.
+    COUNT(*) FILTER (WHERE a.parent_activity_id IS NULL AND a.status = 'Completed'
       AND NOT EXISTS (SELECT 1 FROM activity_evidence ev
-                      WHERE ev.activity_id = a.id AND ev.evidence_type = 'activity'))::int
+                      JOIN activities sub ON sub.id = ev.activity_id
+                      WHERE (sub.id = a.id OR sub.parent_activity_id = a.id)
+                        AND ev.evidence_type = 'activity'))::int
       AS completed_without_evidence
   FROM activities a WHERE a.monthly_plan_id = p.id
 `;
@@ -102,6 +204,7 @@ const PLAN_TOTALS = `
 const SELECT_PLAN = `
   SELECT p.*, m.name AS manager_name, m.username AS manager_username,
          c.name AS created_by_name, cf.name AS confirmed_by_name, cl.name AS closed_by_name,
+         pr.name AS project_name,
          totals.*,
          r.id AS report_id, r.status AS report_status, r.submitted_at AS report_submitted_at
   FROM monthly_plans p
@@ -109,15 +212,25 @@ const SELECT_PLAN = `
   LEFT JOIN users c ON c.id = p.created_by
   LEFT JOIN users cf ON cf.id = p.confirmed_by
   LEFT JOIN users cl ON cl.id = p.closed_by
+  LEFT JOIN projects pr ON pr.id = p.project_id
   LEFT JOIN monthly_reports r ON r.plan_id = p.id
   LEFT JOIN LATERAL (${PLAN_TOTALS}) totals ON TRUE
 `;
 
 function mapPlan(row) {
-  // Before confirmation the approved figure is whatever the activities add up
-  // to; after it, the figure the Director actually confirmed and handed over.
-  const plannedBudget = round2(Number(row.planned_budget || 0));
-  const approvedBudget = row.status === 'Draft' ? plannedBudget : round2(Number(row.approved_budget || 0));
+  // The four figures the month is read by, and what each one means:
+  //
+  //   approved    the ceiling the Director set and handed over. Theirs to type,
+  //               stored on the plan, never recalculated from anything.
+  //   committed   the sum of the budgets given to this month's planned
+  //               activities. Money promised is not available to promise again.
+  //   spent       what has actually been recorded as spent, at either level.
+  //   remaining   approved - spent: what is left of the cash.
+  //
+  // uncommitted (approved - committed) is the one a manager needs before
+  // assigning work, and is what the over-budget refusal quotes.
+  const approvedBudget = round2(Number(row.approved_budget || 0));
+  const committedBudget = round2(Number(row.planned_budget || 0));
   const totalSpent = round2(Number(row.total_spent || 0));
 
   return {
@@ -128,19 +241,33 @@ function mapPlan(row) {
     managerName: row.manager_name ?? null,
     status: row.status,
     notes: row.notes || '',
+    // What the month is about and what it is meant to achieve.
+    category: row.category || '',
+    objective: row.objective || '',
+    projectId: row.project_id ?? null,
+    projectName: row.project_name ?? null,
 
-    // ---- the money, all derived from the activities and their expenses ----
-    plannedBudget,
+    // ---- the money -------------------------------------------------------
     approvedBudget,
+    committedBudget,
+    uncommittedBudget: uncommitted(approvedBudget, committedBudget),
     totalSpent,
     remainingBalance: fromCents(cents(approvedBudget) - cents(totalSpent)),
-    // Positive when the plan has grown since it was confirmed -- work added
-    // mid-month -- which the Director should see rather than have folded in.
-    budgetDrift: row.status === 'Draft' ? 0 : fromCents(cents(plannedBudget) - cents(approvedBudget)),
+    // Kept under its old name as well: the plan screens, the month-end report
+    // and the exports all read plannedBudget, and it is the same figure.
+    plannedBudget: committedBudget,
+    // Positive when more has been committed than was approved. That can no
+    // longer happen through the API -- the ceiling refuses it -- but a plan
+    // whose allocation was lowered after the fact can still show it, and the
+    // Director should see that rather than have it folded away.
+    budgetDrift: fromCents(cents(committedBudget) - cents(approvedBudget)),
 
     activityCount: row.activity_count ?? 0,
     completedCount: row.completed_count ?? 0,
     outstandingCount: row.outstanding_count ?? 0,
+    // The day-by-day work underneath the planned activities.
+    workCount: row.work_count ?? 0,
+    workCompletedCount: row.work_completed_count ?? 0,
     expenseCount: row.expense_count ?? 0,
     expensesWithoutEvidence: row.expenses_without_evidence ?? 0,
     completedWithoutEvidence: row.completed_without_evidence ?? 0,
@@ -247,17 +374,56 @@ router.get('/review', asyncRoute(async (req, res) => {
 // One plan with everything on it: the activities, what each has spent, and the
 // evidence counts. This is what both the Director's plan screen and the
 // manager's "my activities this month" are built from.
-router.get('/:id', asyncRoute(async (req, res) => {
-  const row = await loadPlan(req.params.id, req.user);
-  if (!canReadPlan(req.user, row)) {
-    return res.status(403).json({ message: 'This plan belongs to another business operation.' });
-  }
+// One activity row, at either level, in the shape the screens read.
+function mapPlanActivity(activity) {
+  const approved = round2(Number(activity.approved_budget || 0));
+  const spent = round2(Number(activity.spent || 0));
+  return {
+    id: activity.id,
+    activity: activity.activity,
+    description: activity.description || '',
+    category: activity.category,
+    operation: activity.sector,
+    status: activity.status,
+    priority: activity.priority || 'Medium',
+    approvedBudget: approved,
+    spent,
+    // Section 5: remaining = approved - actual, per activity.
+    remaining: fromCents(cents(approved) - cents(spent)),
+    deadline: toDateOnly(activity.deadline),
+    // The day the work is being done, which is the manager's, not the deadline,
+    // which is the Director's.
+    scheduledFor: toDateOnly(activity.scheduled_for),
+    adminNote: activity.admin_note || '',
+    instructions: activity.instructions || '',
+    evidenceRequired: activity.evidence_required !== false,
+    assignedTo: activity.assigned_to ?? null,
+    assignedToName: activity.assigned_to_name ?? null,
+    assignedToRole: activity.assigned_to_role ?? null,
+    completedAt: activity.completed_at ?? null,
+    completionSubmittedAt: activity.completion_submitted_at ?? null,
+    expenseCount: activity.expense_count,
+    paymentEvidenceCount: activity.payment_evidence_count,
+    activityEvidenceCount: activity.activity_evidence_count,
+    expensesWithoutEvidence: activity.expenses_without_evidence
+  };
+}
 
+// The whole month in one payload: the plan, its planned activities with the
+// day-by-day work nested underneath each one, the audit trail and the report.
+//
+// Both levels come back in a single query and are assembled here rather than
+// asked for one planned activity at a time, so a month with thirty days of work
+// on it is still one round trip.
+async function planDetail(planId, user) {
+  const row = await loadPlan(planId, user);
   const [activities, history, report] = await Promise.all([
     pool.query(
       `SELECT a.id, a.activity, a.description, a.category, a.sector, a.status, a.priority,
-              COALESCE(a.approved_budget, a.requested_budget) AS approved_budget, a.deadline, a.admin_note, a.assigned_to, a.completed_at,
-              m.name AS assigned_to_name,
+              COALESCE(a.approved_budget, a.requested_budget) AS approved_budget,
+              a.deadline, a.scheduled_for, a.admin_note, a.instructions, a.evidence_required,
+              a.assigned_to, a.completed_at, a.completion_submitted_at, a.parent_activity_id,
+              m.name AS assigned_to_name, m.role AS assigned_to_role,
               COALESCE((SELECT SUM(e.amount) FROM activity_expenses e WHERE e.activity_id = a.id), 0) AS spent,
               (SELECT COUNT(*) FROM activity_expenses e WHERE e.activity_id = a.id)::int AS expense_count,
               (SELECT COUNT(*) FROM activity_evidence ev
@@ -273,48 +439,70 @@ router.get('/:id', asyncRoute(async (req, res) => {
        LEFT JOIN users m ON m.id = a.assigned_to
        WHERE a.monthly_plan_id = $1
        ORDER BY CASE a.priority WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 ELSE 2 END,
-                a.deadline NULLS LAST, a.created_at`,
-      [row.id]
+                a.deadline NULLS LAST, a.scheduled_for NULLS LAST, a.created_at`,
+      [planId]
     ),
-    pool.query('SELECT * FROM monthly_plan_history WHERE plan_id = $1 ORDER BY created_at DESC, id DESC LIMIT 200', [row.id]),
+    pool.query('SELECT * FROM monthly_plan_history WHERE plan_id = $1 ORDER BY created_at DESC, id DESC LIMIT 200', [planId]),
     pool.query(
       `SELECT r.*, s.name AS submitted_by_name, v.name AS reviewed_by_name
        FROM monthly_reports r
        LEFT JOIN users s ON s.id = r.submitted_by
        LEFT JOIN users v ON v.id = r.reviewed_by
        WHERE r.plan_id = $1`,
-      [row.id]
+      [planId]
     )
   ]);
 
-  res.json({
+  // The days of work, grouped by the planned activity they serve, each group in
+  // date order -- that is the order somebody reading the month wants them in,
+  // whatever priority they were given.
+  const workByParent = new Map();
+  for (const activity of activities.rows) {
+    if (!activity.parent_activity_id) continue;
+    const group = workByParent.get(activity.parent_activity_id) || [];
+    group.push(mapPlanActivity(activity));
+    workByParent.set(activity.parent_activity_id, group);
+  }
+  for (const group of workByParent.values()) {
+    group.sort((a, b) => String(a.scheduledFor || '').localeCompare(String(b.scheduledFor || '')));
+  }
+
+  const planned = activities.rows.filter((activity) => !activity.parent_activity_id).map((activity) => {
+    const mapped = mapPlanActivity(activity);
+    const work = workByParent.get(activity.id) || [];
+    const live = work.filter((day) => !['Rejected', 'Cancelled'].includes(day.status));
+    // What the planned activity has promised to the days underneath it, and what
+    // has actually been spent anywhere in it. A spend recorded directly on the
+    // planned activity counts as committed as well, so an activity that was
+    // being spent against before the day-by-day work existed cannot be
+    // over-committed by it.
+    const committedToWork = fromCents(live.reduce((total, day) => total + cents(day.approvedBudget), 0));
+    const workSpent = fromCents(work.reduce((total, day) => total + cents(day.spent), 0));
+    const spent = fromCents(cents(mapped.spent) + cents(workSpent));
+    return {
+      ...mapped,
+      // Rolled up, so the Director reads one figure per planned activity rather
+      // than adding up the days themselves.
+      spent,
+      remaining: fromCents(cents(mapped.approvedBudget) - cents(spent)),
+      committedToWork,
+      uncommitted: uncommitted(mapped.approvedBudget, fromCents(cents(committedToWork) + cents(mapped.spent))),
+      workCount: live.length,
+      workCompletedCount: live.filter((day) => day.status === COMPLETED_STATUS).length,
+      workExpensesWithoutEvidence: work.reduce((total, day) => total + day.expensesWithoutEvidence, 0),
+      // How far along this planned activity is, by the days of work finished
+      // under it. Null when nothing has been assigned yet -- "no work planned"
+      // is a different thing from "0% done".
+      workProgress: live.length
+        ? Math.round((live.filter((day) => day.status === COMPLETED_STATUS).length / live.length) * 100)
+        : null,
+      work
+    };
+  });
+
+  return {
     plan: mapPlan(row),
-    activities: activities.rows.map((activity) => {
-      const approved = round2(Number(activity.approved_budget || 0));
-      const spent = round2(Number(activity.spent || 0));
-      return {
-        id: activity.id,
-        activity: activity.activity,
-        description: activity.description || '',
-        category: activity.category,
-        operation: activity.sector,
-        status: activity.status,
-        priority: activity.priority || 'Medium',
-        approvedBudget: approved,
-        spent,
-        // Section 5: remaining = approved - actual, per activity.
-        remaining: fromCents(cents(approved) - cents(spent)),
-        deadline: toDateOnly(activity.deadline),
-        adminNote: activity.admin_note || '',
-        assignedTo: activity.assigned_to ?? null,
-        assignedToName: activity.assigned_to_name ?? null,
-        completedAt: activity.completed_at ?? null,
-        expenseCount: activity.expense_count,
-        paymentEvidenceCount: activity.payment_evidence_count,
-        activityEvidenceCount: activity.activity_evidence_count,
-        expensesWithoutEvidence: activity.expenses_without_evidence
-      };
-    }),
+    activities: planned,
     history: history.rows.map((entry) => ({
       id: entry.id,
       action: entry.action,
@@ -326,7 +514,15 @@ router.get('/:id', asyncRoute(async (req, res) => {
       createdAt: entry.created_at
     })),
     report: report.rowCount ? mapReport(report.rows[0]) : null
-  });
+  };
+}
+
+router.get('/:id', asyncRoute(async (req, res) => {
+  const row = await loadPlan(req.params.id, req.user);
+  if (!canReadPlan(req.user, row)) {
+    return res.status(403).json({ message: 'This plan belongs to another business operation.' });
+  }
+  res.json(await planDetail(row.id, req.user));
 }));
 
 function mapReport(row) {
@@ -365,6 +561,29 @@ router.post('/', asyncRoute(async (req, res) => {
   const month = monthStart(req.body?.month);
   if (!month) return res.status(400).json({ message: 'The month must be in YYYY-MM form.' });
 
+  // The budget the Director approves for the month. It used to be worked out at
+  // confirmation from whatever activities had been added, which meant the
+  // Director never actually set a figure and the month could not be over budget.
+  // It is theirs to state, and everything else has to fit inside it.
+  const budgetGiven = Object.prototype.hasOwnProperty.call(req.body || {}, 'approvedBudget')
+    && req.body.approvedBudget !== '' && req.body.approvedBudget !== null;
+  if (budgetGiven && !validNumber(req.body.approvedBudget)) {
+    return res.status(400).json({ message: 'The approved budget must be a valid non-negative number.' });
+  }
+  const approvedBudget = budgetGiven ? round2(req.body.approvedBudget) : 0;
+
+  // The project the month's work belongs to, when the operation runs more than
+  // one. It must be a project of this operation, or the plan would point at
+  // work in somebody else's area.
+  let projectId = null;
+  if (requiredText(req.body?.projectId)) {
+    const project = await pool.query('SELECT id FROM projects WHERE id = $1 AND sector = $2', [req.body.projectId, operation]);
+    if (!project.rowCount) {
+      return res.status(400).json({ message: 'That project does not belong to this business operation.' });
+    }
+    projectId = project.rows[0].id;
+  }
+
   // The manager responsible must actually cover this operation, or they would
   // be named on a plan whose activities they cannot open.
   let manager = null;
@@ -388,13 +607,22 @@ router.post('/', asyncRoute(async (req, res) => {
   try {
     await client.query('BEGIN');
     const inserted = await client.query(
-      `INSERT INTO monthly_plans (sector, month, manager_id, status, notes, created_by)
-       VALUES ($1, $2::date, $3, 'Draft', $4, $5) RETURNING id`,
-      [operation, month, manager?.id ?? null, optionalText(req.body?.notes, 2000), req.user.id]
+      `INSERT INTO monthly_plans
+         (sector, month, manager_id, status, notes, created_by, category, objective, project_id, approved_budget)
+       VALUES ($1, $2::date, $3, 'Draft', $4, $5, $6, $7, $8, $9) RETURNING id`,
+      [
+        operation, month, manager?.id ?? null, optionalText(req.body?.notes, 2000), req.user.id,
+        optionalText(req.body?.category, 100), optionalText(req.body?.objective, 4000),
+        projectId, approvedBudget
+      ]
     );
     await logPlanHistory(client, inserted.rows[0].id, req.user, [
       { action: 'Plan created', field: 'month', oldValue: null, newValue: monthKey(month) },
-      ...(manager ? [{ action: 'Manager assigned', field: 'managerId', oldValue: null, newValue: String(manager.id) }] : [])
+      ...(manager ? [{ action: 'Manager assigned', field: 'managerId', oldValue: null, newValue: String(manager.id) }] : []),
+      ...(approvedBudget ? [{
+        action: 'Approved allocation changed', field: 'approvedBudget', oldValue: null, newValue: approvedBudget,
+        note: 'Budget approved for the month by the Director.'
+      }] : [])
     ]);
     await client.query('COMMIT');
     planId = inserted.rows[0].id;
@@ -459,20 +687,58 @@ router.patch('/:id', asyncRoute(async (req, res) => {
     entries.push({ action: 'Notes updated', field: 'notes', oldValue: existing.notes || null, newValue: notes });
   }
 
+  // What the month is about, and what it is meant to achieve. Both are the
+  // Director's words and both are audited, because the manager works to them.
+  const categoryGiven = Object.prototype.hasOwnProperty.call(payload, 'category');
+  const category = categoryGiven ? optionalText(payload.category, 100) : existing.category;
+  if (categoryGiven && category !== (existing.category || '')) {
+    entries.push({ action: 'Category updated', field: 'category', oldValue: existing.category || null, newValue: category });
+  }
+  const objectiveGiven = Object.prototype.hasOwnProperty.call(payload, 'objective');
+  const objective = objectiveGiven ? optionalText(payload.objective, 4000) : existing.objective;
+  if (objectiveGiven && objective !== (existing.objective || '')) {
+    entries.push({ action: 'Objectives updated', field: 'objective', oldValue: existing.objective || null, newValue: objective });
+  }
+
+  let projectId = existing.project_id;
+  if (Object.prototype.hasOwnProperty.call(payload, 'projectId')) {
+    const clearing = payload.projectId === null || payload.projectId === '';
+    projectId = clearing ? null : String(payload.projectId);
+    if (projectId) {
+      const project = await pool.query('SELECT id FROM projects WHERE id = $1 AND sector = $2', [projectId, existing.sector]);
+      if (!project.rowCount) {
+        return res.status(400).json({ message: 'That project does not belong to this business operation.' });
+      }
+    }
+    if (projectId !== existing.project_id) {
+      entries.push({ action: 'Project changed', field: 'projectId', oldValue: existing.project_id, newValue: projectId });
+    }
+  }
+
   // Changing the confirmed allocation is a financial change: it needs a reason
   // and it is kept in the trail alongside the figure it replaced.
   let approvedBudget = round2(Number(existing.approved_budget));
   if (Object.prototype.hasOwnProperty.call(payload, 'approvedBudget')) {
-    if (existing.status === 'Draft') {
-      return res.status(400).json({ message: 'A draft plan takes its total from its activities. Confirm it to set an allocation.' });
-    }
     if (!validNumber(payload.approvedBudget)) {
       return res.status(400).json({ message: 'The approved budget must be a valid non-negative number.' });
     }
     const next = round2(payload.approvedBudget);
     if (next !== approvedBudget) {
-      if (!requiredText(payload.reason)) {
+      // Once the month is running, a change to the figure the manager is working
+      // to needs a reason on the record. While it is still a draft the Director
+      // is simply setting it, and being made to justify a first draft of a
+      // number is how people end up typing "n/a".
+      if (existing.status !== 'Draft' && !requiredText(payload.reason)) {
         return res.status(400).json({ message: 'Say why the approved allocation is changing.' });
+      }
+      // Lowering the ceiling below what has already been given out would leave
+      // the month over budget with nothing on screen to explain it, and the
+      // manager unable to act on either figure.
+      const committed = round2(Number(existing.planned_budget || 0));
+      if (cents(next) < cents(committed)) {
+        return res.status(400).json({
+          message: `${formatUsd(committed)} has already been committed to this month's activities. Remove or reduce some before lowering the budget to ${formatUsd(next)}.`
+        });
       }
       entries.push({
         action: 'Approved allocation changed', field: 'approvedBudget',
@@ -488,8 +754,11 @@ router.patch('/:id', asyncRoute(async (req, res) => {
   try {
     await client.query('BEGIN');
     await client.query(
-      'UPDATE monthly_plans SET manager_id = $2, notes = $3, approved_budget = $4, updated_at = NOW() WHERE id = $1',
-      [existing.id, managerId, notes, approvedBudget]
+      `UPDATE monthly_plans
+       SET manager_id = $2, notes = $3, approved_budget = $4, category = $5, objective = $6,
+           project_id = $7, updated_at = NOW()
+       WHERE id = $1`,
+      [existing.id, managerId, notes, approvedBudget, category, objective, projectId]
     );
     // A new manager takes over the month's live work with it. Left on the old
     // manager, the activities could not have expenses recorded by the new one
@@ -552,17 +821,31 @@ router.post('/:id/confirm', asyncRoute(async (req, res) => {
     return res.status(400).json({ message: 'Add at least one activity before confirming the plan.' });
   }
 
-  // The allocation is the sum of the planned activities as they stand now.
-  const allocation = round2(Number(existing.planned_budget || 0));
+  // The allocation is the figure the Director typed on the plan, not a total
+  // worked out from the activities. Confirming used to overwrite it with that
+  // sum, which is why the Director never really approved a budget and why the
+  // month could never be over it.
+  const allocation = round2(Number(existing.approved_budget || 0));
+  const committed = round2(Number(existing.planned_budget || 0));
+  if (!allocation) {
+    return res.status(400).json({ message: 'Set the budget you are approving for this month before confirming it.' });
+  }
+  // Confirming a plan whose activities already ask for more than was approved
+  // would hand the manager two contradictory figures on their first screen.
+  if (cents(committed) > cents(allocation)) {
+    return res.status(400).json({
+      message: `This month's activities come to ${formatUsd(committed)}, which is more than the ${formatUsd(allocation)} approved. Raise the budget or reduce the activities before confirming.`
+    });
+  }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const confirmed = await client.query(
       `UPDATE monthly_plans
-       SET status = 'Confirmed', approved_budget = $2, confirmed_by = $3, confirmed_at = NOW(), updated_at = NOW()
+       SET status = 'Confirmed', confirmed_by = $2, confirmed_at = NOW(), updated_at = NOW()
        WHERE id = $1 AND status = 'Draft'`,
-      [existing.id, allocation, req.user.id]
+      [existing.id, req.user.id]
     );
     // Confirmed by somebody else between the read and the write: one record of
     // the allocation, not two.
@@ -575,7 +858,7 @@ router.post('/:id/confirm', asyncRoute(async (req, res) => {
         action: 'Plan confirmed', field: 'approvedBudget', oldValue: null, newValue: allocation,
         // Spelled out in the trail so nobody reading it later mistakes this row
         // for a payment the system made.
-        note: 'Approved allocation recorded. The funds are handed to the manager outside the platform.'
+        note: `Approved allocation recorded, ${formatUsd(committed)} of it committed to planned activities. The funds are handed to the manager outside the platform.`
       }
     ]);
     await client.query('COMMIT');
@@ -665,6 +948,12 @@ router.post('/:id/activities', asyncRoute(async (req, res) => {
   const payload = req.body || {};
   if (!requiredText(payload.activity)) return res.status(400).json({ message: 'The activity name is required.' });
   if (!requiredText(payload.category)) return res.status(400).json({ message: 'A category is required.' });
+  // What the work is for. The manager assigns the days that will deliver this
+  // and the person doing them reads it, so a planned activity that is only a
+  // title leaves both of them guessing.
+  if (!requiredText(payload.description)) {
+    return res.status(400).json({ message: 'Describe what this activity involves. The manager and the person doing the work both work from it.' });
+  }
   if (!validNumber(payload.approvedBudget)) {
     return res.status(400).json({ message: 'The approved budget must be a valid non-negative number.' });
   }
@@ -699,6 +988,18 @@ router.post('/:id/activities', asyncRoute(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // The month's ceiling, read under a lock. Work used to be added freely and
+    // the allocation raised to cover it, so the approved budget followed the
+    // activities around instead of constraining them.
+    const position = await planPosition(client, plan.id);
+    if (!fitsBudget(budget, position.approved, position.committed)) {
+      await safeRollback(client);
+      return res.status(400).json({
+        message: overMonthlyBudgetMessage(position.uncommitted),
+        code: 'OVER_MONTHLY_BUDGET',
+        remaining: position.uncommitted
+      });
+    }
     await client.query(
       `INSERT INTO activities
          (id, project_id, sector, category, activity, description, quantity,
@@ -728,21 +1029,11 @@ router.post('/:id/activities', asyncRoute(async (req, res) => {
     await logPlanHistory(client, plan.id, req.user, [
       { action: 'Activity added', field: 'activity', oldValue: null, newValue: payload.activity.trim().slice(0, 200), note: `${budget}` }
     ]);
-    // Work added to a month already confirmed is money approved on top of the
-    // allocation, exactly as attaching an off-plan activity is. Leaving the
-    // allocation where it was sent the remaining balance negative with nothing on
-    // screen to explain it.
-    if (plan.status !== 'Draft') {
-      await client.query(
-        'UPDATE monthly_plans SET approved_budget = approved_budget + $2, updated_at = NOW() WHERE id = $1',
-        [plan.id, budget]
-      );
-      await logPlanHistory(client, plan.id, req.user, [{
-        action: 'Approved allocation changed', field: 'approvedBudget',
-        oldValue: round2(Number(plan.approved_budget)), newValue: round2(Number(plan.approved_budget) + budget),
-        note: `Activity added after confirmation: ${payload.activity.trim().slice(0, 200)}`
-      }]);
-    }
+    // No allocation change here. Work added to a confirmed month used to raise
+    // the approved budget to cover itself, which meant the Director's figure was
+    // whatever had been added and a month could never be over it. The activity
+    // now has to fit inside the budget instead, and the Director raises it
+    // deliberately through PATCH if they want more room.
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -752,6 +1043,194 @@ router.post('/:id/activities', asyncRoute(async (req, res) => {
   }
 
   res.status(201).json(mapPlan(await loadPlan(plan.id, req.user)));
+}));
+
+// ---- the day-by-day work underneath a planned activity ---------------------
+//
+// This is the manager's way in, and deliberately their ONLY way in to the
+// month's money. The Director sets the planned activities and the budget; the
+// manager breaks each planned activity into the days of work that will finish
+// it -- what is being done, which day, who is doing it, what it costs -- and the
+// days add up to the planned activity, which adds up to the month.
+//
+// Why it is not `POST /api/activities`: that route creates work in an operation,
+// which is how a manager ended up running a month's worth of activities with no
+// relation to the plan at all. Work created here cannot exist without a planned
+// activity to belong to, and cannot cost more than that activity has left.
+//
+// Nothing here needs approving. The Director approved the money when they
+// approved the plan, and approved the work when they wrote the planned activity;
+// asking them to approve each day of it again would put the month in a queue.
+router.post('/:id/activities/:activityId/work', asyncRoute(async (req, res) => {
+  const plan = await loadPlan(req.params.id, req.user);
+  if (!canReadPlan(req.user, plan)) {
+    return res.status(403).json({ message: 'This plan belongs to another business operation.' });
+  }
+  // The manager the plan names, or the Director. Another manager in the same
+  // operation can read the month but does not staff it.
+  if (!isAdmin(req.user) && !isPlanManager(req.user, plan)) {
+    return res.status(403).json({ message: 'Only the manager this month was given to can assign its work.' });
+  }
+  if (!isPlanOpen(plan)) {
+    return res.status(400).json({ message: 'This month has been closed. Reopen it before assigning more work.' });
+  }
+  // A draft plan is the Director still writing it. Work assigned against a
+  // budget that has not been approved yet cannot be spent against anyway -- the
+  // status route already refuses to start it -- so it is refused here, where the
+  // manager can still be told why.
+  if (plan.status === 'Draft') {
+    return res.status(409).json({ message: 'This month has not been confirmed yet. The Director confirms the plan and its budget before the work is assigned.' });
+  }
+
+  const payload = req.body || {};
+  if (!requiredText(payload.activity)) {
+    return res.status(400).json({ message: 'Say what this day of work is.' });
+  }
+  // Required, not optional. The person it is assigned to opens this on their
+  // phone and has nothing else to go on.
+  if (!requiredText(payload.description)) {
+    return res.status(400).json({ message: 'Describe the work. The person doing it reads this and nothing else.' });
+  }
+  // The day it is happening. This is the whole point of the level: a planned
+  // activity has a deadline, and the days underneath it are when the work is
+  // actually done.
+  const scheduledFor = payload.scheduledFor ? String(payload.scheduledFor).slice(0, 10) : null;
+  if (!scheduledFor) {
+    return res.status(400).json({ message: 'Give the day this work is being done.' });
+  }
+  if (!isValidDate(scheduledFor)) {
+    return res.status(400).json({ message: 'The day of the work must be a real date.' });
+  }
+  // Work towards September's plan happens in September. A day outside the month
+  // would be counted in a month whose budget it is not spending.
+  if (monthKey(scheduledFor) !== monthKey(plan.month)) {
+    return res.status(400).json({ message: `That day is outside this month. Choose a day in ${monthKey(plan.month)}.` });
+  }
+  if (!validNumber(payload.budget ?? 0)) {
+    return res.status(400).json({ message: 'The budget for this work must be a valid non-negative number.' });
+  }
+  const budget = round2(payload.budget ?? 0);
+  const priority = payload.priority || 'Medium';
+  if (!PLAN_PRIORITIES.includes(priority)) {
+    return res.status(400).json({ message: 'Priority must be Low, Medium or High.' });
+  }
+  // Whether finishing it needs something to show for it. Evidence is demanded by
+  // default; a meeting or a supervision visit sometimes has nothing to
+  // photograph, and the rule had no way of saying so.
+  const evidenceRequired = payload.evidenceRequired !== false;
+
+  // Who is doing it. A team member or a manager, in this operation -- the
+  // assignee is the one who starts it, records its spending and attaches its
+  // evidence, so they have to be able to open it. Left unsaid, the manager
+  // running the month is doing it themselves.
+  let assignedTo = plan.manager_id;
+  if (requiredText(String(payload.assignedTo ?? ''))) {
+    assignedTo = parseId(payload.assignedTo);
+    if (!assignedTo) return res.status(400).json({ message: 'The selected person is invalid.' });
+    const person = await pool.query(
+      `SELECT id, name, sector, role, covers_all_sectors AS "coversAllSectors"
+       FROM users WHERE id = $1 AND status = 'active' AND role IN ('manager', 'staff')`,
+      [assignedTo]
+    );
+    if (!person.rowCount) return res.status(400).json({ message: 'The selected person is invalid.' });
+    if (!withinScope(person.rows[0], plan.sector)) {
+      return res.status(400).json({ message: 'That person works in a different business operation.' });
+    }
+  }
+  if (!assignedTo) {
+    return res.status(400).json({ message: 'Say who is doing this work.' });
+  }
+
+  const id = `ACT-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const rate = await getCurrentRate(pool);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // The planned activity this belongs to, and what is left of its budget. Read
+    // under a row lock so two days of work assigned at once cannot both fit into
+    // the same remaining amount.
+    const parent = await plannedActivityPosition(client, req.params.activityId);
+    if (Number(parent.row.monthly_plan_id) !== Number(plan.id)) {
+      await safeRollback(client);
+      return res.status(404).json({ message: 'That planned activity is not part of this month.' });
+    }
+    if (parent.row.parent_activity_id) {
+      await safeRollback(client);
+      return res.status(400).json({ message: 'That is already a day of work. Add the day under the planned activity itself.' });
+    }
+    if (['Rejected', 'Cancelled'].includes(parent.row.status)) {
+      await safeRollback(client);
+      return res.status(400).json({ message: `A ${parent.row.status} activity takes no more work.` });
+    }
+    // The planned activity's own ceiling. The month's ceiling is not re-checked
+    // here: this budget is already inside the planned activity's, which was
+    // checked against the month when the Director added it.
+    if (!fitsBudget(budget, parent.approved, parent.committed)) {
+      await safeRollback(client);
+      return res.status(400).json({
+        message: overActivityBudgetMessage(parent.uncommitted),
+        code: 'OVER_ACTIVITY_BUDGET',
+        remaining: parent.uncommitted
+      });
+    }
+
+    // Inherits the planned activity's project and category, so a day of work is
+    // never filed under a different heading from the activity it serves.
+    await client.query(
+      `INSERT INTO activities
+         (id, project_id, sector, category, activity, description, quantity,
+          cost_usd, cost_rwf, cost_cdf, requested_budget, approved_budget,
+          status, approved, priority, monthly_plan_id, parent_activity_id,
+          scheduled_for, deadline, instructions, evidence_required,
+          created_by, created_by_name, origin, assigned_to, assigned_at,
+          approval_required, approval_status, approved_by, approved_at, reviewed_by, reviewed_at)
+       SELECT $1, parent.project_id, $2, parent.category, $3, $4, 1,
+              $5, $6, $7, $5, $5,
+              'Approved', TRUE, $8, $9, parent.id,
+              $10::date, COALESCE($10::date, parent.deadline), $11, $12,
+              $13, $14, 'assigned', $15, NOW(),
+              FALSE, 'approved', $13, NOW(), $13, NOW()
+       FROM activities parent WHERE parent.id = $16`,
+      [
+        id, plan.sector, payload.activity.trim().slice(0, 200), optionalText(payload.description, 4000),
+        budget, round2(budget * rate.rwfPerUsd), round2(budget * rate.cdfPerUsd),
+        priority, plan.id, scheduledFor, optionalText(payload.notes, 4000), evidenceRequired,
+        req.user.id, req.user.name, assignedTo, parent.row.id
+      ]
+    );
+    await client.query(
+      `INSERT INTO activity_history (activity_id, action, field, old_value, new_value, note, actor_id, actor_name)
+       VALUES ($1, 'Work assigned', 'scheduledFor', NULL, $2, $3, $4, $5)`,
+      [id, scheduledFor, `Towards: ${parent.row.activity}`, req.user.id, req.user.name]
+    );
+    // The planned activity is under way the moment its first day is assigned, so
+    // the Director's screen shows the month moving rather than a list of
+    // approved activities that all look untouched.
+    if (['Approved', 'Budget Adjusted'].includes(parent.row.status)) {
+      await client.query(
+        "UPDATE activities SET status = 'In Progress', updated_at = NOW() WHERE id = $1 AND status = $2",
+        [parent.row.id, parent.row.status]
+      );
+      await client.query(
+        `INSERT INTO activity_history (activity_id, action, field, old_value, new_value, note, actor_id, actor_name)
+         VALUES ($1, 'Status changed', 'status', $2, 'In Progress', $3, $4, $5)`,
+        [parent.row.id, parent.row.status, 'The first day of work was assigned', req.user.id, req.user.name]
+      );
+    }
+    await logPlanHistory(client, plan.id, req.user, [{
+      action: 'Work assigned', field: 'activity', oldValue: null,
+      newValue: payload.activity.trim().slice(0, 200),
+      note: `${scheduledFor} · ${parent.row.activity} · ${formatUsd(budget)}`
+    }]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  res.status(201).json({ id, ...(await planDetail(plan.id, req.user)) });
 }));
 
 // Section 4: an activity a manager raised is NOT automatically part of the
@@ -772,7 +1251,8 @@ router.post('/:id/attach/:activityId', asyncRoute(async (req, res) => {
     // Read under a row lock, so two attaches of the same activity at once cannot
     // both find it unattached and add its budget to two plans.
     const found = await client.query(
-      `SELECT id, activity, sector, status, approval_status, approved_budget, requested_budget, monthly_plan_id
+      `SELECT id, activity, sector, status, approval_status, approved_budget, requested_budget,
+              monthly_plan_id, parent_activity_id
        FROM activities WHERE id = $1 FOR UPDATE`,
       [req.params.activityId]
     );
@@ -783,6 +1263,7 @@ router.post('/:id/attach/:activityId', asyncRoute(async (req, res) => {
     activity = found.rows[0];
     let refusal = null;
     if (activity.monthly_plan_id) refusal = [409, 'That activity already belongs to a monthly plan.'];
+    else if (activity.parent_activity_id) refusal = [400, 'That is a day of work under another activity, not an activity of its own.'];
     else if (activity.sector !== plan.sector) refusal = [400, 'That activity belongs to a different business operation.'];
     // Only approved, live work joins an approved budget.
     else if (activity.approval_status !== 'approved' || ['Rejected', 'Cancelled'].includes(activity.status)) {
@@ -797,19 +1278,23 @@ router.post('/:id/attach/:activityId', asyncRoute(async (req, res) => {
     // asked for; that figure is written down as it joins the plan, so the plan,
     // the spend check and the reports all read the same number.
     budget = round2(Number(activity.approved_budget ?? activity.requested_budget ?? 0));
+    // Folding off-plan work into the month spends the month's budget on it, so
+    // it is held to the same ceiling as work planned from the start. This used to
+    // raise the allocation to cover whatever was attached.
+    const position = await planPosition(client, plan.id);
+    if (!fitsBudget(budget, position.approved, position.committed)) {
+      await safeRollback(client);
+      return res.status(400).json({
+        message: overMonthlyBudgetMessage(position.uncommitted),
+        code: 'OVER_MONTHLY_BUDGET',
+        remaining: position.uncommitted
+      });
+    }
     await client.query(
       `UPDATE activities SET monthly_plan_id = $2, assigned_to = COALESCE(assigned_to, $3),
          approved_budget = COALESCE(approved_budget, $4), updated_at = NOW() WHERE id = $1`,
       [activity.id, plan.id, plan.manager_id, budget]
     );
-    // The plan has grown, so the allocation grows with it -- explicitly, and on
-    // the record, rather than the total quietly changing under the Director.
-    if (plan.status !== 'Draft') {
-      await client.query(
-        'UPDATE monthly_plans SET approved_budget = approved_budget + $2, updated_at = NOW() WHERE id = $1',
-        [plan.id, budget]
-      );
-    }
     await client.query(
       `INSERT INTO activity_history (activity_id, action, field, old_value, new_value, note, actor_id, actor_name)
        VALUES ($1, 'Attached to monthly plan', 'monthlyPlanId', NULL, $2, $3, $4, $5)`,
@@ -817,8 +1302,8 @@ router.post('/:id/attach/:activityId', asyncRoute(async (req, res) => {
     );
     await logPlanHistory(client, plan.id, req.user, [
       {
-        action: 'Off-plan activity attached', field: 'approvedBudget',
-        oldValue: round2(Number(plan.approved_budget)), newValue: round2(Number(plan.approved_budget) + budget),
+        action: 'Off-plan activity attached', field: 'committedBudget',
+        oldValue: position.committed, newValue: round2(position.committed + budget),
         note: `${activity.activity}${req.body?.reason ? ` — ${optionalText(req.body.reason, 500)}` : ''}`
       }
     ]);

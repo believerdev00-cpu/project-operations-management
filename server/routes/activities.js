@@ -170,6 +170,20 @@ export function mapActivity(row) {
     planMonth: row.plan_month ? String(row.plan_month).slice(0, 7) : null,
     planStatus: row.plan_status ?? null,
     priority: row.priority || 'Medium',
+    // A day of the manager's work towards a planned activity names the activity
+    // it serves, so the person doing it can see what it is for -- and so the
+    // record screen can say "Towards: clearing the north field" rather than
+    // leaving the day looking like unrelated work.
+    parentActivityId: row.parent_activity_id ?? null,
+    parentActivityName: row.parent_activity_name ?? null,
+    parentDescription: row.parent_description ?? null,
+    parentDeadline: row.parent_deadline ? String(row.parent_deadline).slice(0, 10) : null,
+    // On a planned activity: how many days of work are under it and how many are
+    // done. This is what "how is it going" means for the Director.
+    workCount: row.work_count === undefined ? undefined : Number(row.work_count),
+    workCompletedCount: row.work_completed_count === undefined ? undefined : Number(row.work_completed_count),
+    // Whether finishing it needs something to show for it.
+    evidenceRequired: row.evidence_required !== false,
     // Section 5: remaining = approved - actual, derived from the expense rows.
     actualSpent: row.actual_spent === undefined ? undefined : round2(row.actual_spent),
     remainingBudget: row.actual_spent === undefined
@@ -298,6 +312,12 @@ const SELECT_ACTIVITY = `
          (SELECT COUNT(*) FROM activity_evidence ev WHERE ev.activity_id = a.id AND ev.evidence_type = 'payment')::int AS payment_evidence_count,
          (SELECT COUNT(*) FROM activity_evidence ev WHERE ev.activity_id = a.id AND ev.evidence_type = 'activity')::int AS activity_evidence_count,
          pl.month AS plan_month, pl.status AS plan_status,
+         par.activity AS parent_activity_name, par.description AS parent_description,
+         par.deadline AS parent_deadline,
+         (SELECT COUNT(*) FROM activities w
+           WHERE w.parent_activity_id = a.id AND w.status NOT IN ('Rejected', 'Cancelled'))::int AS work_count,
+         (SELECT COUNT(*) FROM activities w
+           WHERE w.parent_activity_id = a.id AND w.status = 'Completed')::int AS work_completed_count,
          req.name AS approval_required_from_name, req.role AS approval_required_from_role,
          req.sector AS approval_required_from_sector,
          app.name AS approved_by_name,
@@ -310,6 +330,7 @@ const SELECT_ACTIVITY = `
   LEFT JOIN users req ON req.id = a.approval_required_from
   LEFT JOIN users app ON app.id = a.approved_by
   LEFT JOIN monthly_plans pl ON pl.id = a.monthly_plan_id
+  LEFT JOIN activities par ON par.id = a.parent_activity_id
 `;
 
 // Sector scoping, exactly as everywhere else in this API: the Director sees
@@ -343,6 +364,39 @@ async function reloadActivity(id) {
 
 function requireAdmin(user, action) {
   if (!isAdmin(user)) throw new ActivityError(403, `Only the Director can ${action}.`);
+}
+
+// Raising an activity's approved budget spends more of its month's approved
+// budget, so it is held to the same ceiling as adding a new activity. Without
+// this the month's limit could be walked past one increase at a time, which is
+// exactly how the old "the allocation follows the activities" behaviour worked.
+//
+// Returns a refusal message, or null when the new figure fits. The plan row is
+// locked inside the caller's transaction, so two increases at once cannot both
+// fit into the same remaining amount.
+async function planCeilingRefusal(client, activity, nextBudget) {
+  if (!activity.monthly_plan_id || activity.parent_activity_id) return null;
+  const previous = activity.approved_budget === null
+    ? round2(Number(activity.requested_budget || 0))
+    : round2(Number(activity.approved_budget));
+  const increase = cents(nextBudget) - cents(previous);
+  if (increase <= 0) return null;
+  const plan = await client.query(
+    'SELECT approved_budget FROM monthly_plans WHERE id = $1 FOR UPDATE',
+    [activity.monthly_plan_id]
+  );
+  if (!plan.rowCount) return null;
+  const committed = await client.query(
+    `SELECT COALESCE(SUM(COALESCE(approved_budget, requested_budget)), 0) AS committed
+     FROM activities
+     WHERE monthly_plan_id = $1 AND parent_activity_id IS NULL
+       AND status NOT IN ('Rejected', 'Cancelled')`,
+    [activity.monthly_plan_id]
+  );
+  const free = cents(plan.rows[0].approved_budget) - cents(committed.rows[0].committed);
+  if (increase <= free) return null;
+  const money = fromCents(free).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `This activity exceeds the remaining monthly budget of $${money}.`;
 }
 
 // A closed month is a signed-off account. Anything that would change what it
@@ -482,6 +536,12 @@ function validateRequestBody(payload) {
   // The column widths, answered here rather than as a database error.
   if (payload.category.trim().length > 100) return 'The category can be at most 100 characters.';
   if (payload.activity.trim().length > 200) return 'The activity name can be at most 200 characters.';
+  // What the work is for, in words. A title alone ("Fertilizer", "Transport")
+  // tells the person it is handed to nothing, and it was the one field on the
+  // form people were skipping -- so the form asks for it and so does this.
+  if (!requiredText(payload.description)) {
+    return 'Describe the work. Whoever carries it out reads this and nothing else.';
+  }
   return null;
 }
 
@@ -523,6 +583,7 @@ router.post('/', asyncRoute(async (req, res) => {
   // could be started and finished by them, but not spent against -- expenses
   // belong to the assignee -- so an approved request had no way to record money.
   let assignedTo = assigning ? null : req.user.id;
+  let assignedToIsStaff = false;
   let deadline = null;
   // When the work is to happen. Anyone raising or assigning work may set it,
   // unlike the deadline, which is the Director's to impose.
@@ -536,16 +597,22 @@ router.post('/', asyncRoute(async (req, res) => {
       return res.status(400).json({ message: 'Choose the manager who will carry out this activity.' });
     }
     const manager = await pool.query(
-      "SELECT id, sector, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager' AND status = 'active'",
+      `SELECT id, sector, role, covers_all_sectors AS "coversAllSectors"
+       FROM users WHERE id = $1 AND role IN ('manager', 'staff') AND status = 'active'`,
       [assignedTo]
     );
-    if (!manager.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
-    // A manager only ever reads the working areas they cover, so handing them
-    // work outside those would leave them assigned to a record they cannot open.
-    // A manager who covers every area can be handed anything.
+    if (!manager.rowCount) return res.status(400).json({ message: 'The selected person is invalid.' });
+    // Anyone carrying work only ever reads the working area they cover, so
+    // handing them work outside it would leave them assigned to a record they
+    // cannot open. A manager who covers every area can be handed anything.
     if (!withinScope(manager.rows[0], sector)) {
-      return res.status(400).json({ message: 'That manager works in a different business operation. Pick a manager from this one.' });
+      return res.status(400).json({ message: 'That person works in a different business operation. Pick somebody from this one.' });
     }
+    // A team member has nobody to answer to on the record, so there is nothing
+    // for them to accept: the Director's own instruction is the approval. Left
+    // as it was, the activity would have waited on a team member who has no
+    // approval screen and the work could never have started.
+    if (manager.rows[0].role === 'staff') assignedToIsStaff = true;
     deadline = payload.deadline ? String(payload.deadline).slice(0, 10) : null;
     if (deadline && !isValidDate(deadline)) {
       return res.status(400).json({ message: 'The deadline must be a real date.' });
@@ -555,7 +622,7 @@ router.post('/', asyncRoute(async (req, res) => {
   // The Director may hand over routine work that needs nobody's sign-off; a
   // manager's request always needs one. Saving a draft parks the record with
   // its author without putting it in anybody's queue.
-  const approvalRequired = assigning ? payload.approvalRequired !== false : true;
+  const approvalRequired = assigning ? (payload.approvalRequired !== false && !assignedToIsStaff) : true;
   const isDraft = payload.status === 'Draft';
 
   // An assigned activity carries the Director's own figure, so it is both the
@@ -1082,6 +1149,15 @@ router.patch('/:id/decision', asyncRoute(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // The month's ceiling, checked inside the transaction so the figure it reads
+    // is the one the write lands against.
+    if (budgetIsMoving && approvedBudget !== null) {
+      const refusal = await planCeilingRefusal(client, existing, approvedBudget);
+      if (refusal) {
+        await safeRollback(client);
+        return res.status(400).json({ message: refusal, code: 'OVER_MONTHLY_BUDGET' });
+      }
+    }
     const written = await client.query(
       `UPDATE activities
        SET approved_budget = $2, status = $3::text, admin_note = $4, approved = $5,
@@ -1300,9 +1376,16 @@ router.post('/:id/completion', asyncRoute(async (req, res) => {
   if (existing.completion_submitted_at) {
     return res.status(409).json({ message: 'This activity has already been submitted as finished and is waiting for the Director.' });
   }
-  const evidence = await pool.query('SELECT COUNT(*)::int AS total FROM activity_evidence WHERE activity_id = $1', [existing.id]);
-  if (!evidence.rows[0].total) {
-    return res.status(400).json({ message: 'Attach the receipts, invoices or photographs for this work before submitting it as finished.' });
+  // Evidence is demanded before work is handed back, unless the work was set up
+  // as needing none -- a meeting or a supervision visit sometimes has nothing to
+  // photograph, and until `evidence_required` existed the rule had no way of
+  // saying so. Every row that predates the column has it TRUE, so this is the
+  // same rule as before for all of them.
+  if (existing.evidence_required !== false) {
+    const evidence = await pool.query('SELECT COUNT(*)::int AS total FROM activity_evidence WHERE activity_id = $1', [existing.id]);
+    if (!evidence.rows[0].total) {
+      return res.status(400).json({ message: 'Attach the receipts, invoices or photographs for this work before submitting it as finished.' });
+    }
   }
 
   const note = optionalText(req.body?.note, 2000);
@@ -1359,12 +1442,23 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
     }
     if (assignedTo) {
       const manager = await pool.query(
-        "SELECT id, sector, name, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager' AND status = 'active'",
+        `SELECT id, sector, name, role, covers_all_sectors AS "coversAllSectors"
+         FROM users WHERE id = $1 AND role IN ('manager', 'staff') AND status = 'active'`,
         [assignedTo]
       );
-      if (!manager.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
+      if (!manager.rowCount) return res.status(400).json({ message: 'The selected person is invalid.' });
       if (!withinScope(manager.rows[0], existing.sector)) {
-        return res.status(400).json({ message: 'That manager works in a different business operation. Pick a manager from this one.' });
+        return res.status(400).json({ message: 'That person works in a different business operation. Pick somebody from this one.' });
+      }
+      // Handing work to a team member while it is still waiting for a manager to
+      // accept it would leave the record waiting on somebody with no approval
+      // screen, and nothing could move it again. The decision comes first.
+      if (manager.rows[0].role === 'staff'
+        && existing.approval_required && existing.approval_status === 'pending'
+        && existing.approval_required_role === 'manager') {
+        return res.status(409).json({
+          message: 'This activity is still waiting for a manager to accept it. Approve it first, or hand it to a manager.'
+        });
       }
     }
   }
@@ -1546,6 +1640,13 @@ router.patch('/:id/budget-requests/:requestId', asyncRoute(async (req, res) => {
           message: `${round2(position.spent)} has already been spent on this activity, so its budget cannot be set below that.`
         });
       }
+      // Granting more money to an activity inside a month takes it from that
+      // month's approved budget, which has a limit like everything else.
+      const refusal = await planCeilingRefusal(client, existing, round2(request.requested_amount));
+      if (refusal) {
+        await safeRollback(client);
+        return res.status(400).json({ message: refusal, code: 'OVER_MONTHLY_BUDGET' });
+      }
       // Only the revised figure moves. requested_budget still holds the
       // original, so the activity carries both from here on. Finished and parked
       // work keeps its status; live work reads as Budget Adjusted, which every
@@ -1611,6 +1712,18 @@ router.delete('/:id', asyncRoute(async (req, res) => {
   if (spent.rows[0].total) {
     return res.status(409).json({ message: 'Expenses have been recorded against this activity, so it cannot be deleted. Cancel it instead.' });
   }
+  // Deleting a planned activity cascades to the days of work assigned under it,
+  // and those are somebody's record of what they did. It is cancelled instead,
+  // which leaves the work and its evidence where they are.
+  const work = await pool.query(
+    "SELECT COUNT(*)::int AS total FROM activities WHERE parent_activity_id = $1 AND status NOT IN ('Rejected', 'Cancelled')",
+    [existing.id]
+  );
+  if (work.rows[0].total) {
+    return res.status(409).json({
+      message: 'Work has been assigned under this activity, so it cannot be deleted. Cancel it instead, or remove the work first.'
+    });
+  }
   const files = await pool.query('SELECT stored_name FROM activity_evidence WHERE activity_id = $1', [existing.id]);
 
   const client = await pool.connect();
@@ -1618,25 +1731,22 @@ router.delete('/:id', asyncRoute(async (req, res) => {
   try {
     await client.query('BEGIN');
     result = await client.query('DELETE FROM activities WHERE id = $1 RETURNING *', [existing.id]);
-    // A planned activity added to a confirmed month raised the month's approved
-    // allocation, so removing it lowers the allocation by the same amount and
-    // says so in the month's history -- otherwise the month kept money for work
-    // that no longer exists.
+    // The month's approved budget is the Director's ceiling and is not touched
+    // here. It used to be raised when work was added and lowered again when work
+    // was deleted, which is what stopped it from ever being a limit. Deleting a
+    // planned activity frees what was committed to it, and committed is summed
+    // from the rows -- so it falls by itself. The month still records that the
+    // work went, because the figure a reader compares against changed.
     if (result.rowCount && existing.monthly_plan_id && existing.plan_status === 'Confirmed') {
       const budget = round2(existing.approved_budget === null ? existing.requested_budget : existing.approved_budget);
-      const plan = await client.query(
-        `UPDATE monthly_plans SET approved_budget = GREATEST(0, approved_budget - $2), updated_at = NOW()
-         WHERE id = $1 AND status = 'Confirmed'
-         RETURNING approved_budget + $2 AS old_value, approved_budget AS new_value`,
-        [existing.monthly_plan_id, budget]
-      );
-      if (plan.rowCount && budget) {
+      if (budget) {
         await client.query(
           `INSERT INTO monthly_plan_history (plan_id, action, field, old_value, new_value, note, actor_id, actor_name)
-           VALUES ($1, 'Approved allocation changed', 'approvedBudget', $2, $3, $4, $5, $6)`,
+           VALUES ($1, 'Committed budget changed', 'committedBudget', $2, NULL, $3, $4, $5)`,
           [
-            existing.monthly_plan_id, String(round2(plan.rows[0].old_value)), String(round2(plan.rows[0].new_value)),
-            `Activity deleted: ${String(existing.activity).slice(0, 200)}`, req.user.id, req.user.name
+            existing.monthly_plan_id, String(budget),
+            `Activity deleted, releasing its budget: ${String(existing.activity).slice(0, 200)}`,
+            req.user.id, req.user.name
           ]
         );
       }
@@ -1912,6 +2022,21 @@ router.post('/:id/expenses', asyncRoute(async (req, res) => {
         await safeRollback(client);
         return res.status(400).json({ message: 'This month has not been confirmed yet, so nothing can be spent against it.' });
       }
+    }
+
+    // A planned activity with days of work under it is a heading, and its budget
+    // is divided between those days. A spend recorded on the heading as well
+    // would be counted against a budget the days have already been promised, and
+    // the same money would appear to be available twice.
+    const hasWork = await client.query(
+      "SELECT COUNT(*)::int AS total FROM activities WHERE parent_activity_id = $1 AND status NOT IN ('Rejected', 'Cancelled')",
+      [existing.id]
+    );
+    if (hasWork.rows[0].total) {
+      await safeRollback(client);
+      return res.status(400).json({
+        message: 'This activity is done through the days of work assigned under it. Record the spending on the day it belongs to.'
+      });
     }
 
     const position = await budgetPosition(client, existing.id);
