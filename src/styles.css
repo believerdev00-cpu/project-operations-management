@@ -696,13 +696,24 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
   /* A text field under 16px makes iOS zoom the page on focus, and it does not
      zoom back out. */
   input, select, textarea, table select, .language-picker select { font-size: 16px; }
-  table select { min-height: 44px; }
+  /* 44px is the smallest thing a thumb hits reliably. Every field in the app was
+     42px: two pixels short, on every form, on every screen. */
+  input, select, textarea, table select { min-height: 44px; }
 
   /* Touch targets a thumb can hit. */
   .text-btn { min-height: 44px; padding: 8px 6px; }
   .danger-btn { min-height: 44px; padding: 10px 12px; }
   .primary-btn, .secondary-btn, .danger-btn.outlined, .danger-btn.filled { min-height: 46px; }
   .primary-btn.compact, .secondary-btn.compact, .danger-btn.outlined.compact { min-height: 44px; padding: 8px 14px; font-size: .85rem; }
+  /* These three set their own height further up the stylesheet, and a rule with
+     a class AND an element beats the plain .primary-btn rule above however late
+     it comes -- so they stayed at 42px while everything around them grew.
+     "Save date" is one of them, and it is a button somebody presses standing in
+     a field. */
+  .inline-form button, .report-picker button, .work-date button { min-height: 46px; }
+  /* A checkbox is an 18px square; the whole row is what people actually tap. */
+  .check-field { min-height: 44px; padding: 4px 0; }
+  .check-field input { width: 22px; height: 22px; }
 
   .welcome-strip, .context-strip { margin-top: 18px; padding: 18px; }
   .welcome-strip .primary-btn, .context-strip .primary-btn { flex: 1 1 100%; }

@@ -594,9 +594,12 @@ function MovementTable({ movements, selectedId, onSelect }) {
   }
   return <div className="table-wrap"><table className="card-table">
     <thead><tr>
-      <th>{t('movement.reference')}</th><th>{t('field.type')}</th><th>{t('movement.relatedArea')}</th><th>{t('movement.route')}</th>
-      <th>{t('movement.departure')}</th><th>{t('movement.personTeam')}</th><th>{t('table.status')}</th>
-      <th>{t('movement.estimated')}</th><th>{t('movement.released')}</th><th>{t('movement.actual')}</th><th>{t('movement.balance')}</th><th>{t('field.evidence')}</th>
+      <th>{t('movement.reference')}</th><th className="card-optional">{t('field.type')}</th>
+      <th className="card-optional">{t('movement.relatedArea')}</th><th>{t('movement.route')}</th>
+      <th>{t('movement.departure')}</th><th className="card-optional">{t('movement.personTeam')}</th><th>{t('table.status')}</th>
+      <th>{t('movement.estimated')}</th><th className="card-optional">{t('movement.released')}</th>
+      <th className="card-optional">{t('movement.actual')}</th><th className="card-optional">{t('movement.balance')}</th>
+      <th>{t('field.evidence')}</th>
     </tr></thead>
     <tbody>{movements.map((movement) => <tr
       key={movement.id}
@@ -610,16 +613,16 @@ function MovementTable({ movements, selectedId, onSelect }) {
       }}
     >
       <td className="card-title-cell"><strong>{movement.ref} — {movement.purpose}</strong><small>{formatDateTime(movement.createdAt)}</small></td>
-      <td data-label={t('field.type')}>{t(`mtype.${movement.movementType}`)}</td>
-      <td data-label={t('movement.relatedArea')}>{movement.relatedArea ? <span className="area-badge">{areaLabel(movement.relatedArea)}</span> : <small>{t('filter.notLinked')}</small>}</td>
+      <td className="card-optional" data-label={t('field.type')}>{t(`mtype.${movement.movementType}`)}</td>
+      <td className="card-optional" data-label={t('movement.relatedArea')}>{movement.relatedArea ? <span className="area-badge">{areaLabel(movement.relatedArea)}</span> : <small>{t('filter.notLinked')}</small>}</td>
       <td data-label={t('movement.route')}>{movement.origin || '—'} &rarr; {movement.destination}</td>
       <td data-label={t('movement.departure')}>{formatDate(movement.departureDate)}<small>{t('movement.return')} {formatDate(movement.returnDate)}</small></td>
-      <td data-label={t('movement.personTeam')}>{movement.personTeam || '—'}</td>
+      <td className="card-optional" data-label={t('movement.personTeam')}>{movement.personTeam || '—'}</td>
       <td data-label={t('table.status')}><span className={`status-badge ${journeyTone(movementJourney(movement))}`}>{journeyLabel(movementJourney(movement), t)}</span></td>
       <td data-label={t('movement.estimated')}>{formatMoney(movement.estimatedTotal, movement.currency)}</td>
-      <td data-label={t('movement.released')}>{formatMoney(movement.fundsReleased, movement.currency)}</td>
-      <td data-label={t('movement.actual')}>{formatMoney(movement.actualExpense, movement.currency)}</td>
-      <td data-label={t('movement.balance')}>{formatMoney(movement.balanceReturn, movement.currency)}</td>
+      <td className="card-optional" data-label={t('movement.released')}>{formatMoney(movement.fundsReleased, movement.currency)}</td>
+      <td className="card-optional" data-label={t('movement.actual')}>{formatMoney(movement.actualExpense, movement.currency)}</td>
+      <td className="card-optional" data-label={t('movement.balance')}>{formatMoney(movement.balanceReturn, movement.currency)}</td>
       <td data-label={t('field.evidence')}><span className={`status-badge ${movement.evidenceStatus === 'Complete' ? 'tone-done' : 'tone-waiting'}`}>{t(`estatus.${movement.evidenceStatus}`)}</span><small>{fill(t('movement.fileCount'), { count: movement.evidenceCount ?? 0 })}</small></td>
     </tr>)}</tbody>
   </table></div>;
@@ -706,25 +709,31 @@ function MovementForm({ mode, movement, initialValues, rate, isDirector, busy = 
       <label className="form-field"><span>{t('movement.returnDate')}</span>
         <input type="date" min={values.departureDate || undefined} value={values.returnDate} onChange={(event) => set({ returnDate: event.target.value })} />
       </label>
-      <label className="form-field"><span>{t('movement.personTeam')}</span>
-        <input value={values.personTeam} onChange={(event) => set({ personTeam: event.target.value })} />
-      </label>
-      <label className="form-field"><span>{t('movement.transportType')}</span>
-        <input list="transport-suggestions" value={values.transportType} onChange={(event) => set({ transportType: event.target.value })} />
-        <datalist id="transport-suggestions">{TRANSPORT_SUGGESTIONS.map((option) => <option key={option} value={option} />)}</datalist>
-      </label>
-      <label className="form-field"><span>{t('movement.vehicleDriver')}</span>
-        <input value={values.vehicleDriver} onChange={(event) => set({ vehicleDriver: event.target.value })} />
-      </label>
       <label className="form-field"><span>{t('field.currency')}</span>
         <select value={values.currency} onChange={(event) => set({ currency: event.target.value })}>
           {CURRENCIES.map((currency) => <option key={currency}>{currency}</option>)}
         </select>
       </label>
-      <label className="form-field form-field-wide"><span>{t('field.notes')}</span>
-        <input placeholder={t('movement.notesPlaceholder')} value={values.notes} onChange={(event) => set({ notes: event.target.value })} />
-      </label>
     </div>
+
+    <details className="form-more">
+      <summary>{t('form.moreDetails')}</summary>
+      <div className="movement-grid">
+        <label className="form-field"><span>{t('movement.personTeam')}</span>
+          <input value={values.personTeam} onChange={(event) => set({ personTeam: event.target.value })} />
+        </label>
+        <label className="form-field"><span>{t('movement.transportType')}</span>
+          <input list="transport-suggestions" value={values.transportType} onChange={(event) => set({ transportType: event.target.value })} />
+          <datalist id="transport-suggestions">{TRANSPORT_SUGGESTIONS.map((option) => <option key={option} value={option} />)}</datalist>
+        </label>
+        <label className="form-field"><span>{t('movement.vehicleDriver')}</span>
+          <input value={values.vehicleDriver} onChange={(event) => set({ vehicleDriver: event.target.value })} />
+        </label>
+        <label className="form-field form-field-wide"><span>{t('field.notes')}</span>
+          <input placeholder={t('movement.notesPlaceholder')} value={values.notes} onChange={(event) => set({ notes: event.target.value })} />
+        </label>
+      </div>
+    </details>
 
     <h3 className="form-section-title">{t('movement.costBreakdown')}</h3>
     <div className="cost-grid">

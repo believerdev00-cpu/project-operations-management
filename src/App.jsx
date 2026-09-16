@@ -2111,7 +2111,7 @@ function rowActivation(onActivate) {
 
 function UserTable({ users, managers, currentUserId, busy, onChangeManager, onChangeSector, onResetPassword, onSetStatus, empty }) {
   const t = useT();
-  return users.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('field.name')}</th><th>{t('field.username')}</th><th>{t('field.role')}</th><th>{t('user.access')}</th><th>{t('field.reportsTo')}</th><th>{t('field.workingArea')}</th><th>{t('field.projects')}</th><th>{t('field.team')}</th><th>{t('field.added')}</th><th>{t('field.password')}</th><th>{t('field.action')}</th></tr></thead><tbody>
+  return users.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('field.name')}</th><th>{t('field.username')}</th><th>{t('field.role')}</th><th>{t('user.access')}</th><th>{t('field.reportsTo')}</th><th>{t('field.workingArea')}</th><th className="card-optional">{t('field.projects')}</th><th className="card-optional">{t('field.team')}</th><th className="card-optional">{t('field.added')}</th><th className="card-optional">{t('field.password')}</th><th>{t('field.action')}</th></tr></thead><tbody>
     {users.map((account) => {
       const isDirector = account.role === 'super-admin';
       const isSelf = account.id === currentUserId;
@@ -2139,12 +2139,12 @@ function UserTable({ users, managers, currentUserId, busy, onChangeManager, onCh
             {account.role === 'manager' && <option value={ALL_OPERATIONS}>{t('user.allOperations')}</option>}
             {sectors.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}
           </select>}</td>
-        <td data-label={t('field.projects')}>{account.assignedProjects}</td>
-        <td data-label={t('field.team')}>{account.teamSize || <span className="muted-cell">&mdash;</span>}</td>
-        <td data-label={t('field.added')}>{account.createdAt ? formatShortDate(account.createdAt) : <span className="muted-cell">&mdash;</span>}</td>
+        <td className="card-optional" data-label={t('field.projects')}>{account.assignedProjects}</td>
+        <td className="card-optional" data-label={t('field.team')}>{account.teamSize || <span className="muted-cell">&mdash;</span>}</td>
+        <td className="card-optional" data-label={t('field.added')}>{account.createdAt ? formatShortDate(account.createdAt) : <span className="muted-cell">&mdash;</span>}</td>
         {/* Only ever a date. The stored value is a bcrypt hash, so there is no
             password here for anyone, the Director included, to read. */}
-        <td data-label={t('field.password')}>{account.mustChangePassword
+        <td className="card-optional" data-label={t('field.password')}>{account.mustChangePassword
           ? <span className="muted-cell">{t('user.passwordTemporary')}</span>
           : account.passwordChangedAt ? <span className="muted-cell">{t('user.passwordReset')} {formatShortDate(account.passwordChangedAt)}</span> : <span className="muted-cell">{t('user.passwordOriginal')}</span>}</td>
         {/* Your own password is changed from the account menu, which asks for

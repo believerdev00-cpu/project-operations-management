@@ -442,25 +442,27 @@ export default function MonthlyPlans({
         {review.operations.length ? <div className="table-wrap"><table className="card-table">
           <thead><tr>
             <th>{t('app.businessOperation')}</th><th>{t('field.manager')}</th>
-            <th>{t('monthly.approvedAllocation')}</th><th>{t('monthly.committed')}</th>
+            <th>{t('monthly.approvedAllocation')}</th><th className="card-optional">{t('monthly.committed')}</th>
             <th>{t('monthly.totalSpent')}</th>
             <th>{t('monthly.remainingBalance')}</th><th>{t('review.completedActivities')}</th>
-            <th>{t('monthly.workDone')}</th><th>{t('review.expensesWithoutEvidence')}</th>
-            <th>{t('review.missingEvidence')}</th><th>{t('table.status')}</th><th>{t('table.actions')}</th>
+            <th className="card-optional">{t('monthly.workDone')}</th>
+            <th className="card-optional">{t('review.expensesWithoutEvidence')}</th>
+            <th className="card-optional">{t('review.missingEvidence')}</th>
+            <th>{t('table.status')}</th><th>{t('table.actions')}</th>
           </tr></thead>
           <tbody>{review.operations.map((plan) => <tr key={plan.id} className={plan.id === openPlanId ? 'row-selected' : undefined}>
             <td className="card-title-cell"><strong>{operationName(plan.operation, language)}</strong></td>
             <td data-label={t('field.manager')}>{plan.managerName || <span className="muted-cell">{t('table.unassigned')}</span>}</td>
             <td data-label={t('monthly.approvedAllocation')}>{formatUsd(plan.approvedBudget)}</td>
-            <td data-label={t('monthly.committed')}>{formatUsd(plan.committedBudget)}</td>
+            <td className="card-optional" data-label={t('monthly.committed')}>{formatUsd(plan.committedBudget)}</td>
             <td data-label={t('monthly.totalSpent')}>{formatUsd(plan.totalSpent)}</td>
             <td data-label={t('monthly.remainingBalance')} className={plan.remainingBalance < 0 ? 'over-budget' : undefined}>{formatUsd(plan.remainingBalance)}</td>
             <td data-label={t('review.completedActivities')}>{plan.completedCount}/{plan.activityCount}</td>
-            <td data-label={t('monthly.workDone')}>{plan.workCount ? `${plan.workCompletedCount}/${plan.workCount}` : '—'}</td>
-            <td data-label={t('review.expensesWithoutEvidence')} className={plan.expensesWithoutEvidence ? 'over-budget' : undefined}>
+            <td className="card-optional" data-label={t('monthly.workDone')}>{plan.workCount ? `${plan.workCompletedCount}/${plan.workCount}` : '—'}</td>
+            <td data-label={t('review.expensesWithoutEvidence')} className={plan.expensesWithoutEvidence ? 'card-optional over-budget' : 'card-optional'}>
               {plan.expenseCount - plan.expensesWithoutEvidence}/{plan.expenseCount} {t('review.documented')}
             </td>
-            <td data-label={t('review.missingEvidence')} className={plan.completedWithoutEvidence ? 'over-budget' : undefined}>
+            <td data-label={t('review.missingEvidence')} className={plan.completedWithoutEvidence ? 'card-optional over-budget' : 'card-optional'}>
               {plan.completedCount - plan.completedWithoutEvidence}/{plan.completedCount} {t('review.documented')}
             </td>
             <td data-label={t('table.status')}><span className={`status-badge ${planTone(plan.status)}`}>{t(`monthly.planStatus.${plan.status}`)}</span></td>
@@ -652,13 +654,13 @@ function PlannedActivity({
       </button>
       {open && <div className="table-wrap"><table className="card-table">
         <thead><tr>
-          <th>{t('monthly.dayOfWork')}</th><th>{t('table.activity')}</th><th>{t('field.whoDoesIt')}</th>
+          <th>{t('table.activity')}</th><th>{t('monthly.dayOfWork')}</th><th>{t('field.whoDoesIt')}</th>
           <th>{t('monthly.approvedAllocation')}</th><th>{t('monthly.totalSpent')}</th>
           <th>{t('table.status')}</th><th>{t('evidence.payment')}</th><th>{t('table.actions')}</th>
         </tr></thead>
         <tbody>{item.work.map((day) => <tr key={day.id}>
-          <td data-label={t('monthly.dayOfWork')}><strong>{formatWorkDay(day.scheduledFor, language)}</strong></td>
           <td className="card-title-cell"><strong>{day.activity}</strong><small>{day.description}</small></td>
+          <td data-label={t('monthly.dayOfWork')}><strong>{formatWorkDay(day.scheduledFor, language)}</strong></td>
           <td data-label={t('field.whoDoesIt')}>{day.assignedToName || <span className="muted-cell">{t('table.unassigned')}</span>}</td>
           <td data-label={t('monthly.approvedAllocation')}>{formatUsd(day.approvedBudget)}</td>
           <td data-label={t('monthly.totalSpent')}>{formatUsd(day.spent)}</td>

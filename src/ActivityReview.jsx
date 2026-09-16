@@ -108,7 +108,8 @@ function dateParts(value) {
 export function formatDate(value) {
   const parts = dateParts(value);
   if (!parts) return value ? String(value) : '—';
-  return new Date(parts[0], parts[1] - 1, parts[2]).toLocaleDateString(displayLanguage());
+  return new Date(parts[0], parts[1] - 1, parts[2])
+    .toLocaleDateString(displayLanguage(), { day: 'numeric', month: 'long', year: 'numeric' });
 }
 
 // How the deadline should read on screen: overdue, close, or simply a date.
@@ -296,7 +297,13 @@ export function ActivityReview({
   // The manager carrying the work says which day they are doing it, while the
   // work is live and its month is open.
   const canSetDate = Boolean(onSchedule) && monthOpen && (isDirector || carriesIt)
-    && !['Rejected', 'Cancelled', 'Completed'].includes(activity.status);
+    && !['Rejected', 'Cancelled', 'Completed'].includes(activity.status)
+    // A day of work already has its day: the manager chose it when they assigned
+    // it. Offering the person doing the work a date picker above the job itself
+    // put a second thing on the screen competing with the one that matters, for
+    // a decision that is not theirs. Moving it is a manager's call, and they can
+    // still do it here.
+    && !(activity.parentActivityId && activity.scheduledFor && !isDirector && user.role !== 'manager');
   // A draft is sent on by whoever wrote it, or the Director.
   const canSendDraft = monthOpen && activity.status === 'Draft' && (isDirector || activity.createdBy === user.id);
   // The Director may delete; the author may withdraw a request nobody has
@@ -376,11 +383,11 @@ export function ActivityReview({
       title: sentBack ? t('journey.sentBack') : t('next.underwayTitle'),
       text: sentBack ? (activity.adminNote || t('review.sentBackToYou')) : t('next.underwayText'),
       actions: <>
+        {/* The one that moves the work on, first and filled in. */}
+        {!hasProof && canAttach && <button className="primary-btn" type="button" onClick={() => goToSection('proof')}>{t('next.addProof')}</button>}
+        {hasProof && canSubmitCompletion && <button className="primary-btn" type="button" disabled={busy} onClick={() => onSubmitCompletion(activity)}>{t('action.submitCompleted')}</button>}
         {canRecordExpense && <button className="secondary-btn" type="button" onClick={() => goToSection('money')}>{t('expense.record')}</button>}
-        {canAttach && <button className="secondary-btn" type="button" onClick={() => goToSection('proof')}>{t('next.addProof')}</button>}
-        {canSubmitCompletion && (hasProof
-          ? <button className="primary-btn" type="button" disabled={busy} onClick={() => onSubmitCompletion(activity)}>{t('action.submitCompleted')}</button>
-          : <span className="next-step-note">{t('next.proofFirst')}</span>)}
+        {hasProof && canAttach && <button className="secondary-btn" type="button" onClick={() => goToSection('proof')}>{t('next.addProof')}</button>}
       </>
     };
   } else {
@@ -544,14 +551,19 @@ export function ActivityReview({
         uploaded and listed separately. */}
     <Section id="proof" title={t('section.proof')} count={evidence.length || null}
       defaultOpen={canAttach && ['In Progress', 'Needs Correction'].includes(activity.status)}>
-      <h3 className="form-section-title">{t('evidence.payment')}</h3>
-      <p className="detail-notes muted-cell">{t('evidence.paymentHint')}</p>
+      {/* One uploader, not two. There used to be a form under "Receipts" and an
+          identical one under "Photos of the work", each with its own Take a
+          photo / Choose files / Upload -- six buttons for one job, on a screen
+          that already had nine. What it is for is now a question inside the one
+          form, which is the only thing that actually differed between them. */}
       {canAttach && <EvidenceUpload
-        evidenceType="payment"
         expenses={expenses}
         busy={busy}
         onUpload={(formData) => onUpload(activity, formData)}
       />}
+
+      <h3 className="form-section-title">{t('evidence.payment')}</h3>
+      <p className="detail-notes muted-cell">{t('evidence.paymentHint')}</p>
       <EvidenceList
         activity={activity}
         evidence={paymentEvidence}
@@ -563,12 +575,6 @@ export function ActivityReview({
 
       <h3 className="form-section-title">{t('evidence.activity')}</h3>
       <p className="detail-notes muted-cell">{t('evidence.activityHint')}</p>
-      {canAttach && <EvidenceUpload
-        evidenceType="activity"
-        expenses={[]}
-        busy={busy}
-        onUpload={(formData) => onUpload(activity, formData)}
-      />}
       <EvidenceList
         activity={activity}
         evidence={completionEvidence}
@@ -870,9 +876,13 @@ export function ApprovalPanel({ record, sectorLabel }) {
 // the expense itself carries the amount. A receipt is linked to an expense --
 // the most recent one without a receipt is suggested -- so the month's review
 // can count expenses that have their paperwork.
-function EvidenceUpload({ onUpload, evidenceType = 'payment', expenses = [], busy = false }) {
+function EvidenceUpload({ onUpload, expenses = [], busy = false }) {
   const t = useT();
-  const [kind, setKind] = useState(evidenceType === 'activity' ? 'Photograph' : 'Receipt');
+  // What the file is for. This was the only real difference between the two
+  // forms this replaces, so it is the first question rather than a heading the
+  // reader had to notice they were underneath.
+  const [evidenceType, setEvidenceType] = useState('payment');
+  const [kind, setKind] = useState('Receipt');
   const suggestedId = expenses.find((expense) => !expense.evidenceCount)?.id;
   const [expenseId, setExpenseId] = useState(suggestedId ? String(suggestedId) : '');
   const [note, setNote] = useState('');
@@ -902,9 +912,21 @@ function EvidenceUpload({ onUpload, evidenceType = 'payment', expenses = [], bus
     });
   };
 
+  const chooseType = (next) => {
+    setEvidenceType(next);
+    // The commonest kind for each, so most people never touch the second box.
+    setKind(next === 'activity' ? 'Photograph' : 'Receipt');
+  };
+
   return <form className="decision-form evidence-upload" onSubmit={submit}>
     <FilePicker files={files} onChange={setFiles} disabled={busy} />
     <div className="form-grid">
+      <label className="form-field"><span>{t('evidence.whatIsThisFor')}</span>
+        <select value={evidenceType} onChange={(event) => chooseType(event.target.value)}>
+          <option value="payment">{t('evidence.forMoney')}</option>
+          <option value="activity">{t('evidence.forWork')}</option>
+        </select>
+      </label>
       <label className="form-field"><span>{t('field.evidenceType')}</span>
         <select value={kind} onChange={(event) => setKind(event.target.value)}>{EVIDENCE_KINDS.map((option) => <option key={option} value={option}>{t(`ekind.${option}`)}</option>)}</select>
       </label>
