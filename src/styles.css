@@ -885,3 +885,15 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .plan-next { display: block; margin-top: 16px; }
 .plan-next strong { display: block; color: var(--navy); font-size: .92rem; }
 .plan-next span { display: block; margin-top: 4px; color: var(--ink); font-size: .84rem; line-height: 1.5; }
+
+/* The month as a piece of work: its objective first, then how far along it is,
+   then the day being reported. */
+.plan-objective { margin: 14px 0 0; color: var(--navy); font-size: 1.02rem; font-weight: 700; line-height: 1.5; }
+.plan-progress { margin-top: 14px; }
+.month-work { margin-top: 20px; }
+.month-start { margin-top: 0; }
+.month-finished { margin: 16px 0 0; padding: 12px 14px; color: #1b5e20; background: #e8f5e9; border-radius: 6px; font-size: .88rem; font-weight: 650; }
+.day-form { margin-top: 16px; }
+.day-form h4 { margin: 16px 0 8px; color: var(--navy); font-size: .84rem; }
+.day-proof { display: grid; gap: 10px; }
+.plan-activities { margin-top: 22px; padding-top: 6px; border-top: 1px solid var(--line); }

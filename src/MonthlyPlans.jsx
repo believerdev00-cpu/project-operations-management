@@ -19,10 +19,17 @@ import { FilePicker, activityJourney, formatLocal, journeyLabel, journeyTone, ne
 
 const PAYMENT_METHODS = ['Cash', 'Bank Transfer', 'Mobile Money', 'Cheque', 'Credit', 'Other'];
 const PRIORITIES = ['High', 'Medium', 'Low'];
+const UNIT_SUGGESTIONS = [
+  'hectares', 'acres', 'square metres', 'kilograms', 'tonnes', 'bags', 'litres',
+  'trips', 'chickens', 'animals', 'trees', 'plants', 'people', 'visits', 'days'
+];
 
 // A month starts empty: the Director names the operation and the manager, states
 // the budget they are approving, and says what the month is for.
-const emptyPlan = { operation: '', managerId: '', approvedBudget: '', category: '', objective: '' };
+const emptyPlan = {
+  operation: '', managerId: '', approvedBudget: '', category: '', objective: '',
+  targetQuantity: '', targetUnit: '', expectedOutput: ''
+};
 
 // A day of the manager's work towards a planned activity.
 const emptyWork = {
@@ -237,7 +244,10 @@ export default function MonthlyPlans({
             // manager does afterwards has to fit inside it.
             approvedBudget: newPlan.approvedBudget === '' ? 0 : Number(newPlan.approvedBudget),
             category: newPlan.category === OTHER_CATEGORY ? '' : newPlan.category,
-            objective: newPlan.objective
+            objective: newPlan.objective,
+            targetQuantity: newPlan.targetQuantity === '' ? null : Number(newPlan.targetQuantity),
+            targetUnit: newPlan.targetUnit,
+            expectedOutput: newPlan.expectedOutput
           })
         });
         onMessage(fill(t('msg.planCreated'), { operation: operationName(plan.operation, language), month: monthLabel(month, language) }));
@@ -288,6 +298,62 @@ export default function MonthlyPlans({
     await load();
     onChanged?.();
   }, [openPlanId, loadPlan, load, onChanged]);
+
+  // ---- working the month ---------------------------------------------------
+  //
+  // Everything here answers with the whole month again, so the figures on screen
+  // are the ones the write landed against rather than a guess made here.
+
+  const startMonth = () => run(async () => {
+    try {
+      await fetchJson(`/api/monthly-plans/${openPlanId}/start`, { method: 'POST' });
+      onMessage(t('plan.startedMessage'));
+      await reloadMonth();
+    } catch (startError) { onError(startError.message); }
+  });
+
+  const reportDay = (payload, proof) => run(async () => {
+    try {
+      const saved = await fetchJson(`/api/monthly-plans/${openPlanId}/reports`, {
+        method: 'POST', body: JSON.stringify(payload)
+      });
+      // The day's proof is attached to the day it belongs to, not to the month
+      // in general -- so it is uploaded once the day has an id.
+      for (const file of proof || []) {
+        const data = new FormData();
+        data.append('kind', 'Photograph');
+        data.append('files', file);
+        await upload(`/api/monthly-plans/${openPlanId}/reports/${saved.report.id}/evidence`, data);
+      }
+      setDetail({ ...saved, plan: saved.plan });
+      onMessage(saved.plan.status === 'Completed' ? t('plan.targetReached') : t('plan.daySaved'));
+      await reloadMonth();
+      return true;
+    } catch (dayError) { onError(dayError.message); return false; }
+  });
+
+  const removeDay = (report, reason) => run(async () => {
+    try {
+      await fetchJson(`/api/monthly-plans/${openPlanId}/reports/${report.id}`, {
+        method: 'DELETE', body: JSON.stringify({ reason })
+      });
+      onMessage(t('plan.dayRemoved'));
+      await reloadMonth();
+      return true;
+    } catch (removeError) { onError(removeError.message); return false; }
+  });
+
+  const uploadDayProof = (report, files) => run(async () => {
+    try {
+      const data = new FormData();
+      data.append('kind', 'Photograph');
+      for (const file of files) data.append('files', file);
+      await upload(`/api/monthly-plans/${openPlanId}/reports/${report.id}/evidence`, data);
+      onMessage(t('work.evidenceAdded'));
+      await reloadMonth();
+      return true;
+    } catch (proofError) { onError(proofError.message); return false; }
+  });
 
   const startPlannedWork = (activity) => {
     run(async () => {
@@ -517,9 +583,27 @@ export default function MonthlyPlans({
                 <option key={category} value={category}>{categoryLabel(category, t)}</option>)}
             </select>
           </label>
+          {/* The month itself: what is to be achieved, how much of it, and what
+              it is counted in. This is the work -- not a folder somebody fills
+              with tasks afterwards. */}
           <label className="form-field form-field-wide"><span>{t('monthly.objectives')}</span>
-            <textarea rows="2" placeholder={t('monthly.objectivesPlaceholder')} value={newPlan.objective}
+            <textarea required rows="2" placeholder={t('monthly.objectivesPlaceholder')} value={newPlan.objective}
               onChange={(event) => setNewPlan({ ...newPlan, objective: event.target.value })} />
+          </label>
+          <label className="form-field"><span>{t('plan.target')}</span>
+            <input type="number" inputMode="decimal" min="0" step="0.01" placeholder={t('plan.targetPlaceholder')}
+              value={newPlan.targetQuantity}
+              onChange={(event) => setNewPlan({ ...newPlan, targetQuantity: event.target.value })} />
+          </label>
+          <label className="form-field"><span>{t('plan.targetUnit')}</span>
+            <input list="plan-units" maxLength="40" placeholder={t('plan.targetUnitPlaceholder')}
+              value={newPlan.targetUnit}
+              onChange={(event) => setNewPlan({ ...newPlan, targetUnit: event.target.value })} />
+            <datalist id="plan-units">{UNIT_SUGGESTIONS.map((unit) => <option key={unit} value={unit} />)}</datalist>
+          </label>
+          <label className="form-field form-field-wide"><span>{t('plan.expectedOutput')}</span>
+            <input placeholder={t('plan.expectedOutputPlaceholder')} value={newPlan.expectedOutput}
+              onChange={(event) => setNewPlan({ ...newPlan, expectedOutput: event.target.value })} />
           </label>
         </div>
         <p className="field-hint">{t('monthly.createHint')}</p>
@@ -552,6 +636,10 @@ export default function MonthlyPlans({
         onAddWork={addWork}
         onStartWork={startPlannedWork}
         onOpenActivity={onOpenActivity}
+        onStartMonth={startMonth}
+        onReportDay={reportDay}
+        onRemoveDay={removeDay}
+        onUploadDayProof={uploadDayProof}
         fetchJson={fetchJson}
         upload={upload}
         onOpenFile={onOpenFile}
@@ -587,6 +675,171 @@ function planTone(status) {
   if (status === 'Confirmed') return 'tone-done';
   if (status === 'Closed') return 'tone-stopped';
   return 'tone-waiting';
+}
+
+// The month, opened for work: START WORK, then a day at a time.
+//
+// THE MONTH IS THE WORK. The Director wrote one objective with a target; the
+// manager of that operation starts it and reports each working day against the
+// same record. Nothing is created, assigned or handed over, and nothing here
+// leaves My Month -- the plan becomes the workspace where it already is.
+//
+// The day is the record. What it cost is one of its fields and may be nothing:
+// a day of clearing by hand costs no money and is still a day's work.
+function MonthWorkspace({ plan, reports, t, language, busy, canWork, onStart, onReport, onRemoveReport, onUploadProof, onOpenFile }) {
+  const today = todayLocal();
+  const blank = { date: inMonth(today, plan.month), quantityDone: '', cost: '', notes: '' };
+  const [form, setForm] = useState(blank);
+  const [proof, setProof] = useState([]);
+  const dialog = useDialog();
+
+  const counted = plan.targetQuantity !== null && plan.targetQuantity !== undefined;
+  const started = plan.status === 'In Progress' || plan.status === 'Completed' || reports.length > 0;
+  const open = plan.status !== 'Closed';
+  const finished = plan.status === 'Completed';
+  const typed = Number(form.quantityDone || 0);
+  const overTarget = counted && typed > plan.quantityRemaining;
+  const nothingTyped = !form.quantityDone && !form.cost && !form.notes.trim();
+
+  const submit = async (event) => {
+    event.preventDefault();
+    const saved = await onReport({
+      date: form.date,
+      quantityDone: form.quantityDone === '' ? 0 : Number(form.quantityDone),
+      cost: form.cost === '' ? 0 : Number(form.cost),
+      notes: form.notes
+    }, proof);
+    if (saved) { setForm({ ...blank, date: form.date }); setProof([]); }
+  };
+
+  const remove = async (report) => {
+    const reason = await dialog.prompt({
+      title: t('plan.removeDay'),
+      message: `${formatDate(report.date, language)} · ${report.quantityDone} ${plan.targetUnit}`,
+      label: t('field.reason'),
+      confirmLabel: t('action.remove')
+    });
+    if (reason === null) return;
+    await onRemoveReport(report, reason);
+  };
+
+  return <section className="month-work">
+    {/* Not started: one button, and nothing else to think about. */}
+    {!started && canWork && open && <div className="next-step next-step-action month-start">
+      <div className="next-step-text">
+        <strong>{t('plan.readyTitle')}</strong>
+        <p>{t('plan.readyText')}</p>
+      </div>
+      <div className="next-step-actions">
+        <button type="button" className="primary-btn" disabled={busy} onClick={onStart}>{t('plan.startWork')}</button>
+      </div>
+    </div>}
+
+    {finished && <p className="month-finished">{t('plan.targetReached')}</p>}
+
+    {/* Started: the day's report, at the top, because that is what the manager
+        came here to do. */}
+    {started && canWork && open && !finished && <form className="decision-form day-form" onSubmit={submit}>
+      <h3 className="form-section-title">{t('plan.dailyReport')}</h3>
+      <p className="field-hint">{t('plan.dailyReportHint')}</p>
+      <div className="form-grid">
+        <label className="form-field"><span>{t('plan.dayDate')}</span>
+          <input required type="date" value={form.date}
+            min={`${plan.month}-01`} max={monthEnd(plan.month)}
+            onChange={(event) => setForm({ ...form, date: event.target.value })} />
+        </label>
+        {counted && <label className="form-field"><span>{fill(t('plan.doneToday'), { unit: plan.targetUnit })}</span>
+          <input type="number" inputMode="decimal" min="0" step="0.01" placeholder="0"
+            value={form.quantityDone}
+            onChange={(event) => setForm({ ...form, quantityDone: event.target.value })} />
+          <small className="field-hint">{fill(t('plan.leftToDo'), { amount: plan.quantityRemaining, unit: plan.targetUnit })}</small>
+        </label>}
+        <label className="form-field"><span>{t('plan.costToday')}</span>
+          <input type="number" inputMode="decimal" min="0" step="0.01" placeholder="0"
+            value={form.cost}
+            onChange={(event) => setForm({ ...form, cost: event.target.value })} />
+          {/* Said plainly, because the whole point is that a working day need
+              not cost anything and people expect a form to demand a figure. */}
+          <small className="field-hint">{t('plan.costOptional')}</small>
+        </label>
+        <label className="form-field form-field-wide"><span>{t('plan.dayNotes')}</span>
+          <textarea rows="2" placeholder={t('plan.dayNotesHint')} value={form.notes}
+            onChange={(event) => setForm({ ...form, notes: event.target.value })} />
+        </label>
+      </div>
+      <h4 className="form-section-title">{t('plan.dayProof')}</h4>
+      <FilePicker files={proof} onChange={setProof} disabled={busy} />
+      <div className="form-submit-bar">
+        {overTarget && <p className="form-missing">{fill(t('plan.overTarget'), { amount: plan.quantityRemaining, unit: plan.targetUnit })}</p>}
+        <button className="primary-btn" type="submit" disabled={busy || nothingTyped || overTarget}>
+          {t('plan.saveDay')}
+        </button>
+      </div>
+    </form>}
+
+    {/* Everything reported so far. */}
+    <h3 className="form-section-title">{t('plan.workHistory')}</h3>
+    {reports.length ? <>
+      <div className="table-wrap"><table className="card-table">
+        <thead><tr>
+          <th>{t('plan.dayDate')}</th>
+          {counted && <th>{t('plan.workDone')}</th>}
+          <th>{t('plan.costToday')}</th>
+          <th>{t('plan.dayNotes')}</th>
+          <th>{t('plan.dayProof')}</th>
+          <th>{t('table.actions')}</th>
+        </tr></thead>
+        <tbody>{reports.map((report) => <tr key={report.id}>
+          <td className="card-title-cell"><strong>{formatDate(report.date, language)}</strong>
+            <small>{report.submittedByName}</small></td>
+          {counted && <td data-label={t('plan.workDone')}><strong>{report.quantityDone} {plan.targetUnit}</strong></td>}
+          <td data-label={t('plan.costToday')}>{report.cost ? formatUsd(report.cost) : <span className="muted-cell">{t('plan.noCost')}</span>}</td>
+          <td data-label={t('plan.dayNotes')}>{report.notes || <span className="muted-cell">&mdash;</span>}</td>
+          <td data-label={t('plan.dayProof')}>{report.evidence?.length
+            ? report.evidence.map((file) => <button key={file.id} type="button" className="text-btn"
+              onClick={() => onOpenFile(file.path)}>{file.originalName}</button>)
+            : <span className="muted-cell">&mdash;</span>}</td>
+          <td className="card-actions">
+            {canWork && open && !finished && <UploadDayProof report={report} busy={busy} t={t} onUpload={onUploadProof} />}
+            {onRemoveReport && open && <button type="button" className="text-btn" disabled={busy}
+              onClick={() => remove(report)}>{t('action.remove')}</button>}
+          </td>
+        </tr>)}</tbody>
+      </table></div>
+      <div className="totals-line">
+        {counted && <span>{t('plan.completed')}: <strong>{plan.quantityDone} {plan.targetUnit}</strong></span>}
+        <span>{t('monthly.totalSpent')}: <strong>{formatUsd(plan.reportedCost)}</strong></span>
+        <span>{t('plan.daysWorked')}: <strong>{plan.daysWorked}</strong></span>
+        {counted && <span>{t('plan.remainingWork')}: <strong>{plan.quantityRemaining} {plan.targetUnit}</strong></span>}
+      </div>
+    </> : <div className="empty-state">
+      <strong>{t('plan.noDaysYet')}</strong>
+      <span>{canWork ? t('plan.noDaysYetHint') : t('plan.noDaysYetAdmin')}</span>
+    </div>}
+  </section>;
+}
+
+// Adding proof to a day already reported, without leaving the table.
+function UploadDayProof({ report, busy, t, onUpload }) {
+  const [open, setOpen] = useState(false);
+  const [files, setFiles] = useState([]);
+  if (!open) {
+    return <button type="button" className="text-btn" onClick={() => setOpen(true)}>{t('plan.addProof')}</button>;
+  }
+  return <form className="day-proof" onSubmit={async (event) => {
+    event.preventDefault();
+    const saved = await onUpload(report, files);
+    if (saved) { setFiles([]); setOpen(false); }
+  }}>
+    <FilePicker files={files} onChange={setFiles} disabled={busy} />
+    <button className="secondary-btn compact" type="submit" disabled={busy || !files.length}>{t('action.uploadEvidence')}</button>
+  </form>;
+}
+
+// A date inside the plan's month: today when the month is the current one, and
+// its first day otherwise, so the picker never opens on an invalid day.
+function inMonth(date, month) {
+  return String(date).slice(0, 7) === month ? date : `${month}-01`;
 }
 
 // The workspace: the Director's own planned activity, opened for work.
@@ -1023,6 +1276,7 @@ function PlannedActivity({
 function PlanDetail({
   detail, user, isDirector, language, t, busy, managers = [], people = [], rate = null, activityForm, setActivityForm,
   workForms = {}, setWorkForms, onAddWork, onStartWork, onOpenActivity,
+  onStartMonth, onReportDay, onRemoveDay, onUploadDayProof,
   fetchJson, upload, onOpenFile, onReload, onError, onMessage,
   onAddActivity, onConfirm, onReopen, onSubmitReport, onDecideReport, onClose, onAttach, onUpdatePlan, offPlanActivities = []
 }) {
@@ -1035,21 +1289,30 @@ function PlanDetail({
     notes: source.notes || '',
     category: source.category || '',
     objective: source.objective || '',
-    approvedBudget: String(source.approvedBudget ?? '')
+    approvedBudget: String(source.approvedBudget ?? ''),
+    targetQuantity: source.targetQuantity === null || source.targetQuantity === undefined ? '' : String(source.targetQuantity),
+    targetUnit: source.targetUnit || '',
+    expectedOutput: source.expectedOutput || ''
   });
   const [settings, setSettings] = useState(() => planSettings(plan));
 
   // Re-read after a save, so the form shows what was actually stored.
   useEffect(() => {
     setSettings(planSettings(plan));
-  }, [plan.managerId, plan.notes, plan.category, plan.objective, plan.approvedBudget]);
+  }, [plan.managerId, plan.notes, plan.category, plan.objective, plan.approvedBudget,
+    plan.targetQuantity, plan.targetUnit, plan.expectedOutput]);
 
   const isPlanManager = !isDirector && plan.managerId === user.id;
   const open = plan.status !== 'Closed';
   // The manager the month was given to assigns its work, once the Director has
   // confirmed the plan and the budget it runs on. The Director can do it too --
   // covering for a manager is part of running the month.
-  const canAssignWork = open && plan.status === 'Confirmed' && (isDirector || isPlanManager);
+  const canAssignWork = open && ['Confirmed', 'In Progress'].includes(plan.status) && (isDirector || isPlanManager);
+  // The month belongs to the business operation, and the manager of that
+  // operation works it. Naming somebody on the plan narrows it to them; leaving
+  // it blank leaves it to whoever runs the operation. Mirrors canWorkPlan.
+  const canWorkMonth = isDirector
+    || (user.role === 'manager' && (plan.managerId === null || Number(plan.managerId) === Number(user.id)));
   // Who a day's work can be handed to: this operation's managers and its team
   // members. Somebody covering every operation belongs in every list. Falling
   // back to the managers list keeps the form usable if /api/people failed.
@@ -1069,6 +1332,13 @@ function PlanDetail({
   if (settings.approvedBudget !== String(plan.approvedBudget ?? '')) {
     settingsChanges.approvedBudget = settings.approvedBudget === '' ? 0 : Number(settings.approvedBudget);
   }
+  const plannedTarget = plan.targetQuantity === null || plan.targetQuantity === undefined ? '' : String(plan.targetQuantity);
+  if (settings.targetQuantity !== plannedTarget) {
+    settingsChanges.targetQuantity = settings.targetQuantity === '' ? null : Number(settings.targetQuantity);
+    settingsChanges.targetUnit = settings.targetUnit;
+  }
+  if (settings.targetUnit !== (plan.targetUnit || '')) settingsChanges.targetUnit = settings.targetUnit;
+  if (settings.expectedOutput.trim() !== (plan.expectedOutput || '')) settingsChanges.expectedOutput = settings.expectedOutput.trim();
   const hasSettingsChanges = Object.keys(settingsChanges).length > 0;
 
   return <section className="panel detail-panel">
@@ -1089,8 +1359,20 @@ function PlanDetail({
         actually gone; and what is left of each is the number somebody is about to
         act on. Showing only three of them was why nobody could tell whether there
         was room for more work. */}
+    {/* What the month is, before any figure about it: the objective the Director
+        wrote, which is the work itself and not a heading over a list of tasks. */}
+    {plan.objectiveText && <p className="plan-objective">{plan.objectiveText}</p>}
+    {plan.expectedOutput && <p className="detail-notes"><strong>{t('plan.expectedOutput')}:</strong> {plan.expectedOutput}</p>}
+
     <div className="detail-facts">
       <Fact label={t('table.status')} value={<span className={`status-badge ${planTone(plan.status)}`}>{t(`monthly.planStatus.${plan.status}`)}</span>} />
+      {plan.targetQuantity !== null && <>
+        <Fact label={t('plan.target')} value={`${plan.targetQuantity} ${plan.targetUnit}`} />
+        <Fact label={t('plan.completed')} value={`${plan.quantityDone} ${plan.targetUnit}`} />
+        <Fact label={t('plan.remainingWork')} value={`${plan.quantityRemaining} ${plan.targetUnit}`} />
+        <Fact label={t('plan.progress')} value={`${plan.progressPercent}%`} />
+      </>}
+      <Fact label={t('plan.daysWorked')} value={plan.daysWorked || 0} />
       <Fact label={t('monthly.approvedAllocation')} value={formatUsd(plan.approvedBudget)} />
       <Fact label={t('monthly.committed')}
         value={<>{formatUsd(plan.committedBudget)}
@@ -1115,10 +1397,37 @@ function PlanDetail({
       <strong>{t('monthly.nextConfirm')}</strong>
       <span>{t('monthly.nextConfirmText')}</span>
     </p>}
+    {plan.targetQuantity !== null && <div className="planned-progress plan-progress">
+      <div className="planned-progress-bar"><span style={{ width: `${plan.progressPercent}%` }} /></div>
+      <small>{fill(t('plan.doneOfTarget'), {
+        done: plan.quantityDone, target: plan.targetQuantity, unit: plan.targetUnit, percent: plan.progressPercent
+      })}</small>
+    </div>}
     {plan.category && <p className="detail-notes"><strong>{t('monthly.businessCategory')}:</strong> {categoryLabel(plan.category, t)}</p>}
     {plan.objective && <p className="detail-notes"><strong>{t('monthly.objectives')}:</strong> {plan.objective}</p>}
     {plan.notes && <p className="detail-notes">{plan.notes}</p>}
 
+    {/* The month, opened for work. This is the main thing on the page now: the
+        manager starts it here and reports each day here, without leaving. */}
+    <MonthWorkspace
+      plan={plan}
+      reports={detail.dailyReports || []}
+      t={t}
+      language={language}
+      busy={busy}
+      canWork={canWorkMonth}
+      onStart={onStartMonth}
+      onReport={onReportDay}
+      onRemoveReport={isDirector ? onRemoveDay : null}
+      onUploadProof={onUploadDayProof}
+      onOpenFile={onOpenFile}
+    />
+
+    {/* Activities are optional extra structure for a month that needs it -- the
+        Director breaking a large month into named pieces. Most months are one
+        objective and a run of daily reports, so this is folded away. */}
+    {(visible.length > 0 || isDirector) && <details className="form-more plan-activities">
+      <summary>{fill(t('plan.activitiesToggle'), { count: visible.length })}</summary>
     {/* What the Director set for the month, and under each one the days of work
         the manager assigned to finish it. The two levels used to be one flat
         table, which is why a planned activity looked untouched however much work
@@ -1151,6 +1460,8 @@ function PlanDetail({
       <span>{isDirector ? t('monthly.noActivitiesHint')
         : plan.status === 'Draft' ? t('work.monthStillDraft') : t('work.nonePlannedForYouHint')}</span>
     </div>}
+    </details>}
+
     {activities.length > 0 && <>
       <div className="totals-line">
         <span>{t('monthly.totalApprovedBudget')}: <strong>{formatUsd(plan.approvedBudget)}</strong></span>
@@ -1211,6 +1522,19 @@ function PlanDetail({
         </label>
         <label className="form-field form-field-wide"><span>{t('monthly.objectives')}</span>
           <textarea rows="2" value={settings.objective} onChange={(event) => setSettings({ ...settings, objective: event.target.value })} />
+        </label>
+        <label className="form-field"><span>{t('plan.target')}</span>
+          <input type="number" inputMode="decimal" min="0" step="0.01" value={settings.targetQuantity}
+            onChange={(event) => setSettings({ ...settings, targetQuantity: event.target.value })} />
+        </label>
+        <label className="form-field"><span>{t('plan.targetUnit')}</span>
+          <input list="plan-units-edit" maxLength="40" value={settings.targetUnit}
+            onChange={(event) => setSettings({ ...settings, targetUnit: event.target.value })} />
+          <datalist id="plan-units-edit">{UNIT_SUGGESTIONS.map((unit) => <option key={unit} value={unit} />)}</datalist>
+        </label>
+        <label className="form-field form-field-wide"><span>{t('plan.expectedOutput')}</span>
+          <input value={settings.expectedOutput}
+            onChange={(event) => setSettings({ ...settings, expectedOutput: event.target.value })} />
         </label>
         <label className="form-field form-field-wide"><span>{t('field.notes')}</span>
           <textarea rows="2" value={settings.notes} onChange={(event) => setSettings({ ...settings, notes: event.target.value })} />
