@@ -26,7 +26,23 @@
 // record what was approved, what was spent, the evidence for it, and what is
 // left -- for accountability, not for payment.
 
-export const PLAN_STATUSES = ['Draft', 'Confirmed', 'Closed'];
+// The life of a month, as the people using it describe it:
+//
+//   Draft        the Director is still writing it. Nobody can work it yet.
+//   Confirmed    the budget is approved and the month is the manager's to do.
+//                This is "PLANNED" on their screen: ready, not started.
+//   In Progress  the manager has started, and is reporting each day against it.
+//   Completed    the target has been reached.
+//   Closed       the month is signed off and read-only.
+//
+// In Progress and Completed are new. They sit between Confirmed and Closed, so
+// everything that asked "is this month open?" (anything but Closed) or "is it
+// still a draft?" keeps its meaning.
+export const PLAN_STATUSES = ['Draft', 'Confirmed', 'In Progress', 'Completed', 'Closed'];
+
+// A month is being worked once the manager has started it, and stays workable
+// until it is closed.
+export const PLAN_WORKABLE_STATUSES = ['Confirmed', 'In Progress'];
 export const PLAN_PRIORITIES = ['Low', 'Medium', 'High'];
 export const REPORT_STATUSES = ['Submitted', 'Accepted', 'Returned'];
 
@@ -75,6 +91,73 @@ const statements = [
   // one. Optional: with a single project per operation the activities already
   // resolve it, and an existing plan must not be forced to name one.
   `ALTER TABLE monthly_plans ADD COLUMN IF NOT EXISTS project_id VARCHAR(50) REFERENCES projects(id) ON DELETE SET NULL`,
+
+  // ---- what the month is actually meant to achieve -------------------------
+  //
+  // THE MONTH IS THE WORK. A plan is not a folder of tasks somebody hands out:
+  // it is one measurable objective for one business operation -- "prepare 1
+  // hectare and plant potatoes", "vaccinate 500 chickens", "50 transport trips"
+  // -- and the manager of that operation works towards it and reports each day.
+  //
+  // The target is a quantity and the unit it is counted in, so the same plan
+  // shape serves hectares, chickens, square metres and trips without the system
+  // knowing anything about farming or haulage. NULL means the month has no
+  // countable target, and progress is then the manager's own judgement.
+  `ALTER TABLE monthly_plans ADD COLUMN IF NOT EXISTS target_quantity NUMERIC(14,2)`,
+  `ALTER TABLE monthly_plans DROP CONSTRAINT IF EXISTS monthly_plans_target_check`,
+  `ALTER TABLE monthly_plans ADD CONSTRAINT monthly_plans_target_check
+     CHECK (target_quantity IS NULL OR target_quantity > 0)`,
+  `ALTER TABLE monthly_plans ADD COLUMN IF NOT EXISTS target_unit VARCHAR(40) NOT NULL DEFAULT ''`,
+  `ALTER TABLE monthly_plans ADD COLUMN IF NOT EXISTS expected_output TEXT NOT NULL DEFAULT ''`,
+  `ALTER TABLE monthly_plans ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ`,
+  `ALTER TABLE monthly_plans ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ`,
+
+  // ---- the manager's day, reported against the month ------------------------
+  //
+  // One row per working day. This is the manager's main record and the source of
+  // truth for how far the month has got: progress is the sum of quantity_done
+  // against the plan's target, never a figure anybody types.
+  //
+  // WHY COST LIVES HERE: a working day may cost nothing. Making the spend the
+  // record of the work meant a day with no money in it could not be reported at
+  // all, and "$0" read as "nothing happened". The work and the money are two
+  // fields of one report, and cost defaults to zero.
+  `CREATE TABLE IF NOT EXISTS plan_daily_reports (
+     id SERIAL PRIMARY KEY,
+     plan_id INTEGER NOT NULL REFERENCES monthly_plans(id) ON DELETE CASCADE,
+     report_date DATE NOT NULL,
+     quantity_done NUMERIC(14,2) NOT NULL DEFAULT 0,
+     cost NUMERIC(18,2) NOT NULL DEFAULT 0,
+     notes TEXT NOT NULL DEFAULT '',
+     submitted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+     submitted_by_name VARCHAR(150) NOT NULL DEFAULT '',
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   )`,
+  `ALTER TABLE plan_daily_reports DROP CONSTRAINT IF EXISTS plan_daily_reports_amounts_check`,
+  `ALTER TABLE plan_daily_reports ADD CONSTRAINT plan_daily_reports_amounts_check
+     CHECK (quantity_done >= 0 AND cost >= 0)`,
+  `CREATE INDEX IF NOT EXISTS plan_daily_reports_plan_idx ON plan_daily_reports(plan_id, report_date DESC)`,
+
+  // Proof of a particular day's work. Kept apart from activity_evidence because
+  // that table's rows belong to an activity and are served through the activity
+  // permission checks; these belong to a day of a month and are served through
+  // the month's. Both go through server/lib/storage.js, so the files themselves
+  // are handled in exactly one place.
+  `CREATE TABLE IF NOT EXISTS plan_report_evidence (
+     id SERIAL PRIMARY KEY,
+     report_id INTEGER NOT NULL REFERENCES plan_daily_reports(id) ON DELETE CASCADE,
+     kind VARCHAR(50) NOT NULL DEFAULT 'Photograph',
+     original_name VARCHAR(255) NOT NULL,
+     stored_name VARCHAR(255) NOT NULL,
+     mime_type VARCHAR(120) NOT NULL,
+     size_bytes INTEGER NOT NULL DEFAULT 0,
+     note TEXT NOT NULL DEFAULT '',
+     uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+     uploaded_by_name VARCHAR(150) NOT NULL DEFAULT '',
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   )`,
+  `CREATE INDEX IF NOT EXISTS plan_report_evidence_report_idx ON plan_report_evidence(report_id)`,
   `ALTER TABLE monthly_plans DROP CONSTRAINT IF EXISTS monthly_plans_status_check`,
   `ALTER TABLE monthly_plans ADD CONSTRAINT monthly_plans_status_check
      CHECK (status IN (${PLAN_STATUSES.map((status) => `'${status}'`).join(', ')}))`,

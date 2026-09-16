@@ -29,7 +29,8 @@ const SUITES = [
   ['approval workflow', 'approval-workflow.test.mjs', { needsApi: true }],
   ['workflow fixes', 'workflow-fixes.test.mjs', { needsApi: true }],
   ['partner access', 'partner-access.test.mjs', { needsApi: true }],
-  ['monthly workflow', 'monthly-workflow.test.mjs', { needsApi: true }]
+  ['monthly workflow', 'monthly-workflow.test.mjs', { needsApi: true }],
+  ['monthly target', 'monthly-target.test.mjs', { needsApi: true }]
 ];
 
 const only = process.argv[2];

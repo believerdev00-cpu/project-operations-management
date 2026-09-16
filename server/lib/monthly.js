@@ -75,6 +75,24 @@ export function isPlanManager(user, plan) {
   return !isAdmin(user) && plan.manager_id !== null && Number(plan.manager_id) === Number(user.id);
 }
 
+// Who may work this month and report against it.
+//
+// The month belongs to a business operation, and the manager of that operation
+// is responsible for it -- that relationship already exists on the account and
+// is what decides whose portal the plan appears in, so it decides who may work
+// it too. Naming a manager on the plan narrows it to that person; leaving it
+// blank leaves the month to whoever manages the operation, which is the normal
+// case and no longer means "nobody can touch it".
+//
+// The Director may report on a manager's behalf: covering for somebody is part
+// of running the operations, and every row records who submitted it.
+export function canWorkPlan(user, plan) {
+  if (isAdmin(user)) return true;
+  if (user.role !== 'manager') return false;
+  if (!canReadPlan(user, plan)) return false;
+  return plan.manager_id === null || Number(plan.manager_id) === Number(user.id);
+}
+
 // Recording a spend is the manager's act on their own assigned work. The
 // Director may record one too -- correcting a manager's books is part of the
 // review -- but nobody else may, whatever the browser drew.
