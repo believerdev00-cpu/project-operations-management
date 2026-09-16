@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BUSINESS_OPERATIONS, operationName } from '../shared/businessOperations.js';
+import { OTHER_CATEGORY, categoriesForOperation } from '../shared/categories.js';
 import { fill, useI18n } from './i18n.js';
 import { categoryLabel, trailActionLabel } from './ActivityReview.jsx';
 import { DetailView, useBusy, useDialog } from './ui.jsx';
@@ -19,10 +20,29 @@ import { FilePicker, activityJourney, formatLocal, journeyLabel, journeyTone } f
 const PAYMENT_METHODS = ['Cash', 'Bank Transfer', 'Mobile Money', 'Cheque', 'Credit', 'Other'];
 const PRIORITIES = ['High', 'Medium', 'Low'];
 
+// A month starts empty: the Director names the operation and the manager, states
+// the budget they are approving, and says what the month is for.
+const emptyPlan = { operation: '', managerId: '', approvedBudget: '', category: '', objective: '' };
+
+// A day of the manager's work towards a planned activity.
+const emptyWork = {
+  activity: '', description: '', scheduledFor: '', assignedTo: '', budget: '',
+  evidenceRequired: true, notes: ''
+};
+
 export function formatUsd(value) {
   const amount = Number(value || 0);
   const digits = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Math.abs(amount));
   return `${amount < 0 ? '-' : ''}$${digits}`;
+}
+
+function monthEnd(month) {
+  const [year, index] = String(month || '').split('-').map(Number);
+  if (!year || !index) return undefined;
+  // Day 0 of the next month is the last day of this one, and passing month index
+  // 12 to the constructor rolls into January correctly.
+  const last = new Date(year, index, 0).getDate();
+  return `${month}-${String(last).padStart(2, '0')}`;
 }
 
 function formatDate(value, language) {
@@ -30,6 +50,17 @@ function formatDate(value, language) {
   const [year, month, day] = String(value).slice(0, 10).split('-').map(Number);
   if (!year || !month || !day) return '—';
   return new Date(year, month - 1, day).toLocaleDateString(language);
+}
+
+// The day a person has to turn up and do the work, written so it cannot be read
+// as another day: "Sun 5 Apr" rather than 4/5/2098, which is April 5th in one
+// country and May 4th in the next. The month is on the heading above it, so the
+// year is left off.
+function formatWorkDay(value, language) {
+  if (!value) return '—';
+  const [year, month, day] = String(value).slice(0, 10).split('-').map(Number);
+  if (!year || !month || !day) return '—';
+  return new Date(year, month - 1, day).toLocaleDateString(language, { weekday: 'short', day: 'numeric', month: 'short' });
 }
 
 function thisMonth() {
@@ -56,7 +87,7 @@ const emptyActivity = {
 };
 
 export default function MonthlyPlans({
-  user, fetchJson, managers, rate = null,
+  user, fetchJson, managers, people = [], rate = null,
   planId = null, onOpenPlan, onClosePlan, onChanged, onMessage, onError
 }) {
   const { language, t } = useI18n();
@@ -71,8 +102,11 @@ export default function MonthlyPlans({
   // Approved work in the plan's operation that no month has taken in yet --
   // asked of the server, not picked out of the newest page of the register.
   const [offPlan, setOffPlan] = useState([]);
-  const [newPlan, setNewPlan] = useState({ operation: '', managerId: '' });
+  const [newPlan, setNewPlan] = useState(emptyPlan);
   const [activityForm, setActivityForm] = useState(emptyActivity);
+  // The day-by-day work the manager is assigning, keyed by the planned activity
+  // it belongs to -- so two forms open at once cannot write into each other.
+  const [workForms, setWorkForms] = useState({});
   // Each load is numbered, and only the newest may write. Stepping through the
   // month picker fires a request per month, and an older one answering last
   // used to put last month's figures under this month's heading.
@@ -197,14 +231,49 @@ export default function MonthlyPlans({
       try {
         const plan = await fetchJson('/api/monthly-plans', {
           method: 'POST',
-          body: JSON.stringify({ operation: chosenOperation, month, managerId: newPlan.managerId || null })
+          body: JSON.stringify({
+            operation: chosenOperation, month, managerId: newPlan.managerId || null,
+            // The budget the Director approves for the month. Everything the
+            // manager does afterwards has to fit inside it.
+            approvedBudget: newPlan.approvedBudget === '' ? 0 : Number(newPlan.approvedBudget),
+            category: newPlan.category === OTHER_CATEGORY ? '' : newPlan.category,
+            objective: newPlan.objective
+          })
         });
         onMessage(fill(t('msg.planCreated'), { operation: operationName(plan.operation, language), month: monthLabel(month, language) }));
-        setNewPlan({ operation: '', managerId: '' });
+        setNewPlan(emptyPlan);
         await load();
         onChanged?.();
         onOpenPlan?.(plan.id);
       } catch (createError) { onError(createError.message); }
+    });
+  };
+
+  // The manager assigns a day of work towards a planned activity. The server
+  // holds it to the planned activity's remaining budget and to the plan's own
+  // month, and answers with the whole month again -- so the figures on screen are
+  // the ones the write landed against rather than a guess made here.
+  const addWork = (activity, form) => {
+    run(async () => {
+      try {
+        const result = await fetchJson(`/api/monthly-plans/${openPlanId}/activities/${encodeURIComponent(activity.id)}/work`, {
+          method: 'POST',
+          body: JSON.stringify({
+            activity: form.activity,
+            description: form.description,
+            scheduledFor: form.scheduledFor,
+            assignedTo: form.assignedTo || null,
+            budget: form.budget === '' ? 0 : Number(form.budget),
+            evidenceRequired: form.evidenceRequired,
+            notes: form.notes
+          })
+        });
+        setWorkForms((current) => ({ ...current, [activity.id]: emptyWork }));
+        setDetail({ plan: result.plan, activities: result.activities, history: result.history, report: result.report });
+        onMessage(fill(t('msg.workAssigned'), { activity: activity.activity }));
+        await load();
+        onChanged?.();
+      } catch (workError) { onError(workError.message); }
     });
   };
 
@@ -227,7 +296,7 @@ export default function MonthlyPlans({
   const confirmPlan = (plan) => run(async () => {
     const confirmed = await dialog.confirm({
       title: t('monthly.confirmPlan'),
-      message: `${t('monthly.confirmHint')} ${t('monthly.totalToGive')}: ${formatUsd(plan.plannedBudget)}`,
+      message: `${t('monthly.confirmHint')} ${t('monthly.totalToGive')}: ${formatUsd(plan.approvedBudget)}`,
       confirmLabel: t('monthly.confirmPlan')
     });
     if (!confirmed) return;
@@ -341,12 +410,13 @@ export default function MonthlyPlans({
     <p className="partner-notice">{t('monthly.noMoneyNotice')}</p>
 
     {isDirector && <>
-      <div className="metric-grid metric-grid-5">
+      <div className="metric-grid metric-grid-6">
         <Metric label={t('monthly.approvedAllocation')} value={formatUsd(review.totals.approvedBudget)} />
+        <Metric label={t('monthly.committed')} value={formatUsd(review.totals.committedBudget)} />
         <Metric label={t('monthly.totalSpent')} value={formatUsd(review.totals.totalSpent)} />
         <Metric label={t('monthly.remainingBalance')} value={formatUsd(review.totals.remainingBalance)} />
         <Metric label={t('review.completedActivities')} value={`${review.totals.completed}/${review.totals.activities}`} />
-        <Metric label={t('review.expensesWithoutEvidence')} value={review.totals.expensesWithoutEvidence} />
+        <Metric label={t('monthly.workDone')} value={review.totals.work ? `${review.totals.workCompleted}/${review.totals.work}` : '—'} />
       </div>
 
       {/* Section 9: every business operation for the month, side by side. */}
@@ -358,19 +428,21 @@ export default function MonthlyPlans({
         {review.operations.length ? <div className="table-wrap"><table className="card-table">
           <thead><tr>
             <th>{t('app.businessOperation')}</th><th>{t('field.manager')}</th>
-            <th>{t('monthly.approvedAllocation')}</th><th>{t('monthly.totalSpent')}</th>
+            <th>{t('monthly.approvedAllocation')}</th><th>{t('monthly.committed')}</th>
+            <th>{t('monthly.totalSpent')}</th>
             <th>{t('monthly.remainingBalance')}</th><th>{t('review.completedActivities')}</th>
-            <th>{t('review.pendingActivities')}</th><th>{t('review.expensesWithoutEvidence')}</th>
+            <th>{t('monthly.workDone')}</th><th>{t('review.expensesWithoutEvidence')}</th>
             <th>{t('review.missingEvidence')}</th><th>{t('table.status')}</th><th>{t('table.actions')}</th>
           </tr></thead>
           <tbody>{review.operations.map((plan) => <tr key={plan.id} className={plan.id === openPlanId ? 'row-selected' : undefined}>
             <td className="card-title-cell"><strong>{operationName(plan.operation, language)}</strong></td>
             <td data-label={t('field.manager')}>{plan.managerName || <span className="muted-cell">{t('table.unassigned')}</span>}</td>
             <td data-label={t('monthly.approvedAllocation')}>{formatUsd(plan.approvedBudget)}</td>
+            <td data-label={t('monthly.committed')}>{formatUsd(plan.committedBudget)}</td>
             <td data-label={t('monthly.totalSpent')}>{formatUsd(plan.totalSpent)}</td>
             <td data-label={t('monthly.remainingBalance')} className={plan.remainingBalance < 0 ? 'over-budget' : undefined}>{formatUsd(plan.remainingBalance)}</td>
             <td data-label={t('review.completedActivities')}>{plan.completedCount}/{plan.activityCount}</td>
-            <td data-label={t('review.pendingActivities')}>{plan.outstandingCount}</td>
+            <td data-label={t('monthly.workDone')}>{plan.workCount ? `${plan.workCompletedCount}/${plan.workCount}` : '—'}</td>
             <td data-label={t('review.expensesWithoutEvidence')} className={plan.expensesWithoutEvidence ? 'over-budget' : undefined}>
               {plan.expenseCount - plan.expensesWithoutEvidence}/{plan.expenseCount} {t('review.documented')}
             </td>
@@ -397,10 +469,33 @@ export default function MonthlyPlans({
             </select>
           </label>
           <label className="form-field"><span>{t('monthly.responsibleManager')}</span>
-            <select required value={newPlan.managerId} onChange={(event) => setNewPlan({ operation: chosenOperation, managerId: event.target.value })}>
+            <select required value={newPlan.managerId} onChange={(event) => setNewPlan({ ...newPlan, operation: chosenOperation, managerId: event.target.value })}>
               <option value="">{t('form.selectManager')}</option>
               {managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}
             </select>
+          </label>
+          {/* The figure the Director approves for the month. It used to be
+              worked out from the activities when the plan was confirmed, so
+              nobody ever stated one and the month had no limit. */}
+          <label className="form-field"><span>{t('monthly.budgetYouApprove')}</span>
+            <input required type="number" inputMode="decimal" min="0" step="0.01" placeholder={t('monthly.budgetPlaceholder')}
+              value={newPlan.approvedBudget}
+              onChange={(event) => setNewPlan({ ...newPlan, approvedBudget: event.target.value })} />
+            {Number(newPlan.approvedBudget) > 0 && rate && <small className="field-hint">
+              {t('money.todayRate')}: {formatLocal(Number(newPlan.approvedBudget) * rate.rwfPerUsd, 'RWF')}
+              {' · '}{formatLocal(Number(newPlan.approvedBudget) * rate.cdfPerUsd, 'CDF')}
+            </small>}
+          </label>
+          <label className="form-field"><span>{t('monthly.businessCategory')}</span>
+            <select value={newPlan.category} onChange={(event) => setNewPlan({ ...newPlan, category: event.target.value })}>
+              <option value="">{t('form.selectCategory')}</option>
+              {categoriesForOperation(chosenOperation).map((category) =>
+                <option key={category} value={category}>{categoryLabel(category, t)}</option>)}
+            </select>
+          </label>
+          <label className="form-field form-field-wide"><span>{t('monthly.objectives')}</span>
+            <textarea rows="2" placeholder={t('monthly.objectivesPlaceholder')} value={newPlan.objective}
+              onChange={(event) => setNewPlan({ ...newPlan, objective: event.target.value })} />
           </label>
         </div>
         {!managerOptions.length && <p className="decision-hint">{t('form.noManagerCovers')}</p>}
@@ -423,9 +518,13 @@ export default function MonthlyPlans({
         t={t}
         busy={busy}
         managers={managers}
+        people={people}
         rate={rate}
         activityForm={activityForm}
         setActivityForm={setActivityForm}
+        workForms={workForms}
+        setWorkForms={setWorkForms}
+        onAddWork={addWork}
         onAddActivity={addActivity}
         onConfirm={confirmPlan}
         onReopen={reopenPlan}
@@ -457,27 +556,174 @@ function planTone(status) {
   return 'tone-waiting';
 }
 
+// One planned activity, with the days of work underneath it.
+//
+// This is the screen the whole two-level model exists for. The Director wrote the
+// planned activity and its budget; the manager breaks it into the days that will
+// finish it; and both of them read the same block -- what was promised, what has
+// been given out to the days, what has been spent, and how many of those days are
+// done. The Director watching the month is watching this.
+function PlannedActivity({ item, plan, t, language, busy, people, canAssignWork, form, setForm, onAddWork }) {
+  const [open, setOpen] = useState(false);
+  const journey = activityJourney(item);
+  const dead = ['Rejected', 'Cancelled'].includes(item.status);
+  // Nothing left to give out means no form: an empty form that can only be
+  // refused is worse than no form at all.
+  const canAssign = canAssignWork && !dead && item.uncommitted > 0;
+  const missing = [
+    !form.activity.trim() && t('table.activity'),
+    !form.description.trim() && t('field.description'),
+    !form.scheduledFor && t('monthly.dayOfWork'),
+    !form.assignedTo && t('field.whoDoesIt')
+  ].filter(Boolean);
+
+  return <article className={`planned-activity${dead ? ' planned-activity-dead' : ''}`}>
+    <header className="planned-head">
+      <div>
+        <strong>{item.activity}</strong>
+        <small>{categoryLabel(item.category, t)} · {t(`form.priority${item.priority}`)}
+          {item.deadline ? ` · ${t('monthly.expectedCompletion')} ${formatDate(item.deadline, language)}` : ''}</small>
+      </div>
+      <span className={`status-badge ${journeyTone(journey)}`}>{journeyLabel(journey, t)}</span>
+    </header>
+    {item.description && <p className="planned-description">{item.description}</p>}
+
+    {/* The planned activity's own money: what it was given, how much of that is
+        promised to the days below, what has actually gone, and what is left. */}
+    <div className="planned-figures">
+      <span><small>{t('monthly.approvedAllocation')}</small><strong>{formatUsd(item.approvedBudget)}</strong></span>
+      <span><small>{t('monthly.givenToWork')}</small><strong>{formatUsd(item.committedToWork)}</strong></span>
+      <span><small>{t('monthly.totalSpent')}</small><strong>{formatUsd(item.spent)}</strong></span>
+      <span><small>{t('expense.remainingOnActivity')}</small>
+        <strong className={item.remaining < 0 ? 'over-budget' : undefined}>{formatUsd(item.remaining)}</strong></span>
+    </div>
+
+    {/* How far along it is, by the days finished underneath it. */}
+    {item.workCount > 0 && <div className="planned-progress">
+      <div className="planned-progress-bar"><span style={{ width: `${item.workProgress}%` }} /></div>
+      <small>{fill(t('monthly.daysDone'), { done: item.workCompletedCount, total: item.workCount })}</small>
+    </div>}
+
+    {item.workCount > 0 ? <>
+      <button type="button" className="text-btn planned-toggle" onClick={() => setOpen(!open)}>
+        {open ? t('monthly.hideWork') : fill(t('monthly.showWork'), { count: item.workCount })}
+      </button>
+      {open && <div className="table-wrap"><table className="card-table">
+        <thead><tr>
+          <th>{t('monthly.dayOfWork')}</th><th>{t('table.activity')}</th><th>{t('field.whoDoesIt')}</th>
+          <th>{t('monthly.approvedAllocation')}</th><th>{t('monthly.totalSpent')}</th>
+          <th>{t('table.status')}</th><th>{t('evidence.payment')}</th><th>{t('table.actions')}</th>
+        </tr></thead>
+        <tbody>{item.work.map((day) => <tr key={day.id}>
+          <td data-label={t('monthly.dayOfWork')}><strong>{formatWorkDay(day.scheduledFor, language)}</strong></td>
+          <td className="card-title-cell"><strong>{day.activity}</strong><small>{day.description}</small></td>
+          <td data-label={t('field.whoDoesIt')}>{day.assignedToName || <span className="muted-cell">{t('table.unassigned')}</span>}</td>
+          <td data-label={t('monthly.approvedAllocation')}>{formatUsd(day.approvedBudget)}</td>
+          <td data-label={t('monthly.totalSpent')}>{formatUsd(day.spent)}</td>
+          <td data-label={t('table.status')}><span className={`status-badge ${journeyTone(activityJourney(day))}`}>
+            {journeyLabel(activityJourney(day), t)}
+          </span></td>
+          <td data-label={t('evidence.payment')} className={day.expensesWithoutEvidence ? 'over-budget' : undefined}>
+            {day.expenseCount ? `${day.expenseCount - day.expensesWithoutEvidence}/${day.expenseCount}` : '—'}
+          </td>
+          <td className="card-actions">
+            <a className="text-btn" href={`#/activities/${encodeURIComponent(day.id)}`}>{t('action.open')}</a>
+          </td>
+        </tr>)}</tbody>
+      </table></div>}
+    </> : <p className="planned-empty">{canAssignWork ? t('monthly.noWorkYetAssign') : t('monthly.noWorkYet')}</p>}
+
+    {/* The manager's form: the day, the person, what it costs. */}
+    {canAssign && <form className="work-form" onSubmit={(event) => { event.preventDefault(); onAddWork(item, form); }}>
+      <h4>{t('monthly.assignWork')}</h4>
+      <div className="form-grid">
+        <label className="form-field form-field-wide"><span>{t('table.activity')}</span>
+          <input required maxLength="200" placeholder={t('monthly.workPlaceholder')} value={form.activity}
+            onChange={(event) => setForm({ ...form, activity: event.target.value })} />
+        </label>
+        <label className="form-field form-field-wide"><span>{t('field.description')}</span>
+          <textarea required rows="2" placeholder={t('monthly.workDescriptionPlaceholder')} value={form.description}
+            onChange={(event) => setForm({ ...form, description: event.target.value })} />
+        </label>
+        {/* The day it happens. The plan's month is the only month it can fall in,
+            so the picker is held to it. */}
+        <label className="form-field"><span>{t('monthly.dayOfWork')}</span>
+          <input required type="date" min={`${plan.month}-01`} max={monthEnd(plan.month)} value={form.scheduledFor}
+            onChange={(event) => setForm({ ...form, scheduledFor: event.target.value })} />
+        </label>
+        <label className="form-field"><span>{t('field.whoDoesIt')}</span>
+          <select required value={form.assignedTo} onChange={(event) => setForm({ ...form, assignedTo: event.target.value })}>
+            <option value="">{t('monthly.selectPerson')}</option>
+            {people.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}
+          </select>
+        </label>
+        <label className="form-field"><span>{t('monthly.costOfDay')}</span>
+          <input type="number" inputMode="decimal" min="0" step="0.01" value={form.budget}
+            onChange={(event) => setForm({ ...form, budget: event.target.value })} />
+          <small className="field-hint">{fill(t('monthly.leftToGiveOut'), { amount: formatUsd(item.uncommitted) })}</small>
+        </label>
+        <label className="form-field form-field-wide"><span>{t('field.notes')}</span>
+          <input value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} />
+        </label>
+        <label className="check-field">
+          <input type="checkbox" checked={form.evidenceRequired}
+            onChange={(event) => setForm({ ...form, evidenceRequired: event.target.checked })} />
+          {t('monthly.evidenceNeeded')}
+        </label>
+      </div>
+      <div className="form-submit-bar">
+        {missing.length > 0 && <p className="form-missing">{t('form.stillNeeded')}: {missing.join(', ')}</p>}
+        <button className="primary-btn" type="submit" disabled={busy || missing.length > 0}>{t('monthly.assignWork')}</button>
+      </div>
+    </form>}
+
+    <a className="text-btn planned-open" href={`#/activities/${encodeURIComponent(item.id)}`}>{t('monthly.openFullRecord')}</a>
+  </article>;
+}
+
 function PlanDetail({
-  detail, user, isDirector, language, t, busy, managers = [], rate = null, activityForm, setActivityForm,
+  detail, user, isDirector, language, t, busy, managers = [], people = [], rate = null, activityForm, setActivityForm,
+  workForms = {}, setWorkForms, onAddWork,
   onAddActivity, onConfirm, onReopen, onSubmitReport, onDecideReport, onClose, onAttach, onUpdatePlan, offPlanActivities = []
 }) {
   const { plan, activities, history, report } = detail;
   const [explanations, setExplanations] = useState({
     unusedBalanceExplanation: '', budgetDifferenceExplanation: ''
   });
-  const [settings, setSettings] = useState({ managerId: plan.managerId ? String(plan.managerId) : '', notes: plan.notes || '' });
+  const planSettings = (source) => ({
+    managerId: source.managerId ? String(source.managerId) : '',
+    notes: source.notes || '',
+    category: source.category || '',
+    objective: source.objective || '',
+    approvedBudget: String(source.approvedBudget ?? '')
+  });
+  const [settings, setSettings] = useState(() => planSettings(plan));
 
   // Re-read after a save, so the form shows what was actually stored.
   useEffect(() => {
-    setSettings({ managerId: plan.managerId ? String(plan.managerId) : '', notes: plan.notes || '' });
-  }, [plan.managerId, plan.notes]);
+    setSettings(planSettings(plan));
+  }, [plan.managerId, plan.notes, plan.category, plan.objective, plan.approvedBudget]);
 
   const isPlanManager = !isDirector && plan.managerId === user.id;
   const open = plan.status !== 'Closed';
+  // The manager the month was given to assigns its work, once the Director has
+  // confirmed the plan and the budget it runs on. The Director can do it too --
+  // covering for a manager is part of running the month.
+  const canAssignWork = open && plan.status === 'Confirmed' && (isDirector || isPlanManager);
+  // Who a day's work can be handed to: this operation's managers and its team
+  // members. Somebody covering every operation belongs in every list. Falling
+  // back to the managers list keeps the form usable if /api/people failed.
+  const workPeople = (people.length ? people : managers)
+    .filter((person) => person.coversAllSectors || person.sector === plan.operation);
   const operationManagers = managers.filter((manager) => manager.coversAllSectors || manager.sector === plan.operation || manager.id === plan.managerId);
   const settingsChanges = {};
   if ((settings.managerId || '') !== (plan.managerId ? String(plan.managerId) : '')) settingsChanges.managerId = settings.managerId ? Number(settings.managerId) : null;
   if (settings.notes.trim() !== (plan.notes || '')) settingsChanges.notes = settings.notes.trim();
+  if (settings.category !== (plan.category || '')) settingsChanges.category = settings.category;
+  if (settings.objective.trim() !== (plan.objective || '')) settingsChanges.objective = settings.objective.trim();
+  if (settings.approvedBudget !== String(plan.approvedBudget ?? '')) {
+    settingsChanges.approvedBudget = settings.approvedBudget === '' ? 0 : Number(settings.approvedBudget);
+  }
   const hasSettingsChanges = Object.keys(settingsChanges).length > 0;
 
   return <section className="panel detail-panel">
@@ -493,62 +739,62 @@ function PlanDetail({
       <button className="text-btn hide-on-sheet" type="button" onClick={onClose}>{t('action.close')}</button>
     </div>
 
-    {/* Section 2 and 3: the total, and what it is made of. */}
+    {/* The four figures the month is read by. Approved is the Director's ceiling;
+        committed is what has been given out to activities; spent is what has
+        actually gone; and what is left of each is the number somebody is about to
+        act on. Showing only three of them was why nobody could tell whether there
+        was room for more work. */}
     <div className="detail-facts">
       <Fact label={t('table.status')} value={<span className={`status-badge ${planTone(plan.status)}`}>{t(`monthly.planStatus.${plan.status}`)}</span>} />
-      <Fact label={plan.status === 'Draft' ? t('monthly.plannedBudget') : t('monthly.approvedAllocation')}
-        value={formatUsd(plan.status === 'Draft' ? plan.plannedBudget : plan.approvedBudget)} />
+      <Fact label={t('monthly.approvedAllocation')} value={formatUsd(plan.approvedBudget)} />
+      <Fact label={t('monthly.committed')}
+        value={<>{formatUsd(plan.committedBudget)}
+          <small className="fact-note">{fill(t('monthly.freeToPlan'), { amount: formatUsd(plan.uncommittedBudget) })}</small>
+        </>} />
       <Fact label={t('monthly.totalSpent')} value={formatUsd(plan.totalSpent)} />
       <Fact label={t('monthly.remainingBalance')}
         value={<span className={plan.remainingBalance < 0 ? 'over-budget' : undefined}>{formatUsd(plan.remainingBalance)}</span>} />
       <Fact label={t('review.completedActivities')} value={`${plan.completedCount}/${plan.activityCount}`} />
+      <Fact label={t('monthly.workDone')}
+        value={plan.workCount ? `${plan.workCompletedCount}/${plan.workCount}` : '—'} />
       <Fact label={t('review.expensesWithoutEvidence')} value={plan.expensesWithoutEvidence} />
     </div>
+    {plan.category && <p className="detail-notes"><strong>{t('monthly.businessCategory')}:</strong> {categoryLabel(plan.category, t)}</p>}
+    {plan.objective && <p className="detail-notes"><strong>{t('monthly.objectives')}:</strong> {plan.objective}</p>}
     {plan.notes && <p className="detail-notes">{plan.notes}</p>}
 
-    <h3 className="form-section-title">
-      {isDirector ? t('nav.activities') : t('monthly.myActivities')}
-    </h3>
-    {activities.length ? <div className="table-wrap"><table className="card-table">
-      <thead><tr>
-        <th>{t('table.activity')}</th><th>{t('field.priority')}</th>
-        <th>{t('monthly.approvedAllocation')}</th><th>{t('monthly.totalSpent')}</th>
-        <th>{t('expense.remainingOnActivity')}</th><th>{t('monthly.expectedCompletion')}</th>
-        <th>{t('table.status')}</th><th>{t('evidence.payment')}</th><th>{t('evidence.activity')}</th><th>{t('table.actions')}</th>
-      </tr></thead>
-      <tbody>{activities.map((item) => <tr key={item.id}>
-        <td className="card-title-cell"><strong>{item.activity}</strong><small>{item.description || categoryLabel(item.category, t)}</small></td>
-        <td data-label={t('field.priority')}>{t(`form.priority${item.priority}`)}</td>
-        <td data-label={t('monthly.approvedAllocation')}>{formatUsd(item.approvedBudget)}</td>
-        <td data-label={t('monthly.totalSpent')}>{formatUsd(item.spent)}</td>
-        <td data-label={t('expense.remainingOnActivity')} className={item.remaining < 0 ? 'over-budget' : undefined}>{formatUsd(item.remaining)}</td>
-        <td data-label={t('monthly.expectedCompletion')}>{formatDate(item.deadline, language)}</td>
-        <td data-label={t('table.status')}><span className={`status-badge ${journeyTone(activityJourney(item))}`}>
-          {journeyLabel(activityJourney(item), t)}
-        </span></td>
-        <td data-label={t('evidence.payment')} className={item.expensesWithoutEvidence ? 'over-budget' : undefined}>
-          {item.expenseCount - item.expensesWithoutEvidence}/{item.expenseCount}
-        </td>
-        <td data-label={t('evidence.activity')} className={item.status === 'Completed' && !item.activityEvidenceCount ? 'over-budget' : undefined}>
-          {item.activityEvidenceCount}
-        </td>
-        {/* Expenses and evidence are recorded on the activity itself. */}
-        <td className="card-actions"><a className="text-btn" href={`#/activities/${encodeURIComponent(item.id)}`}>{t('action.open')}</a></td>
-      </tr>)}</tbody>
-    </table></div> : <div className="empty-state">
+    {/* What the Director set for the month, and under each one the days of work
+        the manager assigned to finish it. The two levels used to be one flat
+        table, which is why a planned activity looked untouched however much work
+        was going on inside it. */}
+    <h3 className="form-section-title">{t('monthly.plannedActivities')}</h3>
+    {activities.length ? <div className="planned-list">{activities.map((item) => <PlannedActivity
+      key={item.id}
+      item={item}
+      plan={plan}
+      t={t}
+      language={language}
+      busy={busy}
+      people={workPeople}
+      canAssignWork={canAssignWork}
+      form={workForms[item.id] || emptyWork}
+      setForm={(next) => setWorkForms({ ...workForms, [item.id]: next })}
+      onAddWork={onAddWork}
+    />)}</div> : <div className="empty-state">
       <strong>{t('monthly.noActivitiesInPlan')}</strong><span>{t('table.noData')}</span>
     </div>}
     {activities.length > 0 && <>
       <div className="totals-line">
-        <span>{plan.status === 'Draft' ? t('monthly.totalToGive') : t('monthly.totalApprovedBudget')}: <strong>{formatUsd(plan.status === 'Draft' ? plan.plannedBudget : plan.approvedBudget)}</strong></span>
+        <span>{t('monthly.totalApprovedBudget')}: <strong>{formatUsd(plan.approvedBudget)}</strong></span>
+        <span>{t('monthly.committed')}: <strong>{formatUsd(plan.committedBudget)}</strong></span>
         <span>{t('monthly.totalSpent')}: <strong>{formatUsd(plan.totalSpent)}</strong></span>
         <span>{t('monthly.remainingBalance')}: <strong className={plan.remainingBalance < 0 ? 'over-budget' : undefined}>{formatUsd(plan.remainingBalance)}</strong></span>
       </div>
       {/* The month adds up records agreed at different times, so the local
           currencies here are at today's rate rather than any one record's. */}
       {rate?.rwfPerUsd > 0 && <p className="field-hint">
-        {t('money.todayRate')}: {formatLocal((plan.status === 'Draft' ? plan.plannedBudget : plan.approvedBudget) * rate.rwfPerUsd, 'RWF')}
-        {' · '}{formatLocal((plan.status === 'Draft' ? plan.plannedBudget : plan.approvedBudget) * rate.cdfPerUsd, 'CDF')}
+        {t('money.todayRate')}: {formatLocal(plan.approvedBudget * rate.rwfPerUsd, 'RWF')}
+        {' · '}{formatLocal(plan.approvedBudget * rate.cdfPerUsd, 'CDF')}
         {' · '}{t('monthly.remainingBalance')}: {formatLocal(plan.remainingBalance * rate.rwfPerUsd, 'RWF')} · {formatLocal(plan.remainingBalance * rate.cdfPerUsd, 'CDF')}
       </p>}
     </>}
@@ -558,7 +804,7 @@ function PlanDetail({
     {isDirector && plan.status === 'Draft' && <div className="visibility-control">
       <div>
         <span className="eyebrow">{t('monthly.totalToGive')}</span>
-        <strong>{formatUsd(plan.plannedBudget)}</strong>
+        <strong>{formatUsd(plan.approvedBudget)}</strong>
         <small>{t('monthly.confirmHint')}</small>
       </div>
       <button className="primary-btn" type="button" disabled={busy || !activities.length || !plan.managerId}
@@ -581,6 +827,23 @@ function PlanDetail({
             {operationManagers.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}
           </select>
         </label>
+        {/* The budget for the month. Changing it once the month is running asks
+            for a reason, which the handler collects. */}
+        <label className="form-field"><span>{t('monthly.budgetYouApprove')}</span>
+          <input type="number" inputMode="decimal" min="0" step="0.01" value={settings.approvedBudget}
+            onChange={(event) => setSettings({ ...settings, approvedBudget: event.target.value })} />
+          <small className="field-hint">{fill(t('monthly.committedSoFar'), { amount: formatUsd(plan.committedBudget) })}</small>
+        </label>
+        <label className="form-field"><span>{t('monthly.businessCategory')}</span>
+          <select value={settings.category} onChange={(event) => setSettings({ ...settings, category: event.target.value })}>
+            <option value="">{t('form.selectCategory')}</option>
+            {categoriesForOperation(plan.operation).map((category) =>
+              <option key={category} value={category}>{categoryLabel(category, t)}</option>)}
+          </select>
+        </label>
+        <label className="form-field form-field-wide"><span>{t('monthly.objectives')}</span>
+          <textarea rows="2" value={settings.objective} onChange={(event) => setSettings({ ...settings, objective: event.target.value })} />
+        </label>
         <label className="form-field form-field-wide"><span>{t('field.notes')}</span>
           <textarea rows="2" value={settings.notes} onChange={(event) => setSettings({ ...settings, notes: event.target.value })} />
         </label>
@@ -597,7 +860,11 @@ function PlanDetail({
           <input required maxLength="200" value={activityForm.activity} onChange={(event) => setActivityForm({ ...activityForm, activity: event.target.value })} />
         </label>
         <label className="form-field"><span>{t('field.category')}</span>
-          <input required maxLength="100" value={activityForm.category} onChange={(event) => setActivityForm({ ...activityForm, category: event.target.value })} />
+          <select required value={activityForm.category} onChange={(event) => setActivityForm({ ...activityForm, category: event.target.value })}>
+            <option value="">{t('form.selectCategory')}</option>
+            {categoriesForOperation(plan.operation).map((category) =>
+              <option key={category} value={category}>{categoryLabel(category, t)}</option>)}
+          </select>
         </label>
         <label className="form-field"><span>{t('monthly.approvedAllocation')} (USD)</span>
           <input required type="number" inputMode="decimal" min="0" step="0.01" value={activityForm.approvedBudget}
@@ -611,13 +878,18 @@ function PlanDetail({
         <label className="form-field"><span>{t('monthly.expectedCompletion')}</span>
           <input type="date" value={activityForm.deadline} onChange={(event) => setActivityForm({ ...activityForm, deadline: event.target.value })} />
         </label>
+        {/* Required: the manager breaks this into days of work and the person
+            doing them reads it. A title on its own tells neither of them
+            anything, and it was the field people were skipping. */}
         <label className="form-field form-field-wide"><span>{t('field.description')}</span>
-          <input value={activityForm.description} onChange={(event) => setActivityForm({ ...activityForm, description: event.target.value })} />
+          <textarea required rows="2" placeholder={t('form.whatWorkInvolves')} value={activityForm.description}
+            onChange={(event) => setActivityForm({ ...activityForm, description: event.target.value })} />
         </label>
         <label className="form-field form-field-wide"><span>{t('review.adminNote')}</span>
           <input value={activityForm.adminNote} onChange={(event) => setActivityForm({ ...activityForm, adminNote: event.target.value })} />
         </label>
       </div>
+      <p className="field-hint">{fill(t('monthly.freeToPlan'), { amount: formatUsd(plan.uncommittedBudget) })}</p>
       <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('monthly.addActivity')}</button></div>
     </form>}
 

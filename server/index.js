@@ -223,6 +223,31 @@ app.get('/api/managers', authMiddleware, asyncRoute(async (req, res) => {
   res.json(result.rows);
 }));
 
+// Everybody who can be handed work: the managers and the team members of the
+// caller's operation. Kept apart from /api/managers deliberately -- that list
+// answers "which manager runs this?" (a project, a month, who somebody reports
+// to) and must not start offering team members for those. This one answers "who
+// is doing this day's work?", which a team member is exactly the answer to.
+//
+// Suspended accounts are left out, because every route that accepts an assignee
+// refuses one -- offering them would be offering a choice that cannot be saved.
+app.get('/api/people', authMiddleware, asyncRoute(async (req, res) => {
+  const values = [];
+  let scope = '';
+  if (!hasFullScope(req.user)) {
+    values.push(req.user.sector);
+    scope = ` AND (sector = $${values.length} OR covers_all_sectors)`;
+  }
+  const result = await pool.query(
+    `SELECT id, username, name, role, sector, covers_all_sectors AS "coversAllSectors"
+     FROM users
+     WHERE role IN ('manager', 'staff') AND status = 'active'${scope}
+     ORDER BY CASE role WHEN 'manager' THEN 0 ELSE 1 END, name`,
+    values
+  );
+  res.json(result.rows);
+}));
+
 // The account register, the Director's user-management surface: the roster, the
 // roles, who reports to whom, and the working areas. Password hashes never
 // leave the database, so a password is reset, never read back.

@@ -5,6 +5,7 @@ import ExternalPartners from './ExternalPartners.jsx';
 import MonthlyPlans from './MonthlyPlans.jsx';
 import { LANGUAGES, LanguageContext, displayLanguage, fill, setDisplayLanguage, useI18n, useLanguage, useT } from './i18n.js';
 import { BUSINESS_OPERATIONS, operationName } from '../shared/businessOperations.js';
+import { OPERATIONS_WITH_CATEGORIES, OTHER_CATEGORY } from '../shared/categories.js';
 import ActivityReview, {
   ACTIVITY_STATUSES, approvalTone, approverName, categoryLabel,
   deadlineNote, formatDate, formatUsd, statusTone
@@ -17,39 +18,10 @@ import { activityJourney, formatLocal, journeyLabel, journeyTone } from './journ
 import Home, { DecisionList } from './Home.jsx';
 
 // The category presets offered per business operation. Keep in step with
-// CATEGORIES in server/data/seedData.js, which is what the API validates
-// against. The operations themselves -- their ids and their names in all four
-// languages -- come from shared/businessOperations.js, so this file never
-// restates what an operation is called.
-const CATEGORIES = {
-  farming: [
-    'Land preparation', 'Planting and sowing', 'Irrigation', 'Fertilizer and inputs',
-    'Pest and disease control', 'Livestock and animal feed', 'Harvesting',
-    'Storage and preservation', 'Farm equipment and tools', 'Farm labour'
-  ],
-  mining: [
-    'Exploration and survey', 'Extraction', 'Haulage', 'Washing and sorting',
-    'Processing', 'Site preparation and access roads', 'Machinery and equipment',
-    'Safety and protective equipment', 'Licenses and permits', 'Mining labour'
-  ],
-  agriculture: [
-    'Seeds and seedlings', 'Land preparation', 'Planting', 'Crop maintenance',
-    'Fertilizer and agro-inputs', 'Harvesting', 'Post-harvest handling',
-    'Storage and warehousing', 'Transport to market', 'Agricultural labour'
-  ],
-  movement: [
-    'Vehicle hire', 'Fuel and lubricants', 'Freight and haulage', 'Border clearance',
-    'Permits and licenses', 'Escort and security', 'Warehousing and handling',
-    'Loading and offloading', 'Travel and allowances', 'Documentation and administration'
-  ]
-};
-
-const sectors = BUSINESS_OPERATIONS.map((operation) => ({
-  ...operation,
-  categories: CATEGORIES[operation.id] || []
-}));
-
-const OTHER_CATEGORY = 'Other (specify)';
+// The operations with their categories, and the categories themselves, come from
+// shared/categories.js -- one list, read by this file, by the API's seed data and
+// by the monthly plan screens.
+const sectors = OPERATIONS_WITH_CATEGORIES;
 
 // The working area a manager who covers every operation is filed under. It is
 // not an operation id -- the API translates it into "no single area, covers all"
@@ -741,6 +713,10 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const [activities, setActivities] = useState([]);
   const [approvals, setApprovals] = useState([]);
   const [managers, setManagers] = useState([]);
+  // Everybody who can be handed work: this operation's managers and its team
+  // members. A separate list from `managers`, which answers "who runs this?" and
+  // must keep meaning that.
+  const [people, setPeople] = useState([]);
   const [register, setRegister] = useState(emptyRegister);
   const [approvalQueue, setApprovalQueue] = useState(emptyQueue);
   const [partnerRegister, setPartnerRegister] = useState(emptyPartnerRegister);
@@ -835,6 +811,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     const results = await Promise.allSettled([
       fetchJson('/api/summary'), fetchJson('/api/projects'), fetchJson('/api/activities?limit=200'),
       fetchJson('/api/approvals'), fetchJson('/api/managers'), fetchJson('/api/approval-queue'),
+      fetchJson('/api/people'),
       // Only the Director may read these two registers; nobody else is asked
       // for them, rather than being refused and the refusal ignored.
       isDirector ? fetchJson('/api/users') : Promise.resolve(emptyRegister),
@@ -844,7 +821,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     if (requestNumber !== latestLoad.current) return;
     setRefreshing(false);
 
-    const [summaryResult, projectResult, activityResult, approvalResult, managerResult, queueResult, userResult, partnerResult, rateResult] = results;
+    const [summaryResult, projectResult, activityResult, approvalResult, managerResult, queueResult, peopleResult, userResult, partnerResult, rateResult] = results;
     const criticalFailure = [summaryResult, projectResult, activityResult, approvalResult].find((result) => result.status === 'rejected');
     if (criticalFailure) {
       setLoadState((current) => (current === 'ready' ? 'ready' : 'failed'));
@@ -858,6 +835,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     setActivities(activityResult.value);
     setApprovals(approvalResult.value);
     setManagers(managerResult.status === 'fulfilled' ? managerResult.value : []);
+    setPeople(peopleResult.status === 'fulfilled' ? peopleResult.value : []);
     setApprovalQueue(queueResult.status === 'fulfilled' ? queueResult.value : emptyQueue);
     setRegister(userResult.status === 'fulfilled' ? userResult.value : emptyRegister);
     setPartnerRegister(partnerResult.status === 'fulfilled' ? partnerResult.value : emptyPartnerRegister);
@@ -1822,7 +1800,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       {creatingActivity && <DetailView onClose={closeActivity} label={isDirector ? t('action.assignActivity') : t('action.raiseActivity')}>
         <ActivityForm
           form={activityForm} setForm={setActivityForm} projects={projects} onChooseProject={chooseFormProject}
-          selectedProject={formProject} managers={managers}
+          selectedProject={formProject} managers={people.length ? people : managers}
           isDirector={isDirector} usd={usd} rate={rate} busy={actionBusy}
           onCancel={closeActivity}
           onSubmit={(event) => {
@@ -1845,7 +1823,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
           onOpenFile={openEvidenceFile}
           busy={actionBusy}
           sectorLabel={sectorName}
-          managers={managers}
+          managers={people.length ? people : managers}
           onClose={closeActivity}
           onDecision={saveDecision}
           onStatus={changeActivityStatus}
@@ -1971,6 +1949,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       user={user}
       fetchJson={fetchJson}
       managers={managers}
+      people={people}
       rate={rate}
       planId={routeId}
       onOpenPlan={openPlanRoute}
@@ -2314,6 +2293,7 @@ function ActivityForm({ form, setForm, projects, selectedProject, managers, isDi
     !form.projectId && t('field.project'),
     !form.category.trim() && t('field.category'),
     !form.activity.trim() && t('field.activity'),
+    !form.description.trim() && t('field.description'),
     !(Number(form.quantity) > 0) && t('field.quantity'),
     form.costUsd === '' && (isDirector ? t('form.budgetUsd') : t('form.requestedBudgetUsd')),
     isDirector && !form.assignedTo && t('field.carriedOutBy')
@@ -2336,8 +2316,11 @@ function ActivityForm({ form, setForm, projects, selectedProject, managers, isDi
       </Field>
       {/* What the work is for. It was moved under "More details" and people
           missed it, so it is back among the first questions. */}
+      {/* Required. Whoever the work is handed to opens this on their phone and
+          reads the description and nothing else, so a record with only a title
+          leaves them guessing -- and this was the field people were skipping. */}
       <Field label={t('field.description')} wide>
-        <textarea rows="2" placeholder={isDirector ? t('form.whatWorkInvolves') : t('form.whyWorkNeeded')} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
+        <textarea required rows="2" placeholder={isDirector ? t('form.whatWorkInvolves') : t('form.whyWorkNeeded')} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
       </Field>
       <Field label={t('field.category')}>
         <select required value={form.categoryChoice} onChange={(event) => { const choice = event.target.value; setForm({ ...form, categoryChoice: choice, category: choice === OTHER_CATEGORY ? '' : choice }); }}>

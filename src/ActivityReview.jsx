@@ -388,17 +388,36 @@ export function ActivityReview({
   }
 
   const peopleLine = [
-    `${t('people.requestedBy')}: ${activity.createdByName || '—'}`,
+    // Work that was handed out was not requested by the person who wrote it, and
+    // saying "Requested by" of an assignment reads as though the assignee asked
+    // for their own instructions.
+    `${wasAssigned ? t('people.assignedBy') : t('people.requestedBy')}: ${activity.createdByName || '—'}`,
     `${t('people.assignedTo')}: ${activity.assignedToName || t('form.nobodyYet')}`,
     activity.scheduledFor ? `${t('field.activityDate')}: ${formatDate(activity.scheduledFor)}` : null,
-    activity.deadline ? `${t('table.deadline')}: ${formatDate(activity.deadline)}` : null
+    // A day of work is due on the day it happens, so its deadline is the same
+    // date printed twice. Only a deadline that says something different is shown.
+    activity.deadline && activity.deadline !== activity.scheduledFor
+      ? `${t('table.deadline')}: ${formatDate(activity.deadline)}` : null
   ].filter(Boolean).join(' · ');
 
   return <section className="panel detail-panel activity-review record">
     <div className="panel-header record-header">
       <div>
-        <span className="eyebrow">{sectorLabel(activity.sector)} · {wasAssigned ? t('review.assignedActivity') : t('review.activityReview')}</span>
+        {/* A day of work says what it is towards. Without it the person it was
+            handed to opens "Clear the scrub on plots 1-3" with no idea which
+            activity it serves or why it matters -- and the eyebrow claimed the
+            Director had assigned it when it was their own manager. */}
+        <span className="eyebrow">{sectorLabel(activity.sector)} · {activity.parentActivityName
+          ? t('review.dayOfWork')
+          : (wasAssigned ? t('review.assignedActivity') : t('review.activityReview'))}</span>
         <h2>{activity.activity}</h2>
+        {activity.parentActivityName && <p className="towards-line">
+          {fill(t('review.towards'), { activity: activity.parentActivityName })}
+        </p>}
+        {/* What the work is, in the words of whoever set it. It was only in the
+            folded "details" section, which is the last place somebody standing in
+            a field is going to look. */}
+        {activity.description && <p className="record-brief">{activity.description}</p>}
         <span>{peopleLine}{due && due.tone !== 'ok' && <small className={`deadline-flag deadline-${due.tone}`}>{due.text}</small>}</span>
       </div>
       <button className="text-btn hide-on-sheet" type="button" onClick={onClose}>{t('action.close')}</button>

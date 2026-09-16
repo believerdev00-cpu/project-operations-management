@@ -486,6 +486,14 @@ try {
     String(farmingRow.expensesWithoutEvidence));
   check('  the four operations total correctly',
     review.body.totals.approvedBudget === 4000 + 1000 * 3, String(review.body.totals.approvedBudget));
+  // The Director's overview strip reads these, so they have to be there and have
+  // to agree with the per-operation rows underneath them.
+  check('  and the overview totals committed and the days of work',
+    review.body.totals.committedBudget === 3400 + 1000 * 3
+      && review.body.totals.uncommittedBudget === 600
+      && review.body.totals.work === 2
+      && review.body.totals.workCompleted === 0,
+    JSON.stringify(review.body.totals));
 
   const managerReview = await api(managers.mining.token, `/api/monthly-plans/review?month=${MONTH}`);
   check('a manager\'s review shows only their own operation',

@@ -149,9 +149,13 @@ export default function Home({
               <small>{plan?.managerName ? fill(t('home.runBy'), { name: plan.managerName }) : t('home.noPlanYet')}</small>
             </div>
           </header>
+          {/* A draft month used to show "not decided yet" against the budget,
+              because the figure was only worked out at confirmation. The Director
+              now states it when they create the plan, so it is a real number from
+              the first day and is shown as one. */}
           {plan
-            ? <MoneyBar approved={plan.status === 'Draft' ? null : plan.approvedBudget} requested={plan.plannedBudget}
-              spent={plan.totalSpent} format={formatUsdShort} rates={rate} />
+            ? <MoneyBar approved={plan.approvedBudget} spent={plan.totalSpent}
+              format={formatUsdShort} rates={rate} />
             : <p className="operation-empty">{isDirector ? t('home.planThisMonth') : t('home.noPlanForYou')}</p>}
           <ul className="operation-facts">
             <li><strong>{row.activeActivities || 0}</strong> {t('home.underWay')}</li>

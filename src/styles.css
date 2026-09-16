@@ -287,6 +287,38 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .fact span { display: block; color: var(--muted); font-size: .69rem; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
 .fact strong { display: block; margin-top: 6px; overflow-wrap: anywhere; color: var(--navy); font-size: .88rem; font-weight: 700; }
 .detail-notes { margin: 14px 0 0; overflow-wrap: anywhere; color: var(--muted); font-size: .8rem; line-height: 1.55; }
+/* What a day of work is towards, and what it is -- read before anything else on
+   the record, because the person doing it needs both. */
+.towards-line { margin: 6px 0 0; color: var(--blue); font-size: .82rem; font-weight: 700; }
+.record-brief { margin: 8px 0 0; overflow-wrap: anywhere; color: var(--ink); font-size: .87rem; line-height: 1.55; }
+.fact-note { display: block; margin-top: 2px; color: var(--muted); font-size: .72rem; font-weight: 600; letter-spacing: 0; text-transform: none; }
+
+/* A planned activity and the days of work underneath it. The two levels were one
+   flat table, where a planned activity looked untouched however much work was
+   going on inside it. */
+.planned-list { display: grid; gap: 14px; margin-top: 4px; }
+.planned-activity { padding: 16px; background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--blue); border-radius: 6px; }
+.planned-activity-dead { border-left-color: var(--line); opacity: .72; }
+.planned-head { display: flex; flex-wrap: wrap; align-items: start; justify-content: space-between; gap: 10px 16px; }
+.planned-head strong { display: block; color: var(--navy); font-size: .97rem; }
+.planned-head small { display: block; margin-top: 3px; color: var(--muted); font-size: .78rem; }
+.planned-description { margin: 10px 0 0; overflow-wrap: anywhere; color: var(--ink); font-size: .84rem; line-height: 1.55; }
+.planned-figures { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 14px; padding: 12px 14px; background: #f7fafc; border-radius: 5px; }
+.planned-figures span { display: block; min-width: 0; }
+.planned-figures small { display: block; color: var(--muted); font-size: .68rem; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
+.planned-figures strong { display: block; margin-top: 4px; color: var(--navy); font-size: .88rem; }
+.planned-progress { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.planned-progress-bar { flex: 1; height: 7px; background: #e6edf4; border-radius: 4px; overflow: hidden; }
+.planned-progress-bar span { display: block; height: 100%; background: var(--blue); border-radius: 4px; }
+.planned-progress small { flex: none; color: var(--muted); font-size: .76rem; font-weight: 650; }
+.planned-toggle { margin-top: 12px; }
+.planned-empty { margin: 12px 0 0; color: var(--muted); font-size: .8rem; }
+.planned-open { display: inline-block; margin-top: 12px; }
+/* The manager's form for a day of work sits inside the planned activity it
+   belongs to, so there is no doubt what the day is towards. */
+.work-form { margin-top: 14px; padding: 14px 16px; background: #fbfcfd; border: 1px solid var(--line); border-radius: 6px; }
+.work-form h4 { margin: 0 0 12px; color: var(--navy); font-size: .86rem; }
+
 .cost-table { max-width: 520px; white-space: normal; }
 .cost-table .total-row td { background: var(--blue-soft); }
 .totals-line { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-top: 12px; padding: 12px 14px; color: #34475a; background: var(--blue-soft); border-radius: 5px; font-size: .82rem; }
@@ -612,6 +644,7 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
   .activity-grid, .movement-grid, .filter-grid, .inline-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cost-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .detail-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .planned-figures { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric-grid-5, .metric-grid-6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .budget-strip-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -729,6 +762,9 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
   .cost-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cost-total { grid-column: 1 / -1; }
   .detail-facts, .accountability-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 12px; }
+  .planned-figures { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 10px 12px; }
+  .planned-activity { padding: 14px; }
+  .work-form { padding: 12px 14px; }
   .approval-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 12px; }
   .report-picker { align-items: stretch; flex-direction: column; }
   .report-picker .form-field { flex-basis: auto; }
@@ -781,7 +817,7 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 }
 
 @media (max-width: 380px) {
-  .metric-grid, .metric-grid-5, .metric-grid-6, .detail-facts, .accountability-grid, .approval-panel, .cost-grid { grid-template-columns: 1fr; }
+  .metric-grid, .metric-grid-5, .metric-grid-6, .detail-facts, .accountability-grid, .approval-panel, .cost-grid, .planned-figures { grid-template-columns: 1fr; }
   .card-table td { grid-template-columns: minmax(0, 1fr); }
   .card-table td::before { grid-row: auto; padding: 0 0 2px; }
   .card-table td > * { grid-column: 1; }

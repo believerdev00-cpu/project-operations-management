@@ -360,10 +360,14 @@ router.get('/review', asyncRoute(async (req, res) => {
     operations: rows,
     totals: {
       approvedBudget: round2(rows.reduce((sum, plan) => sum + plan.approvedBudget, 0)),
+      committedBudget: round2(rows.reduce((sum, plan) => sum + plan.committedBudget, 0)),
+      uncommittedBudget: round2(rows.reduce((sum, plan) => sum + plan.uncommittedBudget, 0)),
       totalSpent: round2(rows.reduce((sum, plan) => sum + plan.totalSpent, 0)),
       remainingBalance: round2(rows.reduce((sum, plan) => sum + plan.remainingBalance, 0)),
       activities: rows.reduce((sum, plan) => sum + plan.activityCount, 0),
       completed: rows.reduce((sum, plan) => sum + plan.completedCount, 0),
+      work: rows.reduce((sum, plan) => sum + plan.workCount, 0),
+      workCompleted: rows.reduce((sum, plan) => sum + plan.workCompletedCount, 0),
       outstanding: rows.reduce((sum, plan) => sum + plan.outstandingCount, 0),
       expensesWithoutEvidence: rows.reduce((sum, plan) => sum + plan.expensesWithoutEvidence, 0),
       completedWithoutEvidence: rows.reduce((sum, plan) => sum + plan.completedWithoutEvidence, 0)
