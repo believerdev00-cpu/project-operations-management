@@ -325,6 +325,52 @@ try {
   });
   check('  but not past the day\'s own budget', staffOverspend.status === 400, String(staffOverspend.status));
 
+  // ---- the whole job, as a team member does it ----------------------------
+  //
+  // "You have been assigned work for this month. Find your work, start the
+  // activity, record what you did, upload the evidence, and submit it." Every
+  // step below is one a person takes on their own phone with nobody helping
+  // them, so every step has to be open to them without a manager in the middle.
+  section('A team member can do the whole job on their own');
+  const myWork = await api(farmingStaff.token, '/api/activities?awaiting=work&limit=20');
+  check('they find their work without searching for it',
+    myWork.status === 200 && myWork.body.some((item) => item.id === day1.body.id),
+    `${myWork.status} ${myWork.body.length}`);
+  const mineOnly = await api(farmingStaff.token, '/api/activities?assignedTo=me&limit=50');
+  check('  and their own list is only theirs',
+    mineOnly.status === 200 && mineOnly.body.every((item) => item.assignedTo === farmingStaff.id),
+    String(mineOnly.status));
+
+  const proof = new FormData();
+  proof.append('kind', 'Photograph');
+  proof.append('evidenceType', 'activity');
+  proof.append('files', new Blob(['ZZTEST proof of the work'], { type: 'image/png' }), 'work.png');
+  const uploaded = await fetch(`${API}/api/activities/${day1.body.id}/evidence`, {
+    method: 'POST', headers: { Authorization: `Bearer ${farmingStaff.token}` }, body: proof
+  });
+  check('they can add a photo of the work themselves', uploaded.status === 201, String(uploaded.status));
+
+  const handedBack = await api(farmingStaff.token, `/api/activities/${day1.body.id}/completion`, {
+    method: 'POST', body: JSON.stringify({ note: 'Finished the north half.' })
+  });
+  check('and send it for the final check', handedBack.status === 200,
+    `${handedBack.status} ${handedBack.body.message}`);
+  check('  which puts it in front of the Director, not the team member',
+    Boolean(handedBack.body.completionSubmittedAt) && handedBack.body.status !== 'Completed',
+    String(handedBack.body.status));
+  const directorChecks = await api(adminToken, '/api/activities?awaiting=final-check&limit=50');
+  check('  and the Director sees it waiting',
+    directorChecks.body.some((item) => item.id === day1.body.id), String(directorChecks.status));
+  // Work set up as needing no proof is finished without any, which is the whole
+  // point of the flag -- a meeting has nothing to photograph.
+  const noProofNeeded = await api(farmingStaff.token, `/api/activities/${day2.body.id}/status`, {
+    method: 'PATCH', body: JSON.stringify({ status: 'In Progress' })
+  });
+  check('work that needs no proof can still be started', noProofNeeded.status === 200, String(noProofNeeded.status));
+  const finishedWithout = await api(farmingStaff.token, `/api/activities/${day2.body.id}/completion`, { method: 'POST' });
+  check('  and finished without a photo', finishedWithout.status === 200,
+    `${finishedWithout.status} ${finishedWithout.body.message}`);
+
   // The Director watches the planned activity through the days underneath it.
   const oversight = (await api(adminToken, `/api/monthly-plans/${farmingId}`)).body;
   const watched = oversight.activities.find((a) => a.id === landPrep.id);
@@ -559,8 +605,10 @@ try {
   check('  it snapshots the approved budget', report.body.approvedBudget === 3600, String(report.body.approvedBudget));
   check('  it snapshots the spend', report.body.totalSpent === 1480, String(report.body.totalSpent));
   check('  it snapshots the remaining balance', report.body.remainingBalance === 2120, String(report.body.remainingBalance));
+  // Two photos of work by now: the manager's, and the one the team member added
+  // themselves when they finished their own day.
   check('  it counts both kinds of evidence',
-    report.body.paymentEvidenceCount === 1 && report.body.activityEvidenceCount === 1,
+    report.body.paymentEvidenceCount === 1 && report.body.activityEvidenceCount === 2,
     `payment ${report.body.paymentEvidenceCount}, activity ${report.body.activityEvidenceCount}`);
 
   const otherReport = await api(managers.mining.token, `/api/monthly-plans/${farmingId}/report`, {
