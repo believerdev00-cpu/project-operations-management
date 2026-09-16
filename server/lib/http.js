@@ -101,6 +101,41 @@ export function managerScope(user, column, values, filters) {
   }
 }
 
+// A manager who has been made responsible for particular projects sees those
+// projects and nothing else.
+//
+// Scoping used to be by business operation alone. With one project per operation
+// that is the same thing, which is why it was never noticed -- but the moment a
+// second project is opened in an operation, every manager in it can read the
+// other one's work, budgets and spending. Responsibility is per project, so the
+// filter is too.
+//
+// A manager responsible for NO project keeps the operation-wide view: that is
+// the person covering an operation in general, and narrowing them to an empty
+// list of projects would show them nothing at all. The Director and an
+// all-operations manager are unaffected.
+//
+// `column` is the project id column of the table being read.
+export function projectScope(user, column, values, filters) {
+  if (hasFullScope(user)) return;
+  if (user.role !== 'manager') return;
+  values.push(user.id);
+  filters.push(
+    `(${column} IN (SELECT id FROM projects WHERE manager_id = $${values.length})
+       OR NOT EXISTS (SELECT 1 FROM projects WHERE manager_id = $${values.length}))`
+  );
+}
+
+// The single-row form of projectScope, for handlers that have already loaded the
+// row. Answers "may this account touch a record on that project?".
+export async function withinProjectScope(pool, user, projectId) {
+  if (hasFullScope(user)) return true;
+  if (user.role !== 'manager') return true;
+  const mine = await pool.query('SELECT id FROM projects WHERE manager_id = $1', [user.id]);
+  if (!mine.rowCount) return true;
+  return mine.rows.some((row) => row.id === projectId);
+}
+
 // "May this account touch a record in that operation?" -- the single-row form of
 // managerScope, for handlers that have already loaded the row.
 export function withinScope(user, sector) {

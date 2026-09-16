@@ -225,6 +225,64 @@ try {
   const asBearer = await api(fileToken, '/api/summary');
   check('  it is refused as a session anywhere else', asBearer.status === 401, String(asBearer.status));
 
+  // ---- a manager sees their own project and no other ------------------------
+  //
+  // Scoping is by business operation, which is the same thing as "their project"
+  // only while an operation has exactly one. Open a second project in the same
+  // operation and, without this, every manager in it reads the other one's work,
+  // budgets and spending. Responsibility is per project, so the filter is too.
+  section('A project manager is confined to their own project');
+  const mine = await createAccount(adminToken, {
+    username: 'zz-sec-own', name: 'Own Project Manager', password: 'temporary-123', role: 'manager', sector: 'mining'
+  });
+  created.users.push(mine.body.id);
+  const mineToken = (await changePassword(
+    (await login('zz-sec-own', 'temporary-123')).body.token, 'temporary-123', 'own-project-pass-1'
+  )).body.token;
+
+  await pool.query(
+    `INSERT INTO projects (id, name, sector, location, owner, status, progress, budget, spent, category, manager_id)
+     VALUES ('ZZSEC-P1', 'ZZTEST Mine Project', 'mining', 'A', 'ZZTEST', 'On Track', 0, 0, 0, 'Other', $1),
+            ('ZZSEC-P2', 'ZZTEST Not Mine Project', 'mining', 'B', 'ZZTEST', 'On Track', 0, 0, 0, 'Other', NULL)
+     ON CONFLICT (id) DO NOTHING`,
+    [mine.body.id]
+  );
+  await pool.query(
+    `INSERT INTO activities (id, project_id, sector, category, activity, description, quantity,
+       cost_usd, cost_rwf, cost_cdf, requested_budget, approved_budget, status, approved, created_by,
+       approval_required, approval_status)
+     VALUES ('ZZSEC-A2', 'ZZSEC-P2', 'mining', 'Extraction', 'ZZTEST other project work',
+       'On a project this manager does not run.', 1, 50, 72500, 142500, 50, 50, 'Approved', TRUE, $1, FALSE, 'approved')`,
+    [directorId]
+  );
+
+  const visibleProjects = await api(mineToken, '/api/projects');
+  const projectIds = (visibleProjects.body.items || visibleProjects.body || []).map((project) => project.id);
+  check('they see the project they are responsible for', projectIds.includes('ZZSEC-P1'), projectIds.join(','));
+  check('  and not another project in the same operation', !projectIds.includes('ZZSEC-P2'), projectIds.join(','));
+  const otherWork = await api(mineToken, '/api/activities?limit=100');
+  check('  nor its work in their register',
+    !(otherWork.body || []).some((item) => item.id === 'ZZSEC-A2'), String(otherWork.status));
+  const openOther = await api(mineToken, '/api/activities/ZZSEC-A2');
+  check('  nor by opening it directly', openOther.status === 404, String(openOther.status));
+  const theirReport = await api(mineToken, '/api/reports/activities?period=monthly');
+  check('  nor in their report', !JSON.stringify(theirReport.body).includes('ZZSEC-A2'), String(theirReport.status));
+  const directorSees = await api(adminToken, '/api/activities/ZZSEC-A2');
+  check('  while the Director still reads it', directorSees.status === 200, String(directorSees.status));
+
+  // A manager responsible for no project keeps the whole operation, or somebody
+  // covering an operation in general would be shown nothing at all.
+  const general = await createAccount(adminToken, {
+    username: 'zz-sec-general', name: 'General Manager', password: 'temporary-123', role: 'manager', sector: 'mining'
+  });
+  created.users.push(general.body.id);
+  const generalToken = (await changePassword(
+    (await login('zz-sec-general', 'temporary-123')).body.token, 'temporary-123', 'general-pass-12'
+  )).body.token;
+  const generalWork = await api(generalToken, '/api/activities/ZZSEC-A2');
+  check('a manager who runs no project still sees their whole operation',
+    generalWork.status === 200, String(generalWork.status));
+
   const unsigned = jwt.sign({ id: directorId }, '', { algorithm: 'none' });
   const noneAlg = await api(unsigned, '/api/summary');
   check('an unsigned token is refused', noneAlg.status === 401, String(noneAlg.status));
@@ -233,6 +291,8 @@ try {
   console.error('\nUNCAUGHT:', error.message, '\n', error.stack);
 } finally {
   section('cleanup');
+  await pool.query("DELETE FROM activities WHERE project_id LIKE 'ZZSEC-%' OR id LIKE 'ZZSEC-%'");
+  await pool.query("DELETE FROM projects WHERE id LIKE 'ZZSEC-%'");
   for (const id of created.movements) await pool.query('DELETE FROM movements WHERE id = $1', [id]);
   await pool.query("DELETE FROM movements WHERE purpose LIKE 'ZZTEST %'");
   for (const id of created.users) await pool.query('DELETE FROM users WHERE id = $1', [id]);

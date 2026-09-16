@@ -10,7 +10,7 @@ import { initDatabase, pool } from './db/database.js';
 import { sectors } from './data/seedData.js';
 import { authMiddleware, jwtSecret, FILE_PATH, FILE_TOKEN_PURPOSE } from './lib/auth.js';
 import { hashPassword, passwordMatches, passwordProblem } from './lib/passwords.js';
-import { asyncRoute, hasFullScope, isAdmin, managerScope, parseId, requiredText, validNumber, validateSector, withinScope } from './lib/http.js';
+import { asyncRoute, hasFullScope, isAdmin, managerScope, parseId, projectScope, requiredText, validNumber, validateSector, withinScope } from './lib/http.js';
 import { pendingForMeSql } from './lib/approvals.js';
 import { getCurrentRate } from './lib/rates.js';
 import { FINAL_CHECK_SQL, openWorkSql } from './lib/monthly.js';
@@ -597,6 +597,8 @@ app.get('/api/projects', authMiddleware, asyncRoute(async (req, res) => {
     filters.push(`(p.name ILIKE $${values.length} OR p.location ILIKE $${values.length} OR p.owner ILIKE $${values.length})`);
   }
   managerScope(req.user, 'p.sector', values, filters);
+  // A manager responsible for particular projects sees those projects only.
+  projectScope(req.user, 'p.id', values, filters);
 
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
   const result = await pool.query(

@@ -22,8 +22,8 @@ import multer from 'multer';
 import { pool, safeRollback } from '../db/database.js';
 import { ACTIVITY_STATUSES, ACTIVITY_ORIGINS } from '../db/activitySchema.js';
 import {
-  asyncRoute, contentDisposition, hasFullScope, isAdmin, isValidDate, managerScope, parseId, requiredText,
-  validNumber, validateSector, withinScope
+  asyncRoute, contentDisposition, hasFullScope, isAdmin, isValidDate, managerScope, parseId, projectScope,
+  requiredText, validNumber, validateSector, withinScope
 } from '../lib/http.js';
 import { canApprove, decisionOpen, pendingForMeSql, resolveDirector, APPROVER_ROLE_LABELS } from '../lib/approvals.js';
 import { PAYMENT_METHODS } from '../db/monthlySchema.js';
@@ -341,6 +341,11 @@ async function loadActivity(id, user) {
   const values = [id];
   const scopeFilters = [];
   managerScope(user, 'a.sector', values, scopeFilters);
+  // And, for a manager made responsible for particular projects, to those
+  // projects. Applied to the scoped branch only: a record waiting on this
+  // person's own approval stays readable either way, or they could be handed a
+  // decision they cannot open.
+  projectScope(user, 'a.project_id', values, scopeFilters);
   const scope = scopeFilters.length
     ? `(${scopeFilters.join(' AND ')} OR ${pendingForMeSql(user, values, 'a')})`
     : '';
@@ -486,7 +491,10 @@ router.get('/', asyncRoute(async (req, res) => {
   if (unplanned === '1' || unplanned === 'true') {
     filters.push(`(a.monthly_plan_id IS NULL AND a.approval_status = 'approved' AND a.status NOT IN ('Rejected', 'Cancelled'))`);
   }
-  if (!approvalQueue) managerScope(req.user, 'a.sector', values, filters);
+  if (!approvalQueue) {
+    managerScope(req.user, 'a.sector', values, filters);
+    projectScope(req.user, 'a.project_id', values, filters);
+  }
 
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
   const requestedLimit = Number(limit || 5);

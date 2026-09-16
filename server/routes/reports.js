@@ -19,7 +19,7 @@ import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 import { pool } from '../db/database.js';
 import { sectors } from '../data/seedData.js';
-import { asyncRoute, hasFullScope, isAdmin, managerScope } from '../lib/http.js';
+import { asyncRoute, hasFullScope, isAdmin, managerScope, projectScope } from '../lib/http.js';
 import { getCurrentRate, round2 } from '../lib/rates.js';
 
 const router = express.Router();
@@ -204,6 +204,9 @@ export async function buildReport(user, period) {
   // A manager reads their own working area and nothing else, exactly as
   // everywhere else in this API. The Director passes no filter at all.
   managerScope(user, 'a.sector', values, filters);
+  // A report covers what the reader is responsible for, which for a project
+  // manager is their project.
+  projectScope(user, 'a.project_id', values, filters);
 
   const rows = (await pool.query(
     `${SELECT_ROWS} WHERE ${filters.join(' AND ')} ORDER BY ${PERIOD_DAY} DESC, a.id`,
