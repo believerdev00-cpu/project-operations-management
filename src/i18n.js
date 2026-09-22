@@ -48,7 +48,12 @@ const STRINGS = {
   'nav.projects': { en: 'Projects', rw: 'Imishinga', fr: 'Projets', sw: 'Miradi' },
   'nav.activities': { en: 'Activities', rw: 'Ibikorwa', fr: 'Activités', sw: 'Shughuli' },
   'nav.approvals': { en: 'Other requests', rw: 'Ibindi byifuzo', fr: 'Autres demandes', sw: 'Maombi mengine' },
-  'nav.movements': { en: 'Movements & Facilitation', rw: 'Ingendo n’Ubufasha', fr: 'Déplacements et facilitation', sw: 'Safari na Uwezeshaji' },
+  'nav.movements': { en: 'Trips & Facilitation', rw: 'Ingendo n’Ubufasha', fr: 'Trajets et facilitation', sw: 'Safari na Uwezeshaji' },
+  // The Trips page names the thing it holds -- journeys -- rather than the
+  // operation that runs it. It used to be labelled with the operation's own
+  // name, so renaming that operation to "Facilitation" would have left the
+  // trips register called "Facilitation".
+  'nav.trips': { en: 'Trips', rw: 'Ingendo', fr: 'Trajets', sw: 'Safari' },
   'nav.users': { en: 'People', rw: 'Abakozi', fr: 'Personnes', sw: 'Watu' },
   'nav.partners': { en: 'Partners', rw: 'Abafatanyabikorwa', fr: 'Partenaires', sw: 'Washirika' },
   'nav.overview': { en: 'Overview', rw: 'Incamake', fr: 'Aperçu', sw: 'Muhtasari' },
@@ -294,7 +299,7 @@ const STRINGS = {
   'nav.home': { en: 'Home', rw: 'Ahabanza', fr: 'Accueil', sw: 'Nyumbani' },
   'nav.more': { en: 'More', rw: 'Ibindi', fr: 'Plus', sw: 'Zaidi' },
   'nav.shortApprovals': { en: 'Approvals', rw: 'Kwemeza', fr: 'Approbations', sw: 'Idhini' },
-  'nav.shortBudget': { en: 'Budget', rw: 'Ingengo', fr: 'Budget', sw: 'Bajeti' },
+  'nav.shortBudget': { en: 'Plan', rw: 'Gahunda', fr: 'Plan', sw: 'Mpango' },
   'nav.shortTrips': { en: 'Trips', rw: 'Ingendo', fr: 'Trajets', sw: 'Safari' },
   'form.activityPlaceholder': { en: 'What needs doing? e.g. Buy fertilizer for plot 2', rw: 'Ni iki gikenewe? urugero: Kugura ifumbire y’umurima wa 2', fr: 'Que faut-il faire ? ex. Acheter de l’engrais pour la parcelle 2', sw: 'Nini kinahitajika? mfano Kununua mbolea kwa shamba la 2' },
   'form.moreDetails': { en: 'More details (optional)', rw: 'Ibindi bisobanuro (si ngombwa)', fr: 'Plus de détails (facultatif)', sw: 'Maelezo zaidi (si lazima)' },
@@ -316,6 +321,9 @@ const STRINGS = {
   'home.tileMonthEnd': { en: 'Month-end reports to accept', rw: 'Raporo z’impera z’ukwezi zo kwemeza', fr: 'Rapports de fin de mois à accepter', sw: 'Ripoti za mwisho wa mwezi za kukubali' },
   'home.newTrip': { en: 'New trip', rw: 'Urugendo rushya', fr: 'Nouveau déplacement', sw: 'Safari mpya' },
   'home.seeAll': { en: 'See all {count}', rw: 'Reba byose ({count})', fr: 'Tout voir ({count})', sw: 'Ona zote {count}' },
+  'home.recentUpdates': { en: 'What happened lately', rw: 'Ibyabaye vuba', fr: 'Ce qui s’est passé récemment', sw: 'Yaliyotokea hivi karibuni' },
+  'home.updateDid': { en: 'recorded {amount} {unit}', rw: 'yanditse {amount} {unit}', fr: '{amount} {unit} enregistrés', sw: 'ameandika {amount} {unit}' },
+  'home.updateNoQuantity': { en: 'recorded a day of work', rw: 'yanditse umunsi w’akazi', fr: 'a enregistré une journée de travail', sw: 'ameandika siku ya kazi' },
   'home.thisMonth': { en: 'This month · {month}', rw: 'Uku kwezi · {month}', fr: 'Ce mois-ci · {month}', sw: 'Mwezi huu · {month}' },
   'home.runBy': { en: 'Run by {name}', rw: 'Iyobowe na {name}', fr: 'Géré par {name}', sw: 'Inaendeshwa na {name}' },
   'home.noPlanYet': { en: 'No monthly budget yet', rw: 'Nta ngengo y’imari y’ukwezi iraba', fr: 'Pas encore de budget mensuel', sw: 'Bado hakuna bajeti ya mwezi' },
@@ -585,7 +593,9 @@ const STRINGS = {
   // ---- movement form -------------------------------------------------------
   'movement.formBlurb': { en: 'Write down why the trip happened, where it went, who travelled and what it cost.', rw: 'Andika impamvu urugendo rwabaye, aho rwagiye, abagenzi n\'igiciro.', fr: 'Notez pourquoi le trajet a eu lieu, où il est allé, qui a voyagé et ce qu\'il a coûté.', sw: 'Andika kwa nini safari ilifanyika, ilikwenda wapi, nani alisafiri na gharama.' },
   'movement.generatedOnSave': { en: 'Generated on save', rw: 'Bizakorwa igihe cyo kubika', fr: 'Généré à l’enregistrement', sw: 'Itatengenezwa wakati wa kuhifadhi' },
-  'movement.notLinkedOption': { en: 'Not linked — Movements & Facilitation only', rw: 'Ntabifitanye isano — Ingendo n’Ubufasha gusa', fr: 'Non lié — Déplacements et facilitation uniquement', sw: 'Haijaunganishwa — Safari na Uwezeshaji tu' },
+  // Names no operation: any of the four may now be a trip's related area, so
+  // this option means only "this trip supports no other operation".
+  'movement.notLinkedOption': { en: 'Not linked to another operation', rw: 'Ntabifitanye isano n’ikindi gikorwa', fr: 'Non lié à une autre opération', sw: 'Haijaunganishwa na shughuli nyingine' },
   'movement.newMovement': { en: 'New trip', rw: 'Urugendo rushya', fr: 'Nouveau déplacement', sw: 'Safari mpya' },
   'movement.editMovementTitle': { en: 'Edit trip', rw: 'Hindura urugendo', fr: 'Modifier le trajet', sw: 'Hariri safari' },
   'movement.actualRate': { en: 'actual transaction rate', rw: 'igipimo nyacyo cy’ubucuruzi', fr: 'taux de transaction réel', sw: 'kiwango halisi cha muamala' },
@@ -709,7 +719,7 @@ const STRINGS = {
   'estatus.Complete': { en: 'Complete', rw: 'Byuzuye', fr: 'Complet', sw: 'Kamili' },
 
   // ---- monthly planning ----------------------------------------------------
-  'nav.monthlyPlans': { en: 'Monthly budget', rw: 'Ingengo y’imari y’ukwezi', fr: 'Budget mensuel', sw: 'Bajeti ya mwezi' },
+  'nav.monthlyPlans': { en: 'Monthly plan', rw: 'Gahunda y’ukwezi', fr: 'Plan mensuel', sw: 'Mpango wa mwezi' },
   'nav.myWork': { en: 'My work', rw: 'Akazi kanjye', fr: 'Mon travail', sw: 'Kazi yangu' },
   'nav.myActivities': { en: 'My activities', rw: 'Ibikorwa byanjye', fr: 'Mes activités', sw: 'Shughuli zangu' },
   'nav.myMonth': { en: 'My month', rw: 'Ukwezi kwanjye', fr: 'Mon mois', sw: 'Mwezi wangu' },
@@ -718,13 +728,13 @@ const STRINGS = {
   'nav.myRequests': { en: 'My requests', rw: 'Ibyo nasabye', fr: 'Mes demandes', sw: 'Maombi yangu' },
   'nav.groupReview': { en: 'Review', rw: 'Isuzuma', fr: 'Suivi', sw: 'Mapitio' },
   'nav.groupManage': { en: 'Set up', rw: 'Igenamiterere', fr: 'Configuration', sw: 'Mipangilio' },
-  'monthly.title': { en: 'Monthly budget', rw: 'Ingengo y’imari y’ukwezi', fr: 'Budget mensuel', sw: 'Bajeti ya mwezi' },
+  'monthly.title': { en: 'Monthly plan', rw: 'Gahunda y’ukwezi', fr: 'Plan mensuel', sw: 'Mpango wa mwezi' },
   'monthly.eyebrow': { en: 'MONTHLY BUDGET', rw: 'INGENGO Y’IMARI Y’UKWEZI', fr: 'BUDGET MENSUEL', sw: 'BAJETI YA MWEZI' },
   'monthly.blurb': { en: 'Each month the Director plans the work and budget for every business operation with its manager.', rw: 'Buri kwezi Umuyobozi Mukuru ategura imirimo n’ingengo y’imari bya buri gikorwa cy’ubucuruzi afatanyije n’umuyobozi wacyo.', fr: 'Chaque mois, le Directeur planifie le travail et le budget de chaque opération avec son responsable.', sw: 'Kila mwezi Mkurugenzi hupanga kazi na bajeti ya kila shughuli pamoja na meneja wake.' },
   'monthly.noMoneyNotice': { en: 'The platform records approved budgets, expenses and evidence. It does not transfer money — the funds are given to the manager outside the platform.', rw: 'Uru rubuga rwandika ingengo y’imari yemejwe, amafaranga yakoreshejwe n’ibimenyetso. Ntirwohereza amafaranga — ahabwa umuyobozi hanze y’urubuga.', fr: 'La plateforme enregistre les budgets approuvés, les dépenses et les pièces justificatives. Elle ne transfère pas d’argent — les fonds sont remis au responsable en dehors de la plateforme.', sw: 'Jukwaa hurekodi bajeti zilizoidhinishwa, matumizi na ushahidi. Halihamishi fedha — fedha hukabidhiwa meneja nje ya jukwaa.' },
   'monthly.month': { en: 'Month', rw: 'Ukwezi', fr: 'Mois', sw: 'Mwezi' },
   'monthly.createPlan': { en: 'Create monthly plan', rw: 'Kora gahunda y’ukwezi', fr: 'Créer un plan mensuel', sw: 'Unda mpango wa mwezi' },
-  'monthly.createHint': { en: 'Only operations without a plan for this month are listed, and only the managers of the one you choose. An operation already planned is opened from the table above.', rw: 'Hano hagaragara gusa ibikorwa bitaragira gahunda y\'uku kwezi, n\'abayobozi b\'icyo wahisemo. Igikorwa gifite gahunda gifungurwa mu mbonerahamwe iri hejuru.', fr: 'Seules les opérations sans plan pour ce mois sont listées, et seuls les responsables de celle que vous choisissez. Une opération déjà planifiée s\'ouvre depuis le tableau ci-dessus.', sw: 'Zinaorodheshwa tu shughuli zisizo na mpango wa mwezi huu, na mameneja wa ile uliyochagua. Shughuli iliyopangwa tayari hufunguliwa kutoka jedwali hapo juu.' },
+  'monthly.notes': { en: 'Notes for the month (optional)', rw: 'Inyandiko z’uku kwezi (si ngombwa)', fr: 'Notes pour le mois (facultatif)', sw: 'Maelezo ya mwezi (si lazima)' },
   'monthly.responsibleManager': { en: 'Responsible manager', rw: 'Umuyobozi ubishinzwe', fr: 'Responsable désigné', sw: 'Meneja mhusika' },
   'monthly.approvedAllocation': { en: 'Approved budget', rw: 'Ingengo y’imari yemejwe', fr: 'Budget approuvé', sw: 'Bajeti iliyoidhinishwa' },
   'monthly.budgetYouApprove': { en: 'Budget you approve (USD)', rw: 'Ingengo y\'imari wemeza (USD)', fr: 'Budget que vous approuvez (USD)', sw: 'Bajeti unayoidhinisha (USD)' },
@@ -737,8 +747,30 @@ const STRINGS = {
   'plan.targetUnit': { en: 'Counted in', rw: 'Bibarwa muri', fr: 'Compté en', sw: 'Inahesabiwa kwa' },
   'plan.targetUnitPlaceholder': { en: 'hectares, chickens, trips…', rw: 'hegitari, inkoko, ingendo…', fr: 'hectares, poulets, trajets…', sw: 'hekta, kuku, safari…' },
   'plan.expectedOutput': { en: 'What the finished month looks like', rw: 'Uko ukwezi kurangiye kuzaba kumeze', fr: 'À quoi ressemble le mois terminé', sw: 'Mwezi uliokamilika unavyoonekana' },
-  'plan.expectedOutputPlaceholder': { en: '1 hectare planted with potatoes', rw: 'Hegitari 1 yateweho ibirayi', fr: '1 hectare planté de pommes de terre', sw: 'Hekta 1 iliyopandwa viazi' },
   'plan.completed': { en: 'Done so far', rw: 'Byakozwe kugeza ubu', fr: 'Fait à ce jour', sw: 'Imefanyika hadi sasa' },
+  // ---- the month's agreed objectives ----------------------------------------
+  'plan.objectivesTitle': { en: 'What this month will achieve', rw: 'Icyo uku kwezi kuzageraho', fr: 'Ce que ce mois accomplira', sw: 'Mwezi huu utakachofanikisha' },
+  'plan.objectivesHint': { en: 'The commitments agreed with the manager. Give each one a target where it can be counted; leave the target empty where it cannot.', rw: 'Ibyemeranyijweho n\'umuyobozi. Buri kimwe kigire intego igihe gishobora kubarwa; usige intego ubusa igihe bidashoboka.', fr: 'Les engagements convenus avec le responsable. Donnez une cible à chacun lorsqu\'il est mesurable ; laissez la cible vide sinon.', sw: 'Ahadi zilizokubaliwa na meneja. Kila moja ipewe lengo inapohesabika; acha lengo wazi pasipowezekana.' },
+  'plan.objectiveTitle': { en: 'Objective', rw: 'Intego', fr: 'Objectif', sw: 'Lengo' },
+  'plan.objectiveTitlePlaceholder': { en: 'Cultivate land, buy irrigation equipment…', rw: 'Guhinga ubutaka, kugura ibikoresho byo kuhira…', fr: 'Cultiver la terre, acheter du matériel d\'irrigation…', sw: 'Kulima ardhi, kununua vifaa vya umwagiliaji…' },
+  'plan.objectiveColumn': { en: 'Objective', rw: 'Intego', fr: 'Objectif', sw: 'Lengo' },
+  'plan.whichObjective': { en: 'Which objective did this work count towards?', rw: 'Uyu murimo wabarwe ku yihe ntego?', fr: 'À quel objectif ce travail se rapporte-t-il ?', sw: 'Kazi hii ilihesabiwa kwa lengo lipi?' },
+  'plan.chooseObjective': { en: 'Choose an objective', rw: 'Hitamo intego', fr: 'Choisissez un objectif', sw: 'Chagua lengo' },
+  'plan.doneOfTarget': { en: '{done} of {target} {unit}', rw: '{done} kuri {target} {unit}', fr: '{done} sur {target} {unit}', sw: '{done} kati ya {target} {unit}' },
+  'plan.notCounted': { en: 'Not counted', rw: 'Ntibibarwa', fr: 'Non compté', sw: 'Haihesabiwi' },
+  'plan.overallProgress': { en: 'Overall progress', rw: 'Aho bigeze muri rusange', fr: 'Progression globale', sw: 'Maendeleo kwa ujumla' },
+  'plan.daySavedProgress': { en: '{added} {unit} added to “{title}”. Now {done} of {target} — {percent}%.', rw: '{added} {unit} byongewe kuri “{title}”. Ubu ni {done} kuri {target} — {percent}%.', fr: '{added} {unit} ajoutés à « {title} ». Maintenant {done} sur {target} — {percent} %.', sw: '{added} {unit} zimeongezwa kwa “{title}”. Sasa ni {done} kati ya {target} — {percent}%.' },
+  'home.recordTodaysWork': { en: '+ Record today’s work', rw: '+ Andika akazi k’uyu munsi', fr: '+ Enregistrer le travail du jour', sw: '+ Andika kazi ya leo' },
+  // Movement & Facilitation coordinates for the three primary operations, so
+  // each of its objectives names the one it supports.
+  'plan.supportsOperation': { en: 'Supports which operation?', rw: 'Gifasha igikorwa ki?', fr: 'Soutient quelle opération ?', sw: 'Inasaidia shughuli gani?' },
+  'plan.supportsAll': { en: 'All three operations', rw: 'Ibikorwa byose uko ari bitatu', fr: 'Les trois opérations', sw: 'Shughuli zote tatu' },
+  'plan.supportsBadge': { en: 'Supports {operation}', rw: 'Gifasha {operation}', fr: 'Soutient {operation}', sw: 'Inasaidia {operation}' },
+  'plan.supportCounts': { en: '{objectives} objective(s) · {updates} update(s)', rw: 'Intego {objectives} · amakuru {updates}', fr: '{objectives} objectif(s) · {updates} mise(s) à jour', sw: 'Malengo {objectives} · taarifa {updates}' },
+  'plan.supportSummary': { en: 'Support given by operation', rw: 'Ubufasha bwatanzwe kuri buri gikorwa', fr: 'Soutien apporté par opération', sw: 'Msaada uliotolewa kwa kila shughuli' },
+  'plan.optionalDetails': { en: 'Budget and other details (optional)', rw: 'Ingengo y\'imari n\'ibindi bisobanuro (si ngombwa)', fr: 'Budget et autres détails (facultatif)', sw: 'Bajeti na maelezo mengine (si lazima)' },
+  'plan.budgetOptional': { en: 'Optional. Leave it empty and the month has no spending limit.', rw: 'Si ngombwa. Usige ubusa maze ukwezi ntikugire urugero rw\'amafaranga.', fr: 'Facultatif. Laissez vide et le mois n\'a aucune limite de dépense.', sw: 'Si lazima. Ukiacha wazi, mwezi hauna kikomo cha matumizi.' },
+  'plan.createHintObjectives': { en: 'Saving hands the month straight to the manager. There is nothing to confirm afterwards.', rw: 'Kubika bihita bishyira ukwezi mu maboko y\'umuyobozi. Nta kindi cyo kwemeza nyuma.', fr: 'L\'enregistrement remet le mois directement au responsable. Il n\'y a rien à confirmer ensuite.', sw: 'Kuhifadhi humkabidhi meneja mwezi moja kwa moja. Hakuna cha kuthibitisha baadaye.' },
   'plan.remainingWork': { en: 'Still to do', rw: 'Bisigaye gukorwa', fr: 'Reste à faire', sw: 'Bado kufanya' },
   'plan.progress': { en: 'Progress', rw: 'Aho bigeze', fr: 'Avancement', sw: 'Maendeleo' },
   'plan.daysWorked': { en: 'Days worked', rw: 'Iminsi yakozwe', fr: 'Jours travaillés', sw: 'Siku zilizofanyika' },
@@ -849,6 +881,11 @@ const STRINGS = {
   'monthly.planStatus.Draft': { en: 'Draft', rw: 'Umushinga', fr: 'Brouillon', sw: 'Rasimu' },
   'monthly.planStatus.Confirmed': { en: 'Confirmed', rw: 'Byemejwe', fr: 'Confirmé', sw: 'Imethibitishwa' },
   'monthly.planStatus.Closed': { en: 'Closed', rw: 'Bwarangiye', fr: 'Clôturé', sw: 'Imefungwa' },
+  'plan.proofNotAttached': { en: 'The day was saved, but the photos could not be attached. Add them from the day’s row.', rw: 'Umunsi wabitswe, ariko amafoto ntiyashoboye gushyirwaho. Uyashyireho ubikuye ku murongo w’uwo munsi.', fr: 'La journée a été enregistrée, mais les photos n’ont pas pu être jointes. Ajoutez-les depuis la ligne du jour.', sw: 'Siku imehifadhiwa, lakini picha hazikuweza kuambatishwa. Ziongeze kutoka safu ya siku hiyo.' },
+  'monthly.nothingThisMonth': { en: 'Nothing planned for {month}.', rw: 'Nta gahunda ya {month}.', fr: 'Rien de prévu pour {month}.', sw: 'Hakuna kilichopangwa kwa {month}.' },
+  'monthly.planIsIn': { en: 'Your plan is in {month}.', rw: 'Gahunda yawe iri muri {month}.', fr: 'Votre plan est en {month}.', sw: 'Mpango wako uko {month}.' },
+  'monthly.goToMonth': { en: 'Go to {month}', rw: 'Jya muri {month}', fr: 'Aller à {month}', sw: 'Nenda {month}' },
+  'monthly.noPlanAnywhere': { en: 'The Director has not written a plan for your operation yet.', rw: 'Umuyobozi ntararandika gahunda y’igikorwa cyawe.', fr: 'Le Directeur n’a pas encore rédigé de plan pour votre opération.', sw: 'Mkurugenzi bado hajaandika mpango wa shughuli yako.' },
   'monthly.noPlans': { en: 'This month has not been planned yet.', rw: 'Uku kwezi ntikuraboneka gahunda.', fr: 'Ce mois n\'a pas encore été planifié.', sw: 'Mwezi huu haujapangwa bado.' },
   'monthly.noActivitiesInPlan': { en: 'No work planned yet. Add the first activity below.', rw: 'Nta kazi karateganywa. Ongeraho igikorwa cya mbere hano hasi.', fr: 'Aucun travail planifié. Ajoutez la première activité ci-dessous.', sw: 'Hakuna kazi iliyopangwa. Ongeza shughuli ya kwanza hapa chini.' },
   'monthly.planHistory': { en: 'Plan history', rw: 'Amateka ya gahunda', fr: 'Historique du plan', sw: 'Historia ya mpango' },
@@ -906,6 +943,15 @@ const STRINGS = {
   'monthend.status.Submitted': { en: 'Submitted', rw: 'Yoherejwe', fr: 'Soumis', sw: 'Imewasilishwa' },
   'monthend.status.Accepted': { en: 'Accepted', rw: 'Yemewe', fr: 'Accepté', sw: 'Imekubaliwa' },
   'monthend.status.Returned': { en: 'Returned', rw: 'Yasubijwe', fr: 'Renvoyé', sw: 'Imerudishwa' },
+
+  // ---- the month-end report the system compiles -------------------------------
+  'report.monthEndTitle': { en: 'Month-end report', rw: 'Raporo y’impera z’ukwezi', fr: 'Rapport de fin de mois', sw: 'Ripoti ya mwisho wa mwezi' },
+  'report.target': { en: 'Target', rw: 'Intego', fr: 'Cible', sw: 'Lengo' },
+  'report.actual': { en: 'Actual', rw: 'Ibyakozwe', fr: 'Réalisé', sw: 'Halisi' },
+  'report.percent': { en: '%', rw: '%', fr: '%', sw: '%' },
+  'report.overallCompletion': { en: 'Overall completion', rw: 'Byarangiye muri rusange', fr: 'Achèvement global', sw: 'Ukamilishaji kwa ujumla' },
+  'report.dailyUpdates': { en: 'Daily operational updates', rw: 'Amakuru y’buri munsi', fr: 'Mises à jour quotidiennes', sw: 'Taarifa za kila siku' },
+  'report.loading': { en: 'Compiling the report…', rw: 'Turimo gutegura raporo…', fr: 'Compilation du rapport…', sw: 'Tunaandaa ripoti…' },
 
   // ---- loading, errors and retry ---------------------------------------------
   'app.loadFailed': { en: 'This page could not be loaded.', rw: 'Iyi paji ntiyashoboye gufunguka.', fr: 'Cette page n’a pas pu être chargée.', sw: 'Ukurasa huu haukuweza kupakiwa.' },

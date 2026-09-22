@@ -111,7 +111,7 @@ router.post('/', asyncRoute(async (req, res) => {
   const weak = passwordProblem(password, { username });
   if (weak) return res.status(400).json({ message: weak });
   if (!validOperation(operation)) {
-    return res.status(400).json({ message: 'Choose one business operation: Farming, Agriculture, Mining, or Movements & Facilitation.' });
+    return res.status(400).json({ message: 'Choose one business operation: Mining, Agriculture, Farming, or Movement & Facilitation.' });
   }
   // View-only is the only level an external partner is given. Anything else in
   // the request is refused outright rather than quietly downgraded, so a
@@ -142,7 +142,7 @@ router.post('/', asyncRoute(async (req, res) => {
 router.patch('/:id/operation', asyncRoute(async (req, res) => {
   const { operation } = req.body || {};
   if (!validOperation(operation)) {
-    return res.status(400).json({ message: 'Choose one business operation: Farming, Agriculture, Mining, or Movements & Facilitation.' });
+    return res.status(400).json({ message: 'Choose one business operation: Mining, Agriculture, Farming, or Movement & Facilitation.' });
   }
   const result = await pool.query(
     "UPDATE users SET sector = $2 WHERE id = $1 AND role = 'partner' RETURNING id",

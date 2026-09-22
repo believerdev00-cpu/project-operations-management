@@ -10,3 +10,6 @@ server/uploads
 
 
 .env*
+
+# Vercel CLI project linkage (org and project ids) -- local, never committed
+.vercel

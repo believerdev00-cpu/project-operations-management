@@ -62,6 +62,9 @@ export default function Home({
   const [myWork, setMyWork] = useState(null);
   const [recent, setRecent] = useState([]);
   const [finalChecks, setFinalChecks] = useState(null);
+  // What the managers have actually recorded lately, across every operation in
+  // scope. The Director monitors rather than asks: this arrives with the page.
+  const [updates, setUpdates] = useState([]);
   const latest = useRef(0);
 
   // Its own lists, reloaded whenever the workspace refreshes its data.
@@ -73,9 +76,13 @@ export default function Home({
       isDirector ? fetchJson('/api/activities?awaiting=final-check&limit=6') : Promise.resolve([]),
       // What they finished lately, so the page can say so rather than simply
       // losing the work the moment it is done.
-      isWorker ? fetchJson('/api/activities?status=Completed&assignedTo=me&limit=3') : Promise.resolve([])
-    ]).then(([planResult, workResult, checkResult, doneResult]) => {
+      isWorker ? fetchJson('/api/activities?status=Completed&assignedTo=me&limit=3') : Promise.resolve([]),
+      // The operational history, newest first. A team member has no month of
+      // their own to monitor, so they are not asked for it.
+      isWorker ? Promise.resolve({ updates: [] }) : fetchJson('/api/monthly-plans/updates?limit=12')
+    ]).then(([planResult, workResult, checkResult, doneResult, updateResult]) => {
       if (request !== latest.current) return;
+      setUpdates(updateResult.status === 'fulfilled' ? updateResult.value.updates || [] : []);
       setRecent(doneResult.status === 'fulfilled' ? doneResult.value : []);
       setPlans(planResult.status === 'fulfilled' ? planResult.value.operations || [] : []);
       setMyWork(workResult.status === 'fulfilled'
@@ -114,6 +121,12 @@ export default function Home({
   const operations = BUSINESS_OPERATIONS.filter((operation) => isDirector || user.coversAllSectors || operation.id === user.sector);
   const rowFor = (id) => (sectorRows || []).find((row) => row.id === id) || {};
   const planFor = (id) => (plans || []).find((plan) => plan.operation === id);
+  // The manager's own month, taken from the review payload that is already
+  // loaded -- it carries each plan's objectives and overall figure, so the
+  // manager's dashboard costs no extra request.
+  const myMonth = isManager
+    ? (plans || []).find((plan) => plan.operation === user.sector || user.coversAllSectors)
+    : null;
 
   // A team member's page: their name for it, how much there is, and the list.
   if (isWorker) {
@@ -163,6 +176,49 @@ export default function Home({
       </div>}
     </section>
 
+    {/* THE MANAGER'S DASHBOARD (section 12): what must be completed this month,
+        what is already done, and one button to record today's work. It comes
+        before the queues and the tiles because leading the operation and writing
+        down what happened IS the manager's job -- the rest is secondary.
+
+        The Director does not get this block: they monitor the four operations
+        further down the page and do not record work at all. */}
+    {isManager && myMonth && myMonth.objectives?.length > 0 && <section className="my-month">
+      <div className="my-month-head">
+        <div>
+          <h3>{t('plan.objectivesTitle')}</h3>
+          <small>{fill(t('home.thisMonth'), { month: monthLabel(month, language) })}</small>
+        </div>
+        {myMonth.overallProgress !== null && myMonth.overallProgress !== undefined
+          && <span className="my-month-overall">{myMonth.overallProgress}%</span>}
+      </div>
+      <div className="my-month-objectives">
+        {myMonth.objectives.map((objective) => <div className="my-month-objective" key={objective.id}>
+          <div className="my-month-objective-head">
+            <strong>{objective.title}</strong>
+            {objective.percent === null
+              ? <small className="muted-cell">{t('plan.notCounted')}</small>
+              : <small className={objective.complete ? 'is-done' : ''}>{objective.percent}%</small>}
+          </div>
+          {objective.percent !== null && <>
+            <div className="objective-bar"><span style={{ width: `${objective.percent}%` }} /></div>
+            <div className="objective-figures">
+              <span>{fill(t('plan.doneOfTarget'), {
+                done: objective.quantityDone, target: objective.targetQuantity, unit: objective.targetUnit
+              })}</span>
+              {!objective.complete && <span className="muted-cell">{fill(t('plan.leftToDo'), {
+                amount: objective.quantityRemaining, unit: objective.targetUnit
+              })}</span>}
+            </div>
+          </>}
+        </div>)}
+      </div>
+      {/* The main action on the manager's whole screen. */}
+      <button className="primary-btn my-month-record" type="button" onClick={() => onOpenPlan(myMonth.id)}>
+        {t('home.recordTodaysWork')}
+      </button>
+    </section>}
+
     <h3 className="home-heading">{t('home.todo')}</h3>
     <div className="home-tiles">
       {tiles.map((tile) => <button key={tile.id} type="button" className={`home-tile home-tile-${tile.tone}`} onClick={tile.onClick}>
@@ -190,6 +246,33 @@ export default function Home({
       <WorkList items={finalChecks} user={user} t={t} language={language} onOpen={onOpenActivity} />
     </>}
 
+    {/* WHAT HAPPENED. The Director does not ask a manager how the month is
+        going: every day a manager records appears here, newest first, with the
+        objective it counted towards and where that objective now stands. A
+        manager sees the same feed for their own operation. */}
+    {!isWorker && updates.length > 0 && <>
+      <h3 className="home-heading">{t('home.recentUpdates')}</h3>
+      <ul className="update-feed">
+        {updates.map((update) => <li key={update.id} className="update-row">
+          <button type="button" className="update-main" onClick={() => onOpenPlan(update.planId)}>
+            <span className="update-when">{formatDay(update.date, language)}</span>
+            <span className="update-what">
+              <strong>{operationName(update.operation, language)}</strong>
+              {update.objectiveTitle && <span className="update-objective">{update.objectiveTitle}</span>}
+              <span className="update-detail">
+                {update.quantityDone > 0
+                  ? fill(t('home.updateDid'), { amount: update.quantityDone, unit: update.targetUnit })
+                  : (update.notes || t('home.updateNoQuantity'))}
+              </span>
+            </span>
+            {update.objectivePercent !== null && update.objectivePercent !== undefined
+              && <span className="update-percent">{update.objectivePercent}%</span>}
+          </button>
+          <small className="update-by">{update.submittedByName}</small>
+        </li>)}
+      </ul>
+    </>}
+
     <h3 className="home-heading">{fill(t('home.thisMonth'), { month: monthLabel(month, language) })}</h3>
     <div className="home-operations">
       {operations.map((operation) => {
@@ -206,6 +289,27 @@ export default function Home({
               because the figure was only worked out at confirmation. The Director
               now states it when they create the plan, so it is a real number from
               the first day and is shown as one. */}
+          {/* WHAT THE MONTH COMMITTED TO, AND HOW FAR IT HAS GOT. This comes
+              first because it is what the month is; the money is a detail of it
+              and follows underneath. Every bar is summed from the manager's own
+              records -- nobody types a percentage anywhere in this system. */}
+          {plan?.objectives?.length > 0 && <div className="operation-objectives">
+            {plan.overallProgress !== null && plan.overallProgress !== undefined && <div className="operation-overall">
+              <span>{t('plan.overallProgress')}</span>
+              <strong>{plan.overallProgress}%</strong>
+            </div>}
+            {plan.objectives.map((objective) => <div className="operation-objective" key={objective.id}>
+              <div className="operation-objective-head">
+                <span>{objective.title}</span>
+                {objective.percent === null
+                  ? <small className="muted-cell">{t('plan.notCounted')}</small>
+                  : <small>{objective.percent}%</small>}
+              </div>
+              {objective.percent !== null && <div className="objective-bar">
+                <span style={{ width: `${objective.percent}%` }} />
+              </div>}
+            </div>)}
+          </div>}
           {plan
             ? <MoneyBar approved={plan.approvedBudget} spent={plan.totalSpent}
               format={formatUsdShort} rates={rate} />

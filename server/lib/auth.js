@@ -51,7 +51,24 @@ function partnerMayReach(originalUrl) {
 // token: minted on request by POST /api/auth/file-link, good for a few minutes,
 // and bound to the one path it was minted for. A session token is refused in the
 // query string, and a file token is refused everywhere else.
-export const FILE_PATH = /^\/api\/(activities|movements)\/[^/]+\/evidence\/[^/]+\/file$/;
+// The only addresses a five-minute file token may be minted for, and the only
+// ones that accept `?token=` at all. Deliberately exhaustive rather than a
+// prefix: every entry ends in /evidence/<id>/file, so nothing but an evidence
+// file can ever be reached this way, and the route itself still runs the full
+// permission check on the account the token names.
+//
+// The third alternative is the month's daily records. Their evidence hangs off
+// a day of a plan, so the address carries an extra /reports/<id> segment that
+// the original two-name pattern could not match -- which meant the browser
+// could never mint a token for a photo attached to a day, and the Director and
+// the manager who took it both saw nothing when they clicked it, even though
+// the file was on disk and the route would have served it to either.
+export const FILE_PATH = new RegExp(
+  '^/api/(?:'
+  + '(?:activities|movements)/[^/]+'
+  + '|monthly-plans/[^/]+/reports/[^/]+'
+  + ')/evidence/[^/]+/file$'
+);
 export const FILE_TOKEN_PURPOSE = 'file';
 
 function requestPath(req) {

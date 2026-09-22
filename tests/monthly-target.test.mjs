@@ -94,10 +94,12 @@ try {
   });
   check('a target with no unit is refused', badTarget.status === 400, badTarget.body.message);
 
-  const confirmed = await post(admin, `/api/monthly-plans/${planId}/confirm`);
-  check('the month is confirmed with no activities and no named manager', confirmed.status === 200,
-    `${confirmed.status} ${confirmed.body.message}`);
-  check('  and reads as ready for the manager', confirmed.body.status === 'Confirmed', confirmed.body.status);
+  // No confirmation step: a month with a target and no activities is already the
+  // manager's the moment the Director saves it.
+  const live = await api(admin, `/api/monthly-plans/${planId}`);
+  check('the month is live with no activities and no named manager',
+    live.body.plan.status === 'Confirmed', `${live.status} ${live.body.plan?.status}`);
+  check('  and reads as ready for the manager', live.body.plan.status === 'Confirmed', live.body.plan.status);
 
   // ---- the manager sees it, because of their sector -------------------------
   section('The Agriculture manager sees it automatically');

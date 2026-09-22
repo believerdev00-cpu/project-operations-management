@@ -441,7 +441,7 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
       FROM activities${whereSector} GROUP BY sector`, scopeValues),
     pool.query(`SELECT sector, COUNT(*)::int AS approvals_pending FROM approvals WHERE status = 'Pending'${andSector} GROUP BY sector`, scopeValues),
     // Per operation, a movement counts towards the operation it supported, and
-    // a standalone one towards Movements & Facilitation itself.
+    // a standalone one towards Facilitation itself.
     pool.query(`SELECT COALESCE(m.related_area, 'movement') AS sector, COALESCE(SUM(${movementRwf}), 0) AS movement_spend
       FROM movements m${movementScope} GROUP BY COALESCE(m.related_area, 'movement')`, movementValues)
   ]);

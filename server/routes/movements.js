@@ -9,6 +9,7 @@ import {
   validNumber, sectorIds
 } from '../lib/http.js';
 import { MOVEMENT_STATUSES } from '../db/movementSchema.js';
+import { TRIPS_OPERATION } from '../../shared/businessOperations.js';
 import { canApprove, decisionOpen, pendingForMeSql, resolveDirector, APPROVER_ROLE_LABELS } from '../lib/approvals.js';
 import { CURRENCIES, convertAmount, getCurrentRate, round2 } from '../lib/rates.js';
 
@@ -82,10 +83,12 @@ class MovementError extends Error {
 }
 
 function canCreate(user) {
-  // An all-operations manager covers Movements & Facilitation like any other. A
-  // team member in the operation follows its trips but does not raise one: that
-  // would put a funding request in the Director's queue, which only managers do.
-  return hasFullScope(user) || (user.role === 'manager' && user.sector === 'movement');
+  // The trips register belongs to TRIPS_OPERATION -- Movement & Facilitation --
+  // because moving livestock and materials is that operation's work. An
+  // all-operations manager covers it like any other. A team member in the
+  // operation follows its trips but does not raise one: that would put a
+  // funding request in the Director's queue, which only managers do.
+  return hasFullScope(user) || (user.role === 'manager' && user.sector === TRIPS_OPERATION);
 }
 
 // Section 7 keeps approval, funds and final expenditure with the Director.
@@ -246,13 +249,13 @@ const SELECT_MOVEMENT = `
 function visibilityScope(user, values) {
   // Running the movements operation is what earns the whole-organisation view,
   // and that is a job, not a location. The test used to be on the sector alone,
-  // so a TEAM MEMBER filed under 'movement' -- who can create nothing here and
+  // so a TEAM MEMBER filed under the trips operation -- who can create nothing here and
   // decide nothing -- was shown every trip in the organisation and every money
-  // figure with it, while their colleague in Farming saw only their own area.
+  // figure with it, while their colleague in Mining saw only their own area.
   // Whoever carries the work still sees their own records through the
   // assigned/created checks on each route; this is only the broad listing.
   if (hasFullScope(user)) return '';
-  if (user.sector === 'movement' && user.role === 'manager') return '';
+  if (user.sector === TRIPS_OPERATION && user.role === 'manager') return '';
   values.push(user.sector);
   return `m.related_area = $${values.length}`;
 }
@@ -288,13 +291,15 @@ function readMovementPayload(payload) {
   const currency = payload.currency || 'RWF';
   if (!CURRENCIES.includes(currency)) throw new MovementError(400, 'Currency must be RWF, USD or CDF.');
 
-  // A movement is either standalone or linked to one other area of operation.
-  // Logistics & Facilitation is never its own related area.
+  // A movement is either standalone or linked to the one operation it supports,
+  // and any of the four may be that operation -- Facilitation included. Only the
+  // four ids are accepted; anything else is a caller sending a sector that does
+  // not exist.
   const relatedArea = payload.relatedArea === '' || payload.relatedArea === undefined || payload.relatedArea === null
     ? null
     : payload.relatedArea;
-  if (relatedArea !== null && (!sectorIds.has(relatedArea) || relatedArea === 'movement')) {
-    throw new MovementError(400, 'Related area must be Farming, Agriculture or Mining, or left empty.');
+  if (relatedArea !== null && !sectorIds.has(relatedArea)) {
+    throw new MovementError(400, 'Related area must be one of the four business operations, or left empty.');
   }
 
   if (!isValidDate(payload.departureDate) || !isValidDate(payload.returnDate)) {
@@ -399,7 +404,7 @@ function canEdit(user, row) {
   if (isAdmin(user)) return true;
   // A movement officer may correct their own request only while it is still
   // theirs to change; once it is with its approver it is read-only to them.
-  return (hasFullScope(user) || user.sector === 'movement')
+  return (hasFullScope(user) || user.sector === TRIPS_OPERATION)
     && row.created_by === user.id
     && ['Draft', 'Pending Approval'].includes(row.status);
 }
@@ -603,7 +608,7 @@ router.get('/:id', asyncRoute(async (req, res) => {
 
 router.post('/', asyncRoute(async (req, res) => {
   if (!canCreate(req.user)) {
-    return res.status(403).json({ message: 'Only the Director or a Movements & Facilitation manager can create a trip.' });
+    return res.status(403).json({ message: 'Only the Director or a Facilitation manager can create a trip.' });
   }
   const payload = readMovementPayload(req.body || {});
 
@@ -1182,7 +1187,7 @@ router.get('/:id/evidence', asyncRoute(async (req, res) => {
 // memory, so a refused caller never gets the server to buffer 100 MB first.
 const authorizeEvidenceUpload = asyncRoute(async (req, res, next) => {
   const existing = await loadMovement(req.params.id, req.user);
-  if (!isAdmin(req.user) && !((hasFullScope(req.user) || req.user.sector === 'movement') && existing.created_by === req.user.id)) {
+  if (!isAdmin(req.user) && !((hasFullScope(req.user) || req.user.sector === TRIPS_OPERATION) && existing.created_by === req.user.id)) {
     return res.status(403).json({ message: 'You cannot attach evidence to this movement.' });
   }
   req.movement = existing;

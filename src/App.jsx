@@ -4,7 +4,7 @@ import PartnerPortal from './PartnerPortal.jsx';
 import ExternalPartners from './ExternalPartners.jsx';
 import MonthlyPlans from './MonthlyPlans.jsx';
 import { LANGUAGES, LanguageContext, displayLanguage, fill, setDisplayLanguage, useI18n, useLanguage, useT } from './i18n.js';
-import { BUSINESS_OPERATIONS, operationName } from '../shared/businessOperations.js';
+import { BUSINESS_OPERATIONS, operationName, runsTrips } from '../shared/businessOperations.js';
 import { OPERATIONS_WITH_CATEGORIES, OTHER_CATEGORY } from '../shared/categories.js';
 import ActivityReview, {
   ACTIVITY_STATUSES, approvalTone, approverName, categoryLabel,
@@ -34,7 +34,7 @@ function categoriesForSector(sectorId) {
 }
 
 // Rows store the operation id ('movement'), which is not what a reader should
-// see: they get "Movements & Facilitation", in their own language.
+// see: they get "Facilitation", in their own language.
 function sectorName(sectorId) {
   return operationName(sectorId, displayLanguage());
 }
@@ -783,10 +783,10 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // difference between a team member and a manager was which buttons were hidden
   // once they got there. So a team member had "Projects" (nothing they can do),
   // "Other requests" (cannot decide, cannot raise -- the server answers 403),
-  // "Monthly budget" (every control hidden, the operation's budget on show) and
+  // "Monthly plan" (every control hidden, the operation's budget on show) and
   // "Reports" (a whole-operation budget export). Four of their seven items led
   // nowhere. Each role now gets the pages it works in and nothing else.
-  const coversTrips = isDirector || Boolean(user.coversAllSectors) || user.sector === 'movement';
+  const coversTrips = isDirector || runsTrips(user);
   let navItems;
   if (isDirector) {
     // The Director runs the whole organisation, so they do see every page --
@@ -797,7 +797,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       ['approval-queue', t('nav.approvalQueue'), approvalCount, 'main', t('nav.shortApprovals')],
       ['monthly', t('nav.monthlyPlans'), 0, 'main', t('nav.shortBudget')],
       ['activities', t('nav.activities'), 0, 'main', t('nav.activities')],
-      ['movements', operationName('movement', language), 0, 'main', t('nav.shortTrips')],
+      ['movements', t('nav.trips'), 0, 'main', t('nav.shortTrips')],
       ['reports', t('nav.reports'), 0, 'review'],
       ['approvals', t('nav.approvals'), 0, 'review'],
       ['projects', t('nav.projects'), 0, 'manage'],
@@ -814,8 +814,8 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       ['monthly', t('nav.myMonth'), 0, 'main', t('nav.shortMonth')],
       ['approval-queue', t('nav.approvalQueue'), approvalCount, 'main', t('nav.shortApprovals')],
       ['activities', t('nav.allWork'), 0, 'main', t('nav.activities')],
-      ...(coversTrips ? [['movements', operationName('movement', language), 0, 'main', t('nav.shortTrips')]] : []),
-      ...(coversTrips ? [] : [['movements', operationName('movement', language), 0, 'more']]),
+      ...(coversTrips ? [['movements', t('nav.trips'), 0, 'main', t('nav.shortTrips')]] : []),
+      ...(coversTrips ? [] : [['movements', t('nav.trips'), 0, 'more']]),
       ['reports', t('nav.reports'), 0, 'more'],
       ['approvals', t('nav.myRequests'), 0, 'more']
     ];
@@ -1764,7 +1764,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const pageTitle = navItems.find(([id]) => id === view)?.[1];
   const go = (id, filter) => navigate(filter ? `${buildHash(id)}?filter=${encodeURIComponent(filter)}` : buildHash(id));
   const addActivity = () => navigate(buildHash('activities', 'new'));
-  const coversMovements = Boolean(user.coversAllSectors) || user.sector === 'movement';
+  const coversMovements = runsTrips(user);
   const canAddMovement = isDirector || (isManager && coversMovements);
   // Stable, because the modules key their loading effects on them.
   const openPlanRoute = useCallback((planId) => navigate(buildHash('monthly', planId)), [navigate]);

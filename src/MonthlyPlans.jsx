@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BUSINESS_OPERATIONS, operationName } from '../shared/businessOperations.js';
+import { BUSINESS_OPERATIONS, PRIMARY_OPERATIONS, isSupportOperation, operationName } from '../shared/businessOperations.js';
 import { OTHER_CATEGORY, categoriesForOperation } from '../shared/categories.js';
-import { fill, useI18n } from './i18n.js';
+import { displayLanguage, fill, useI18n } from './i18n.js';
 import { EvidenceList, EvidenceUpload, categoryLabel, trailActionLabel } from './ActivityReview.jsx';
 import { DetailView, useBusy, useDialog } from './ui.jsx';
 import { FilePicker, activityJourney, formatLocal, journeyLabel, journeyTone, nextAction } from './journey.jsx';
@@ -26,9 +26,20 @@ const UNIT_SUGGESTIONS = [
 
 // A month starts empty: the Director names the operation and the manager, states
 // the budget they are approving, and says what the month is for.
+// A blank commitment line in the Director's plan form.
+const emptyObjective = { title: '', targetQuantity: '', targetUnit: '', supportsOperation: '' };
+
+// The month as the Director types it.
+//
+// `objectives` is the month: the list agreed with the managers before anybody
+// opened this screen. Everything else on here is optional detail -- the budget,
+// the category, the covering manager -- and lives behind a fold, because a
+// Director who has just come out of the meeting should be able to type what was
+// agreed and leave.
 const emptyPlan = {
   operation: '', managerId: '', approvedBudget: '', category: '', objective: '',
-  targetQuantity: '', targetUnit: '', expectedOutput: ''
+  targetQuantity: '', targetUnit: '', expectedOutput: '',
+  objectives: [{ ...emptyObjective }]
 };
 
 // A day of the manager's work towards a planned activity.
@@ -105,6 +116,9 @@ export default function MonthlyPlans({
   const [month, setMonth] = useState(thisMonth);
   const [review, setReview] = useState(null);
   const [loadFailed, setLoadFailed] = useState(false);
+  // Every month this account has a plan in, so an empty month can point at the
+  // one that is not empty rather than being a dead end.
+  const [otherMonths, setOtherMonths] = useState([]);
   const [detail, setDetail] = useState(null);
   // Approved work in the plan's operation that no month has taken in yet --
   // asked of the server, not picked out of the newest page of the register.
@@ -134,9 +148,19 @@ export default function MonthlyPlans({
   const load = useCallback(async () => {
     const request = ++latestLoad.current;
     try {
-      const result = await fetchJson(`/api/monthly-plans/review?month=${month}`);
+      // The month on screen, and -- for the empty case -- every month this
+      // account has a plan in. A plan written for next month is invisible on a
+      // screen that opens on this one, and "this month has not been planned
+      // yet" reads as "you have nothing", which is how a manager ends up
+      // believing the Director's plan never arrived. Asked for together so the
+      // empty state can name the month that does have their work in it.
+      const [result, mine] = await Promise.all([
+        fetchJson(`/api/monthly-plans/review?month=${month}`),
+        fetchJson('/api/monthly-plans').catch(() => [])
+      ]);
       if (request !== latestLoad.current) return;
       setReview(result);
+      setOtherMonths(Array.isArray(mine) ? mine : []);
       setLoadFailed(false);
     } catch (loadError) {
       if (request !== latestLoad.current) return;
@@ -213,6 +237,26 @@ export default function MonthlyPlans({
 
   // Operations that have no plan for this month yet, so the Director is offered
   // exactly the ones still to plan.
+  // The month nearest to the one on screen that this account actually has a
+  // plan in. Months ahead are preferred over months behind at the same
+  // distance: a manager looking at an empty September wants the October plan
+  // they are about to work, not the August one they finished.
+  const elsewhere = useMemo(() => {
+    const distance = (value) => {
+      const [year, index] = value.split('-').map(Number);
+      const [nowYear, nowIndex] = month.split('-').map(Number);
+      return (year * 12 + index) - (nowYear * 12 + nowIndex);
+    };
+    return otherMonths
+      .filter((plan) => plan.month !== month)
+      .sort((left, right) => {
+        const a = distance(left.month);
+        const b = distance(right.month);
+        // Closest first; a tie between one month ahead and one behind goes ahead.
+        return Math.abs(a) - Math.abs(b) || b - a;
+      })[0] || null;
+  }, [otherMonths, month]);
+
   const unplanned = useMemo(() => {
     const planned = new Set((review?.operations || []).map((plan) => plan.operation));
     return BUSINESS_OPERATIONS.filter((operation) => !planned.has(operation.id));
@@ -240,6 +284,17 @@ export default function MonthlyPlans({
           method: 'POST',
           body: JSON.stringify({
             operation: chosenOperation, month, managerId: newPlan.managerId || null,
+            // The agreed list. Blank trailing rows are dropped by the server, so
+            // the spare line the form always shows never blocks a save.
+            objectives: (newPlan.objectives || [])
+              .filter((row) => String(row?.title ?? '').trim() || String(row?.targetQuantity ?? '').trim())
+              .map((row) => ({
+                title: String(row.title ?? '').trim(),
+                targetQuantity: row.targetQuantity === '' || row.targetQuantity === null
+                  || row.targetQuantity === undefined ? null : Number(row.targetQuantity),
+                targetUnit: String(row.targetUnit ?? '').trim(),
+                supportsOperation: row.supportsOperation || null
+              })),
             // The budget the Director approves for the month. Everything the
             // manager does afterwards has to fit inside it.
             approvedBudget: newPlan.approvedBudget === '' ? 0 : Number(newPlan.approvedBudget),
@@ -319,14 +374,37 @@ export default function MonthlyPlans({
       });
       // The day's proof is attached to the day it belongs to, not to the month
       // in general -- so it is uploaded once the day has an id.
-      for (const file of proof || []) {
-        const data = new FormData();
-        data.append('kind', 'Photograph');
-        data.append('files', file);
-        await upload(`/api/monthly-plans/${openPlanId}/reports/${saved.report.id}/evidence`, data);
+      //
+      // `day`, not `report`: the response also carries the month-end report
+      // under `report`, and reading the id off that one crashed the save.
+      // Checked rather than assumed, because the day itself is already written
+      // by this point -- a surprise in the response must not read to the
+      // manager as "your work was not saved".
+      const dayId = saved.day?.id ?? null;
+      const files = proof || [];
+      if (files.length && !dayId) {
+        onError(t('plan.proofNotAttached'));
+      } else {
+        for (const file of files) {
+          const data = new FormData();
+          data.append('kind', 'Photograph');
+          data.append('files', file);
+          await upload(`/api/monthly-plans/${openPlanId}/reports/${dayId}/evidence`, data);
+        }
       }
       setDetail({ ...saved, plan: saved.plan });
-      onMessage(saved.plan.status === 'Completed' ? t('plan.targetReached') : t('plan.daySaved'));
+      // Say what the update did, not merely that it saved. The manager has just
+      // typed a figure and the useful answer is where that figure took the
+      // objective -- "0.5 hectares added, 1.5 of 2 hectares, 75%" -- so they can
+      // see it landed on the right commitment without going to look.
+      const against = (saved.objectives || []).find((objective) => objective.id === payload.objectiveId);
+      const progressLine = against && against.percent !== null
+        ? fill(t('plan.daySavedProgress'), {
+          added: payload.quantityDone, unit: against.targetUnit, title: against.title,
+          done: against.quantityDone, target: against.targetQuantity, percent: against.percent
+        })
+        : t('plan.daySaved');
+      onMessage(saved.plan.status === 'Completed' ? t('plan.targetReached') : progressLine);
       await reloadMonth();
       return true;
     } catch (dayError) { onError(dayError.message); return false; }
@@ -552,7 +630,22 @@ export default function MonthlyPlans({
         </div></div>
         <div className="form-grid">
           <label className="form-field"><span>{t('app.businessOperation')}</span>
-            <select value={chosenOperation} onChange={(event) => setNewPlan({ operation: event.target.value, managerId: '' })}>
+            {/* Switching operation keeps what has already been typed and only
+                clears what the new operation cannot carry: the manager (who
+                covers a different operation) and, on a primary operation, the
+                supported-operation column that only the coordination function
+                has. This used to replace the whole form state, which dropped
+                `objectives` entirely and crashed the page on the next render. */}
+            <select value={chosenOperation} onChange={(event) => setNewPlan({
+              ...newPlan,
+              operation: event.target.value,
+              managerId: '',
+              category: '',
+              objectives: (newPlan.objectives || [{ ...emptyObjective }]).map((row) => ({
+                ...row,
+                supportsOperation: isSupportOperation(event.target.value) ? row.supportsOperation : ''
+              }))
+            })}>
               {unplanned.map((operation) => <option key={operation.id} value={operation.id}>
                 {operationName(operation.id, language)}
               </option>)}
@@ -564,55 +657,72 @@ export default function MonthlyPlans({
               {managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}
             </select>
           </label>
-          {/* The figure the Director approves for the month. It used to be
-              worked out from the activities when the plan was confirmed, so
-              nobody ever stated one and the month had no limit. */}
-          <label className="form-field"><span>{t('monthly.budgetYouApprove')}</span>
-            <input required type="number" inputMode="decimal" min="0" step="0.01" placeholder={t('monthly.budgetPlaceholder')}
-              value={newPlan.approvedBudget}
-              onChange={(event) => setNewPlan({ ...newPlan, approvedBudget: event.target.value })} />
-            {Number(newPlan.approvedBudget) > 0 && rate && <small className="field-hint">
-              {t('money.todayRate')}: {formatLocal(Number(newPlan.approvedBudget) * rate.rwfPerUsd, 'RWF')}
-              {' · '}{formatLocal(Number(newPlan.approvedBudget) * rate.cdfPerUsd, 'CDF')}
-            </small>}
-          </label>
-          <label className="form-field"><span>{t('monthly.businessCategory')}</span>
-            <select value={newPlan.category} onChange={(event) => setNewPlan({ ...newPlan, category: event.target.value })}>
-              <option value="">{t('form.selectCategory')}</option>
-              {categoriesForOperation(chosenOperation).map((category) =>
-                <option key={category} value={category}>{categoryLabel(category, t)}</option>)}
-            </select>
-          </label>
-          {/* The month itself: what is to be achieved, how much of it, and what
-              it is counted in. This is the work -- not a folder somebody fills
-              with tasks afterwards. */}
-          <label className="form-field form-field-wide"><span>{t('monthly.objectives')}</span>
-            <textarea required rows="2" placeholder={t('monthly.objectivesPlaceholder')} value={newPlan.objective}
-              onChange={(event) => setNewPlan({ ...newPlan, objective: event.target.value })} />
-          </label>
-          <label className="form-field"><span>{t('plan.target')}</span>
-            <input type="number" inputMode="decimal" min="0" step="0.01" placeholder={t('plan.targetPlaceholder')}
-              value={newPlan.targetQuantity}
-              onChange={(event) => setNewPlan({ ...newPlan, targetQuantity: event.target.value })} />
-          </label>
-          <label className="form-field"><span>{t('plan.targetUnit')}</span>
-            <input list="plan-units" maxLength="40" placeholder={t('plan.targetUnitPlaceholder')}
-              value={newPlan.targetUnit}
-              onChange={(event) => setNewPlan({ ...newPlan, targetUnit: event.target.value })} />
-            <datalist id="plan-units">{UNIT_SUGGESTIONS.map((unit) => <option key={unit} value={unit} />)}</datalist>
-          </label>
-          <label className="form-field form-field-wide"><span>{t('plan.expectedOutput')}</span>
-            <input placeholder={t('plan.expectedOutputPlaceholder')} value={newPlan.expectedOutput}
-              onChange={(event) => setNewPlan({ ...newPlan, expectedOutput: event.target.value })} />
-          </label>
         </div>
-        <p className="field-hint">{t('monthly.createHint')}</p>
+
+        {/* THE MONTH ITSELF: the commitments agreed with the managers in the
+            meeting that happened outside this system. The Director types that
+            list and is finished -- they do not break it into daily tasks, hand
+            days out, or approve what the manager does afterwards. */}
+        <ObjectiveEditor
+          operation={chosenOperation}
+          language={language}
+          objectives={newPlan.objectives}
+          onChange={(objectives) => setNewPlan({ ...newPlan, objectives })}
+          t={t}
+        />
+
+        {/* Everything below is optional, and folded away so it cannot make the
+            month look like a form to be completed. A Director who has just left
+            the meeting types the objectives and saves. */}
+        <details className="plan-optional">
+          <summary>{t('plan.optionalDetails')}</summary>
+          <div className="form-grid">
+            {/* The figure the Director approves for the month. Optional: a month
+                agreed as objectives alone has no ceiling, and the manager can
+                record what the work cost without one. */}
+            <label className="form-field"><span>{t('monthly.budgetYouApprove')}</span>
+              <input type="number" inputMode="decimal" min="0" step="0.01" placeholder={t('monthly.budgetPlaceholder')}
+                value={newPlan.approvedBudget}
+                onChange={(event) => setNewPlan({ ...newPlan, approvedBudget: event.target.value })} />
+              <small className="field-hint">{t('plan.budgetOptional')}</small>
+              {Number(newPlan.approvedBudget) > 0 && rate && <small className="field-hint">
+                {t('money.todayRate')}: {formatLocal(Number(newPlan.approvedBudget) * rate.rwfPerUsd, 'RWF')}
+                {' · '}{formatLocal(Number(newPlan.approvedBudget) * rate.cdfPerUsd, 'CDF')}
+              </small>}
+            </label>
+            <label className="form-field"><span>{t('monthly.businessCategory')}</span>
+              <select value={newPlan.category} onChange={(event) => setNewPlan({ ...newPlan, category: event.target.value })}>
+                <option value="">{t('form.selectCategory')}</option>
+                {categoriesForOperation(chosenOperation).map((category) =>
+                  <option key={category} value={category}>{categoryLabel(category, t)}</option>)}
+              </select>
+            </label>
+            <label className="form-field form-field-wide"><span>{t('monthly.notes')}</span>
+              <textarea rows="2" placeholder={t('monthly.objectivesPlaceholder')} value={newPlan.objective}
+                onChange={(event) => setNewPlan({ ...newPlan, objective: event.target.value })} />
+            </label>
+          </div>
+        </details>
+        <p className="field-hint">{t('plan.createHintObjectives')}</p>
         {!managerOptions.length && <p className="decision-hint">{t('form.noManagerCovers')}</p>}
         <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy || !managerOptions.length}>{t('monthly.createPlan')}</button></div>
       </form>}
     </>}
 
-    {!isDirector && !review.operations.length && <div className="empty-state"><strong>{t('monthly.noPlans')}</strong><span>{t('table.noData')}</span></div>}
+    {/* An empty month says which month is not empty. The plan the Director
+        wrote for next month is real work waiting for this manager, and a bare
+        "not planned yet" on the current month hid it completely. */}
+    {!isDirector && !review.operations.length && <div className="empty-state">
+      <strong>{fill(t('monthly.nothingThisMonth'), { month: monthLabel(month, language) })}</strong>
+      {elsewhere
+        ? <>
+          <span>{fill(t('monthly.planIsIn'), { month: monthLabel(elsewhere.month, language) })}</span>
+          <button type="button" className="primary-btn" onClick={() => changeMonth(elsewhere.month)}>
+            {fill(t('monthly.goToMonth'), { month: monthLabel(elsewhere.month, language) })}
+          </button>
+        </>
+        : <span>{t('monthly.noPlanAnywhere')}</span>}
+    </div>}
 
     {detail && openPlanId && detail.plan.id === openPlanId && <DetailView
       onClose={() => onClosePlan?.()}
@@ -661,6 +771,156 @@ export default function MonthlyPlans({
 }
 
 // Plan statuses in the plan's own trail read in the viewer's language.
+// The month's commitments, as the Director types them.
+//
+// One line per commitment: what it is, how much of it, and what that is counted
+// in. A blank line is always kept at the end so adding the next one is typing
+// rather than pressing Add first; blank lines are dropped on save.
+//
+// The unit list is only a suggestion -- hectares, tons, systems, inspections,
+// trips, cases -- because the four operations count completely different things
+// and the system deliberately knows nothing about any of them.
+// `rows` is defaulted and every field read through a fallback on purpose: this
+// component is the whole create form, so one undefined here takes the entire
+// monthly page down behind the error boundary rather than degrading. That is
+// exactly what happened when the operation picker replaced the form state and
+// dropped `objectives`.
+function ObjectiveEditor({ objectives, onChange, t, operation, language }) {
+  const rows = Array.isArray(objectives) && objectives.length ? objectives : [{ ...emptyObjective }];
+  // Whether a line carries anything yet. Written once so the "is it filled?"
+  // test cannot drift between the numbering and the grow-a-new-line rule.
+  const started = (row) => Boolean(String(row?.title ?? '').trim() || String(row?.targetQuantity ?? '').trim());
+
+  const update = (index, patch) => {
+    const next = rows.map((row, position) => (position === index ? { ...row, ...patch } : row));
+    // Typing in the last line opens a fresh one underneath, so the list grows as
+    // it is filled instead of needing a button between every entry.
+    if (started(next[next.length - 1])) next.push({ ...emptyObjective });
+    onChange(next);
+  };
+
+  const remove = (index) => {
+    const next = rows.filter((row, position) => position !== index);
+    onChange(next.length ? next : [{ ...emptyObjective }]);
+  };
+
+  // The spare trailing line is not numbered: it is not a commitment yet.
+  const filled = rows.filter(started).length;
+  // Only the coordination function's objectives name an operation they support.
+  const isSupport = isSupportOperation(operation);
+
+  return <div className="objective-editor">
+    <h3 className="form-section-title">{t('plan.objectivesTitle')}</h3>
+    <p className="field-hint">{t('plan.objectivesHint')}</p>
+    {rows.map((row, index) => <div className="objective-row" key={index}>
+      <span className="objective-index">{index < filled ? index + 1 : '+'}</span>
+      <label className="form-field objective-title"><span>{t('plan.objectiveTitle')}</span>
+        <input maxLength="500" placeholder={t('plan.objectiveTitlePlaceholder')}
+          value={row.title ?? ''}
+          onChange={(event) => update(index, { title: event.target.value })} />
+      </label>
+      <label className="form-field objective-target"><span>{t('plan.target')}</span>
+        <input type="number" inputMode="decimal" min="0" step="0.01" placeholder={t('plan.targetPlaceholder')}
+          value={row.targetQuantity ?? ''}
+          onChange={(event) => update(index, { targetQuantity: event.target.value })} />
+      </label>
+      <label className="form-field objective-unit"><span>{t('plan.targetUnit')}</span>
+        <input list="plan-units" maxLength="40" placeholder={t('plan.targetUnitPlaceholder')}
+          value={row.targetUnit ?? ''}
+          onChange={(event) => update(index, { targetUnit: event.target.value })} />
+        <datalist id="plan-units">{UNIT_SUGGESTIONS.map((unit) => <option key={unit} value={unit} />)}</datalist>
+      </label>
+      {/* Movement & Facilitation coordinates FOR the three primary operations,
+          so each of its objectives says which one it serves: "50 transport
+          trips" becomes "50 transport trips for Mining". Not shown on a primary
+          operation's own plan -- Mining's objectives support nothing, they
+          produce -- and the server refuses the field there. */}
+      {isSupport && <label className="form-field objective-supports"><span>{t('plan.supportsOperation')}</span>
+        <select value={row.supportsOperation || ''}
+          onChange={(event) => update(index, { supportsOperation: event.target.value })}>
+          <option value="">{t('plan.supportsAll')}</option>
+          {PRIMARY_OPERATIONS.map((primary) => <option key={primary.id} value={primary.id}>
+            {operationName(primary.id, language)}
+          </option>)}
+        </select>
+      </label>}
+      {rows.length > 1 && <button type="button" className="text-btn objective-remove"
+        onClick={() => remove(index)} title={t('action.remove')}>{t('action.remove')}</button>}
+    </div>)}
+  </div>;
+}
+
+// The month-end report, as the system compiles it (section 19).
+//
+// Target against actual, one line per commitment, with the overall completion
+// and how many daily updates it was built from. Nothing here is typed: it is
+// read from /month-report, which derives every figure from the manager's own
+// records -- so "the Admin should be able to view this report without manually
+// compiling information" is literally what happens.
+//
+// Loaded when the section is opened rather than with the month, because most
+// visits to a month are to record a day, not to read the summary.
+function MonthReport({ planId, t, fetchJson, onError }) {
+  const [report, setReport] = useState(null);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open || report) return;
+    let live = true;
+    fetchJson(`/api/monthly-plans/${planId}/month-report`)
+      .then((data) => { if (live) setReport(data); })
+      .catch((error) => onError(error.message));
+    return () => { live = false; };
+  }, [open, report, planId, fetchJson, onError]);
+
+  // A month reopened or worked on since it was last read should not show a
+  // stale table, so the cache is dropped whenever the month changes.
+  useEffect(() => { setReport(null); }, [planId]);
+
+  return <details className="form-more month-report" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary>{t('report.monthEndTitle')}</summary>
+    {!report ? <p className="field-hint">{t('report.loading')}</p> : <>
+      <div className="table-wrap"><table className="card-table">
+        <thead><tr>
+          <th>{t('plan.objectiveColumn')}</th>
+          <th>{t('report.target')}</th>
+          <th>{t('report.actual')}</th>
+          <th>{t('report.percent')}</th>
+        </tr></thead>
+        <tbody>{report.objectives.map((objective) => <tr key={objective.id}>
+          <td className="card-title-cell"><strong>{objective.title}</strong>
+            {objective.supportsOperation && <small>{fill(t('plan.supportsBadge'), {
+              operation: operationName(objective.supportsOperation, displayLanguage())
+            })}</small>}</td>
+          <td data-label={t('report.target')}>{objective.targetQuantity === null
+            ? <span className="muted-cell">&mdash;</span>
+            : `${objective.targetQuantity} ${objective.targetUnit}`}</td>
+          <td data-label={t('report.actual')}>{objective.actual} {objective.targetUnit}</td>
+          <td data-label={t('report.percent')}>{objective.percent === null
+            ? <span className="muted-cell">{t('plan.notCounted')}</span>
+            : <strong className={objective.complete ? 'is-done' : ''}>{objective.percent}%</strong>}</td>
+        </tr>)}</tbody>
+      </table></div>
+      {/* A coordination month, read the way it is actually used: not "50 trips"
+          but how much support went to each operation that needed it. */}
+      {report.supportByOperation?.length > 0 && <div className="support-summary">
+        <h4 className="form-section-title">{t('plan.supportSummary')}</h4>
+        <ul>{report.supportByOperation.map((group) => <li key={group.operation}>
+          <span>{operationName(group.operation, displayLanguage())}</span>
+          <strong>{group.percent === null ? '—' : `${group.percent}%`}</strong>
+          <small>{fill(t('plan.supportCounts'), { objectives: group.objectives, updates: group.updates })}</small>
+        </li>)}</ul>
+      </div>}
+      <div className="totals-line">
+        {report.overallCompletion !== null && report.overallCompletion !== undefined
+          && <span>{t('report.overallCompletion')}: <strong>{report.overallCompletion}%</strong></span>}
+        <span>{t('report.dailyUpdates')}: <strong>{report.dailyUpdateCount}</strong></span>
+        {report.totalSpent > 0 && <span>{t('monthly.totalSpent')}: <strong>{formatUsd(report.totalSpent)}</strong></span>}
+      </div>
+    </>}
+  </details>;
+}
+
 function planTrailValue(field, value, t) {
   if (value === null || value === undefined || value === '') return '—';
   if (field === 'status') {
@@ -686,30 +946,49 @@ function planTone(status) {
 //
 // The day is the record. What it cost is one of its fields and may be nothing:
 // a day of clearing by hand costs no money and is still a day's work.
-function MonthWorkspace({ plan, reports, t, language, busy, canWork, onStart, onReport, onRemoveReport, onUploadProof, onOpenFile }) {
+function MonthWorkspace({ plan, objectives = [], reports, t, language, busy, canWork, onStart, onReport, onRemoveReport, onUploadProof, onOpenFile }) {
   const today = todayLocal();
-  const blank = { date: inMonth(today, plan.month), quantityDone: '', cost: '', notes: '' };
+  const blank = { date: inMonth(today, plan.month), objectiveId: '', quantityDone: '', cost: '', notes: '' };
   const [form, setForm] = useState(blank);
   const [proof, setProof] = useState([]);
   const dialog = useDialog();
 
-  const counted = plan.targetQuantity !== null && plan.targetQuantity !== undefined;
   const started = plan.status === 'In Progress' || plan.status === 'Completed' || reports.length > 0;
   const open = plan.status !== 'Closed';
   const finished = plan.status === 'Completed';
+
+  // Which commitment this day counted towards. A month with a single objective
+  // needs no choosing -- it is picked for the manager, because a dropdown with
+  // one entry is a question with one answer.
+  const only = objectives.length === 1 ? objectives[0] : null;
+  const chosenId = form.objectiveId || (only ? String(only.id) : '');
+  const chosen = objectives.find((objective) => String(objective.id) === String(chosenId)) || null;
+
+  // The unit and the remainder both come from the chosen objective, so "how much
+  // today?" is asked in hectares for the cultivation and in systems for the
+  // equipment without the manager having to remember which.
+  const counted = Boolean(chosen && chosen.targetQuantity !== null && chosen.targetQuantity !== undefined);
   const typed = Number(form.quantityDone || 0);
-  const overTarget = counted && typed > plan.quantityRemaining;
+  const overTarget = counted && typed > chosen.quantityRemaining;
+  const needsObjective = objectives.length > 0 && !chosen;
+  // The daily form generated for the chosen objective. Empty object when no
+  // objective is chosen yet, so every read below falls back to the generic
+  // wording rather than needing a guard of its own.
+  const shape = chosen?.form || {};
   const nothingTyped = !form.quantityDone && !form.cost && !form.notes.trim();
 
   const submit = async (event) => {
     event.preventDefault();
     const saved = await onReport({
       date: form.date,
+      objectiveId: chosen ? chosen.id : undefined,
       quantityDone: form.quantityDone === '' ? 0 : Number(form.quantityDone),
       cost: form.cost === '' ? 0 : Number(form.cost),
       notes: form.notes
     }, proof);
-    if (saved) { setForm({ ...blank, date: form.date }); setProof([]); }
+    // The date and the objective are kept: a manager writing up several days at
+    // once is usually still on the same commitment.
+    if (saved) { setForm({ ...blank, date: form.date, objectiveId: form.objectiveId }); setProof([]); }
   };
 
   const remove = async (report) => {
@@ -724,6 +1003,40 @@ function MonthWorkspace({ plan, reports, t, language, busy, canWork, onStart, on
   };
 
   return <section className="month-work">
+    {/* WHAT MUST BE DONE THIS MONTH, AND WHAT IS ALREADY DONE -- the manager's
+        whole screen, at the top, before anything else. Every figure here is
+        summed from the days below it; none of it is typed by anybody. */}
+    {objectives.length > 0 && <div className="objective-board">
+      <h3 className="form-section-title">{t('plan.objectivesTitle')}</h3>
+      {objectives.map((objective) => <div className="objective-card" key={objective.id}>
+        <div className="objective-card-head">
+          <strong>{objective.title}</strong>
+          {objective.percent === null
+            ? <span className="objective-percent muted-cell">{t('plan.notCounted')}</span>
+            : <span className={`objective-percent${objective.complete ? ' is-done' : ''}`}>{objective.percent}%</span>}
+        </div>
+        {/* Support work always says who it is for, so a coordination month never
+            reads as a set of unattached numbers. */}
+        {objective.supportsOperation && <span className="supports-badge">
+          {fill(t('plan.supportsBadge'), { operation: operationName(objective.supportsOperation, language) })}
+        </span>}
+        {objective.percent !== null && <>
+          <div className="objective-bar"><span style={{ width: `${objective.percent}%` }} /></div>
+          <div className="objective-figures">
+            <span>{fill(t('plan.doneOfTarget'), {
+              done: objective.quantityDone, target: objective.targetQuantity, unit: objective.targetUnit
+            })}</span>
+            {!objective.complete && <span className="muted-cell">{fill(t('plan.leftToDo'), {
+              amount: objective.quantityRemaining, unit: objective.targetUnit
+            })}</span>}
+          </div>
+        </>}
+        {objective.percent === null && objective.quantityDone > 0 && <div className="objective-figures">
+          <span>{objective.quantityDone} {objective.targetUnit}</span>
+        </div>}
+      </div>)}
+    </div>}
+
     {/* Not started: one button, and nothing else to think about. */}
     {!started && canWork && open && <div className="next-step next-step-action month-start">
       <div className="next-step-text">
@@ -748,11 +1061,41 @@ function MonthWorkspace({ plan, reports, t, language, busy, canWork, onStart, on
             min={`${plan.month}-01`} max={monthEnd(plan.month)}
             onChange={(event) => setForm({ ...form, date: event.target.value })} />
         </label>
-        {counted && <label className="form-field"><span>{fill(t('plan.doneToday'), { unit: plan.targetUnit })}</span>
-          <input type="number" inputMode="decimal" min="0" step="0.01" placeholder="0"
+        {/* Which commitment today's work counted towards. Hidden when the month
+            has only one, because there is then nothing to choose. */}
+        {objectives.length > 1 && <label className="form-field form-field-wide"><span>{t('plan.whichObjective')}</span>
+          <select required value={chosenId}
+            onChange={(event) => setForm({ ...form, objectiveId: event.target.value, quantityDone: '' })}>
+            <option value="">{t('plan.chooseObjective')}</option>
+            {objectives.map((objective) => <option key={objective.id} value={objective.id}
+              disabled={objective.complete}>
+              {objective.title}{objective.percent === null ? '' : ` (${objective.percent}%)`}
+            </option>)}
+          </select>
+        </label>}
+        {/* The question is the one generated for THIS objective -- "Tonnes
+            extracted today" on the ore, "Inspections completed today" on the
+            inspections -- rather than one wording stretched over every trade.
+            Falls back to the generic label whenever an objective has no form,
+            which is only ever a month written before forms existed. */}
+        {counted && <label className="form-field">
+          <span>{shape.amountLabel || fill(t('plan.doneToday'), { unit: chosen.targetUnit })}</span>
+          <input type="number" inputMode="decimal" min="0" step={shape.step || 0.01}
+            placeholder={shape.placeholder || '0'}
             value={form.quantityDone}
             onChange={(event) => setForm({ ...form, quantityDone: event.target.value })} />
-          <small className="field-hint">{fill(t('plan.leftToDo'), { amount: plan.quantityRemaining, unit: plan.targetUnit })}</small>
+          {/* One tap for a typical day, where this kind of work has one. Never
+              more than what is left, so a button cannot push past the target. */}
+          {shape.quickAmounts?.length > 0 && <div className="quick-amounts">
+            {shape.quickAmounts
+              .filter((amount) => amount <= chosen.quantityRemaining)
+              .map((amount) => <button key={amount} type="button" className="quick-amount"
+                onClick={() => setForm({ ...form, quantityDone: String(amount) })}>
+                {amount} {chosen.targetUnit}
+              </button>)}
+          </div>}
+          <small className="field-hint">{fill(t('plan.leftToDo'), { amount: chosen.quantityRemaining, unit: chosen.targetUnit })}</small>
+          {shape.amountHint && <small className="field-hint">{shape.amountHint}</small>}
         </label>}
         <label className="form-field"><span>{t('plan.costToday')}</span>
           <input type="number" inputMode="decimal" min="0" step="0.01" placeholder="0"
@@ -762,16 +1105,16 @@ function MonthWorkspace({ plan, reports, t, language, busy, canWork, onStart, on
               not cost anything and people expect a form to demand a figure. */}
           <small className="field-hint">{t('plan.costOptional')}</small>
         </label>
-        <label className="form-field form-field-wide"><span>{t('plan.dayNotes')}</span>
-          <textarea rows="2" placeholder={t('plan.dayNotesHint')} value={form.notes}
+        <label className="form-field form-field-wide"><span>{shape.notesLabel || t('plan.dayNotes')}</span>
+          <textarea rows="2" placeholder={shape.notesHint || t('plan.dayNotesHint')} value={form.notes}
             onChange={(event) => setForm({ ...form, notes: event.target.value })} />
         </label>
       </div>
-      <h4 className="form-section-title">{t('plan.dayProof')}</h4>
+      <h4 className="form-section-title">{shape.evidenceLabel || t('plan.dayProof')}</h4>
       <FilePicker files={proof} onChange={setProof} disabled={busy} />
       <div className="form-submit-bar">
-        {overTarget && <p className="form-missing">{fill(t('plan.overTarget'), { amount: plan.quantityRemaining, unit: plan.targetUnit })}</p>}
-        <button className="primary-btn" type="submit" disabled={busy || nothingTyped || overTarget}>
+        {overTarget && <p className="form-missing">{fill(t('plan.overTarget'), { amount: chosen.quantityRemaining, unit: chosen.targetUnit })}</p>}
+        <button className="primary-btn" type="submit" disabled={busy || nothingTyped || overTarget || needsObjective}>
           {t('plan.saveDay')}
         </button>
       </div>
@@ -783,16 +1126,26 @@ function MonthWorkspace({ plan, reports, t, language, busy, canWork, onStart, on
       <div className="table-wrap"><table className="card-table">
         <thead><tr>
           <th>{t('plan.dayDate')}</th>
-          {counted && <th>{t('plan.workDone')}</th>}
+          {objectives.length > 0 && <th>{t('plan.objectiveColumn')}</th>}
+          <th>{t('plan.workDone')}</th>
           <th>{t('plan.costToday')}</th>
           <th>{t('plan.dayNotes')}</th>
           <th>{t('plan.dayProof')}</th>
           <th>{t('table.actions')}</th>
         </tr></thead>
-        <tbody>{reports.map((report) => <tr key={report.id}>
+        {/* Each day shows the commitment it served and that objective's own
+            unit -- a month counts hectares and systems at the same time, so one
+            unit for the whole table would be wrong on most rows. */}
+        <tbody>{reports.map((report) => {
+          const against = objectives.find((objective) => objective.id === report.objectiveId) || null;
+          return <tr key={report.id}>
           <td className="card-title-cell"><strong>{formatDate(report.date, language)}</strong>
             <small>{report.submittedByName}</small></td>
-          {counted && <td data-label={t('plan.workDone')}><strong>{report.quantityDone} {plan.targetUnit}</strong></td>}
+          {objectives.length > 0 && <td data-label={t('plan.objectiveColumn')}>
+            {against ? against.title : <span className="muted-cell">&mdash;</span>}</td>}
+          <td data-label={t('plan.workDone')}>{report.quantityDone
+            ? <strong>{report.quantityDone} {against ? against.targetUnit : plan.targetUnit}</strong>
+            : <span className="muted-cell">&mdash;</span>}</td>
           <td data-label={t('plan.costToday')}>{report.cost ? formatUsd(report.cost) : <span className="muted-cell">{t('plan.noCost')}</span>}</td>
           <td data-label={t('plan.dayNotes')}>{report.notes || <span className="muted-cell">&mdash;</span>}</td>
           <td data-label={t('plan.dayProof')}>{report.evidence?.length
@@ -804,10 +1157,12 @@ function MonthWorkspace({ plan, reports, t, language, busy, canWork, onStart, on
             {onRemoveReport && open && <button type="button" className="text-btn" disabled={busy}
               onClick={() => remove(report)}>{t('action.remove')}</button>}
           </td>
-        </tr>)}</tbody>
+        </tr>;
+        })}</tbody>
       </table></div>
       <div className="totals-line">
-        {counted && <span>{t('plan.completed')}: <strong>{plan.quantityDone} {plan.targetUnit}</strong></span>}
+        {plan.overallProgress !== null && plan.overallProgress !== undefined
+          && <span>{t('plan.overallProgress')}: <strong>{plan.overallProgress}%</strong></span>}
         <span>{t('monthly.totalSpent')}: <strong>{formatUsd(plan.reportedCost)}</strong></span>
         <span>{t('plan.daysWorked')}: <strong>{plan.daysWorked}</strong></span>
         {counted && <span>{t('plan.remainingWork')}: <strong>{plan.quantityRemaining} {plan.targetUnit}</strong></span>}
@@ -1310,9 +1665,13 @@ function PlanDetail({
   const canAssignWork = open && ['Confirmed', 'In Progress'].includes(plan.status) && (isDirector || isPlanManager);
   // The month belongs to the business operation, and the manager of that
   // operation works it. Naming somebody on the plan narrows it to them; leaving
-  // it blank leaves it to whoever runs the operation. Mirrors canWorkPlan.
-  const canWorkMonth = isDirector
-    || (user.role === 'manager' && (plan.managerId === null || Number(plan.managerId) === Number(user.id)));
+  // it blank leaves it to whoever runs the operation.
+  //
+  // The Director is deliberately NOT included: they read the month, they do not
+  // record days in it. Mirrors the refusal in POST /:id/reports, so the Director
+  // is never shown a form the server would turn down.
+  const canWorkMonth = user.role === 'manager'
+    && (plan.managerId === null || Number(plan.managerId) === Number(user.id));
   // Who a day's work can be handed to: this operation's managers and its team
   // members. Somebody covering every operation belongs in every list. Falling
   // back to the managers list keeps the form usable if /api/people failed.
@@ -1411,6 +1770,7 @@ function PlanDetail({
         manager starts it here and reports each day here, without leaving. */}
     <MonthWorkspace
       plan={plan}
+      objectives={detail.objectives || []}
       reports={detail.dailyReports || []}
       t={t}
       language={language}
@@ -1422,6 +1782,11 @@ function PlanDetail({
       onUploadProof={onUploadDayProof}
       onOpenFile={onOpenFile}
     />
+
+    {/* The month's own report, compiled by the system from the days recorded.
+        Section 19: the Director reads what was achieved without asking anybody
+        to assemble it, and without typing a figure into it. */}
+    {plan.objectiveCount > 0 && <MonthReport planId={plan.id} t={t} fetchJson={fetchJson} onError={onError} />}
 
     {/* Activities are optional extra structure for a month that needs it -- the
         Director breaking a large month into named pieces. Most months are one

@@ -15,6 +15,8 @@
 //   spent    -- activity_expenses: what was actually recorded as spent.
 
 import express from 'express';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 import { pool } from '../db/database.js';
@@ -23,6 +25,28 @@ import { asyncRoute, hasFullScope, isAdmin, managerScope, projectScope } from '.
 import { getCurrentRate, round2 } from '../lib/rates.js';
 
 const router = express.Router();
+
+// Where the company mark lives, resolved once.
+//
+// `public/` is the source tree; `dist/` is what a built deployment serves, and
+// Vite copies public/ into it. Both are checked so the logo appears on a report
+// whether the API is running from a checkout or from a build. Resolved relative
+// to this file rather than process.cwd(), which is whatever directory the
+// process happened to be started from.
+//
+// null when neither exists -- the report then prints exactly as it did before,
+// which is the right failure for a decoration.
+const LOGO_CANDIDATES = ['../../public/logo.png', '../../dist/logo.png'];
+let resolvedLogo;
+function logoPath() {
+  if (resolvedLogo !== undefined) return resolvedLogo;
+  resolvedLogo = null;
+  for (const candidate of LOGO_CANDIDATES) {
+    const file = fileURLToPath(new URL(candidate, import.meta.url));
+    if (existsSync(file)) { resolvedLogo = file; break; }
+  }
+  return resolvedLogo;
+}
 
 const SECTOR_NAMES = new Map(sectors.map((sector) => [sector.id, sector.name]));
 
@@ -380,7 +404,106 @@ export async function buildReport(user, period) {
     activitySummary,
     budgetSummary,
     managers,
-    activities
+    activities,
+    // The month's own work: the objectives the managers recorded against in
+    // this period, and the days that make them up.
+    //
+    // WHY THIS IS HERE: everything above reads the activity register, and a
+    // month is no longer worked that way. A Director who set objectives and
+    // watched their manager record five days against them exported a report
+    // that said "No activities fall in this period" -- true of the register,
+    // and completely wrong about the month.
+    monthlyWork: await buildMonthlyWork(user, period)
+  };
+}
+
+// The daily records inside the period, and what they did to the objectives they
+// were recorded against.
+//
+// Scoped exactly like the rest of the report: a manager reads their own
+// operation, the Director reads all of them. Progress on an objective is
+// deliberately its lifetime figure, not the period's -- "40 of 500 tonnes" is
+// the number anybody reading a weekly report actually wants, and a percentage
+// of one week against a monthly target would be meaningless.
+async function buildMonthlyWork(user, period) {
+  const values = [period.start, period.end];
+  const filters = ['r.report_date BETWEEN $1::date AND $2::date'];
+  managerScope(user, 'p.sector', values, filters);
+
+  const days = (await pool.query(
+    `SELECT r.id, r.report_date, r.quantity_done, r.cost, r.notes, r.submitted_by_name,
+            p.id AS plan_id, p.sector, to_char(p.month, 'YYYY-MM') AS plan_month,
+            o.id AS objective_id, o.title AS objective_title, o.target_unit, o.target_quantity,
+            o.supports_operation,
+            (SELECT COUNT(*) FROM plan_report_evidence e WHERE e.report_id = r.id)::int AS evidence_count,
+            COALESCE((SELECT SUM(d.quantity_done) FROM plan_daily_reports d
+                       WHERE d.objective_id = o.id), 0) AS objective_done
+       FROM plan_daily_reports r
+       JOIN monthly_plans p ON p.id = r.plan_id
+       LEFT JOIN plan_objectives o ON o.id = r.objective_id
+      WHERE ${filters.join(' AND ')}
+      ORDER BY r.report_date, r.id`,
+    values
+  )).rows;
+
+  // One line per objective that was actually worked in the period: what the
+  // period added, and where that objective now stands overall.
+  const byObjective = new Map();
+  for (const row of days) {
+    const key = row.objective_id ?? `plan-${row.plan_id}`;
+    const group = byObjective.get(key) || {
+      objectiveId: row.objective_id ?? null,
+      title: row.objective_title || '(not linked to an objective)',
+      operation: row.sector,
+      planId: row.plan_id,
+      planMonth: row.plan_month,
+      unit: row.target_unit || '',
+      supportsOperation: row.supports_operation || null,
+      target: row.target_quantity === null || row.target_quantity === undefined
+        ? null : round2(row.target_quantity),
+      doneInPeriod: 0,
+      doneOverall: round2(row.objective_done),
+      costInPeriod: 0,
+      records: 0,
+      evidence: 0
+    };
+    group.doneInPeriod = round2(group.doneInPeriod + Number(row.quantity_done || 0));
+    group.costInPeriod = round2(group.costInPeriod + Number(row.cost || 0));
+    group.records += 1;
+    group.evidence += Number(row.evidence_count || 0);
+    byObjective.set(key, group);
+  }
+
+  const objectives = [...byObjective.values()].map((group) => ({
+    ...group,
+    percent: group.target && group.target > 0
+      ? Math.min(100, Math.round((group.doneOverall / group.target) * 100))
+      : null
+  }));
+
+  return {
+    summary: {
+      records: days.length,
+      objectives: objectives.length,
+      operations: new Set(days.map((row) => row.sector)).size,
+      cost: round2(days.reduce((total, row) => total + Number(row.cost || 0), 0)),
+      evidence: days.reduce((total, row) => total + Number(row.evidence_count || 0), 0)
+    },
+    objectives,
+    days: days.map((row) => ({
+      id: row.id,
+      date: toDateOnly(row.report_date),
+      operation: row.sector,
+      planId: row.plan_id,
+      planMonth: row.plan_month,
+      objective: row.objective_title || '',
+      quantity: round2(row.quantity_done),
+      unit: row.target_unit || '',
+      cost: round2(row.cost),
+      notes: row.notes || '',
+      recordedBy: row.submitted_by_name || '',
+      evidenceCount: Number(row.evidence_count || 0)
+    }))
   };
 }
 
@@ -465,6 +588,16 @@ async function buildWorkbook(report) {
 
   const summary = workbook.addWorksheet('Summary');
   summary.columns = [{ width: 32 }, { width: 18 }, { width: 18 }, { width: 18 }];
+
+  // The same mark as the PDF, floated over the first rows so it brands the
+  // sheet without occupying a cell anybody reads. Skipped silently when the
+  // file is missing, for the same reason as the PDF.
+  const logo = logoPath();
+  if (logo) {
+    const image = workbook.addImage({ filename: logo, extension: 'png' });
+    summary.addImage(image, { tl: { col: 3.1, row: 0.1 }, ext: { width: 154, height: 90 } });
+  }
+
   summary.addRow(['Activity report', report.period.label]);
   summary.addRow(['Period', `${report.period.start} to ${report.period.end}`]);
   summary.addRow(['Working area', report.scope.sectorName]);
@@ -499,6 +632,72 @@ async function buildWorkbook(report) {
     summary.getCell(`D${index}`).numFmt = MONEY;
   }
   summary.getRow(1).font = { bold: true, size: 14 };
+
+  // The month's work gets its own two sheets rather than being squeezed into
+  // the activity sheets: it is a different register, counted in units the
+  // activity columns have no place for (tonnes, inspections, hectares).
+  const work = report.monthlyWork || { summary: { records: 0 }, objectives: [], days: [] };
+  if (work.summary.records > 0) {
+    const progress = workbook.addWorksheet('Monthly plan progress');
+    progress.columns = [
+      { header: 'Operation', key: 'operation', width: 24 },
+      { header: 'Month', key: 'month', width: 10 },
+      { header: 'Objective', key: 'objective', width: 34 },
+      { header: 'This period', key: 'period', width: 13 },
+      { header: 'Done overall', key: 'done', width: 14 },
+      { header: 'Target', key: 'target', width: 12 },
+      { header: 'Unit', key: 'unit', width: 14 },
+      { header: '%', key: 'percent', width: 8 },
+      { header: 'Records', key: 'records', width: 10 },
+      { header: 'Photos', key: 'photos', width: 9 },
+      { header: 'Supports', key: 'supports', width: 22 }
+    ];
+    headerRow(progress, 1);
+    for (const objective of work.objectives) {
+      progress.addRow({
+        operation: sectorName(objective.operation),
+        month: objective.planMonth,
+        objective: objective.title,
+        period: objective.doneInPeriod,
+        done: objective.doneOverall,
+        target: objective.target ?? '',
+        unit: objective.unit,
+        percent: objective.percent === null ? 'not counted' : objective.percent / 100,
+        records: objective.records,
+        photos: objective.evidence,
+        supports: objective.supportsOperation ? sectorName(objective.supportsOperation) : ''
+      });
+      if (objective.percent !== null) progress.getCell(`H${progress.rowCount}`).numFmt = '0%';
+    }
+
+    const daily = workbook.addWorksheet('Day-by-day record');
+    daily.columns = [
+      { header: 'Date', key: 'date', width: 12 },
+      { header: 'Operation', key: 'operation', width: 24 },
+      { header: 'Objective', key: 'objective', width: 34 },
+      { header: 'Amount', key: 'quantity', width: 12 },
+      { header: 'Unit', key: 'unit', width: 14 },
+      { header: 'Cost (USD)', key: 'cost', width: 13 },
+      { header: 'Photos', key: 'photos', width: 9 },
+      { header: 'Recorded by', key: 'by', width: 24 },
+      { header: 'Notes', key: 'notes', width: 52 }
+    ];
+    headerRow(daily, 1);
+    for (const day of work.days) {
+      daily.addRow({
+        date: day.date,
+        operation: sectorName(day.operation),
+        objective: day.objective,
+        quantity: day.quantity,
+        unit: day.unit,
+        cost: day.cost,
+        photos: day.evidenceCount,
+        by: day.recordedBy,
+        notes: day.notes
+      });
+      daily.getCell(`F${daily.rowCount}`).numFmt = MONEY;
+    }
+  }
 
   const people = workbook.addWorksheet('Manager performance');
   people.columns = [
@@ -596,12 +795,32 @@ function writePdf(report, stream) {
   const width = doc.page.width - left - doc.page.margins.right;
   const bottom = doc.page.height - doc.page.margins.bottom;
 
-  doc.fontSize(17).font('Helvetica-Bold').text('Activity report', left, doc.y);
+  // The company mark, on every printed report. A report leaves the building --
+  // it goes to a partner, a lender, a meeting -- and an unbranded sheet of
+  // figures does not say who produced it.
+  //
+  // Drawn only if the file is actually there: a missing logo must degrade to
+  // the plain header it used to be, never fail the export somebody is waiting
+  // on. `fit` preserves the aspect ratio, so the mark can be replaced with a
+  // different shape without editing this.
+  const headerTop = doc.y;
+  let headerX = left;
+  const logo = logoPath();
+  if (logo) {
+    doc.image(logo, left, headerTop, { fit: [96, 56] });
+    headerX = left + 108;
+  }
+
+  doc.fontSize(17).font('Helvetica-Bold').text('Activity report', headerX, headerTop);
   doc.moveDown(0.2);
   doc.fontSize(10).font('Helvetica')
     .text(`${report.period.label}  (${report.period.start} to ${report.period.end})`)
     .text(`Working area: ${report.scope.sectorName}    Generated: ${new Date(report.generatedAt).toLocaleString()}`)
     .text(report.basis);
+  // Clear the logo even when the text block is shorter than it, so the first
+  // section never overlaps the mark.
+  if (logo) doc.y = Math.max(doc.y, headerTop + 56);
+  doc.x = left;
   doc.moveDown(0.8);
 
   const section = (title) => {
@@ -618,6 +837,38 @@ function writePdf(report, stream) {
   doc.text(`Total activities: ${counts.total}      Completed: ${counts.completed}      In progress: ${counts.inProgress}`
     + `      Pending: ${counts.pending}      Overdue: ${counts.overdue}      Cancelled: ${counts.cancelled}`);
   doc.moveDown(0.8);
+
+  // The month's work, before the budget figures: on a month run through
+  // objectives this is the only section with anything in it, and burying it
+  // under an empty activity register is how the report came to read as "you did
+  // nothing this week".
+  const work = report.monthlyWork || { summary: { records: 0 }, objectives: [], days: [] };
+  if (work.summary.records > 0) {
+    section('MONTHLY PLAN PROGRESS');
+    doc.text(`Records in this period: ${work.summary.records}      Objectives worked: ${work.summary.objectives}`
+      + `      Operations: ${work.summary.operations}      Photos attached: ${work.summary.evidence}`
+      + (work.summary.cost > 0 ? `      Cost recorded: ${usd(work.summary.cost)}` : ''));
+    doc.moveDown(0.5);
+
+    for (const objective of work.objectives) {
+      if (doc.y > bottom - 50) doc.addPage();
+      const target = objective.target === null
+        ? `${objective.doneOverall} ${objective.unit}`.trim()
+        : `${objective.doneOverall} of ${objective.target} ${objective.unit}`.trim();
+      const standing = objective.percent === null ? 'not counted' : `${objective.percent}%`;
+      doc.font('Helvetica-Bold').text(`${sectorName(objective.operation)} · ${objective.title}`, { continued: false });
+      doc.font('Helvetica').fontSize(9).fillColor('#555555').text(
+        `This period: +${objective.doneInPeriod} ${objective.unit}`.trimEnd()
+        + `   ·   Overall: ${target}   ·   ${standing}`
+        + `   ·   ${objective.records} record(s)`
+        + (objective.evidence ? `, ${objective.evidence} photo(s)` : '')
+        + (objective.supportsOperation ? `   ·   supports ${sectorName(objective.supportsOperation)}` : '')
+      );
+      doc.fillColor('#000000').fontSize(10);
+      doc.moveDown(0.35);
+    }
+    doc.moveDown(0.5);
+  }
 
   section('BUDGET SUMMARY (USD)');
   const budget = report.budgetSummary;
@@ -703,10 +954,38 @@ function writePdf(report, stream) {
     }
   }
 
-  if (!report.activities.length) {
+  // The day-by-day record: what the managers actually wrote down, in date
+  // order. This is the body of the report on a month run through objectives.
+  if (work.days.length) {
+    if (doc.y > bottom - 90) doc.addPage();
+    section('DAY-BY-DAY RECORD');
+    for (const day of work.days) {
+      if (doc.y > bottom - 34) doc.addPage();
+      doc.font('Helvetica-Bold').fontSize(8.5)
+        .text(`${readableDay(day.date)}  ·  ${sectorName(day.operation)}  ·  ${day.objective || '(no objective)'}`, left, doc.y, { width });
+      doc.font('Helvetica').fontSize(8).text(
+        `${day.quantity} ${day.unit}`.trim()
+        + (day.cost > 0 ? `  |  ${usd(day.cost)}` : '')
+        + `  |  ${day.evidenceCount} photo(s)`
+        + `  |  recorded by ${day.recordedBy || 'unknown'}`
+        + (day.notes ? `  |  ${day.notes}` : ''),
+        { width }
+      );
+      doc.moveDown(0.4);
+    }
+  }
+
+  // Only truly empty when BOTH registers are empty. Saying "no activities" on a
+  // week full of recorded days was the bug this replaces.
+  if (!report.activities.length && !work.days.length) {
     doc.moveDown(1);
     doc.font('Helvetica-Oblique').fontSize(10)
-      .text('No activities fall in this period.', left, doc.y, { width });
+      .text('Nothing was recorded in this period -- no activities, and no days against a monthly plan.', left, doc.y, { width });
+  } else if (!report.activities.length) {
+    doc.moveDown(0.6);
+    doc.font('Helvetica-Oblique').fontSize(9).fillColor('#555555')
+      .text('No activity-register entries fall in this period. The work above was recorded against the monthly plan.', left, doc.y, { width });
+    doc.fillColor('#000000');
   }
 
   doc.end();

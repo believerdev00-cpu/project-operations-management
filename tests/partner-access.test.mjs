@@ -100,8 +100,8 @@ try {
   const sectorList = (await api(adminToken, '/api/sectors')).body;
   const names = sectorList.map((operation) => operation.name);
   check('exactly four business operations exist', sectorList.length === 4, String(sectorList.length));
-  check('they are Farming, Agriculture, Mining, Movements & Facilitation',
-    ['Farming', 'Agriculture', 'Mining', 'Movements & Facilitation'].every((name) => names.includes(name)),
+  check('they are Mining, Agriculture, Farming, Movement & Facilitation',
+    ['Mining', 'Agriculture', 'Farming', 'Movement & Facilitation'].every((name) => names.includes(name)),
     names.join(' | '));
   check('no generic placeholder names',
     !names.some((name) => /sector\s*\d|project sector|^sector$/i.test(name)), names.join(' | '));

@@ -24,7 +24,7 @@
 import express from 'express';
 import { pool } from '../db/database.js';
 import { asyncRoute } from '../lib/http.js';
-import { operationById } from '../../shared/businessOperations.js';
+import { TRIPS_OPERATION, operationById } from '../../shared/businessOperations.js';
 import { round2 } from '../lib/rates.js';
 
 const router = express.Router();
@@ -39,9 +39,9 @@ function activityVisibility(user, values) {
     AND a.status NOT IN ('Draft', 'Cancelled', 'Rejected')`;
 }
 
-// A movement belongs to the operation it supports; a Logistics partner also
-// sees the movements that are not linked to another operation, because those
-// are Movements & Facilitation's own work.
+// A movement belongs to the operation it supports; a partner of the operation
+// that RUNS the trips (Movement & Facilitation) also sees the movements that are not
+// linked to another operation, because those are that operation's own work.
 //
 // Linkage is decided by related_area alone. movements.sector is 'movement' on
 // every row, so testing it here once let a Logistics partner read movements
@@ -49,7 +49,7 @@ function activityVisibility(user, values) {
 function movementVisibility(user, values) {
   values.push(user.sector);
   const operation = `$${values.length}`;
-  const belongs = user.sector === 'movement'
+  const belongs = user.sector === TRIPS_OPERATION
     ? `(m.related_area IS NULL OR m.related_area = ${operation})`
     : `m.related_area = ${operation}`;
   return `${belongs}

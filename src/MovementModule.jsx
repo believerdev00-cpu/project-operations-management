@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApprovalPanel, approverName, canApproveRecord, decisionIsOpen, formatTrailValue, labelForField, trailActionLabel } from './ActivityReview.jsx';
 import { displayLanguage, fill, translate, useT } from './i18n.js';
-import { operationName } from '../shared/businessOperations.js';
+import { BUSINESS_OPERATIONS, operationName, runsTrips } from '../shared/businessOperations.js';
 import { DetailView, useBusy, useDialog } from './ui.jsx';
 import { FilePicker, Journey, MoneyBar, NextStep, Section, goToSection, journeyLabel, journeyTone, movementJourney } from './journey.jsx';
 
@@ -20,11 +20,14 @@ export const MOVEMENT_STATUSES = ['Draft', 'Pending Approval', 'Approved', 'Fund
 
 // Areas a movement can be linked to. Logistics & Facilitation is its own area,
 // so it never appears here (section 5).
-const LINKABLE_AREAS = [
-  { id: 'farming', name: 'Farming' },
-  { id: 'agriculture', name: 'Agriculture' },
-  { id: 'mining', name: 'Mining' }
-];
+// The operations a trip can be run for: all four of them.
+//
+// Derived from BUSINESS_OPERATIONS rather than listed by hand. The hand-written
+// list held three of the four and carried its own English names, so it both
+// excluded Facilitation and would have gone stale the moment an operation was
+// renamed -- which is exactly what happened. Every label on screen comes from
+// areaLabel(), which translates through operationName().
+const LINKABLE_AREAS = BUSINESS_OPERATIONS.map((operation) => ({ id: operation.id }));
 
 const STATUS_FLOW = {
   Draft: ['Pending Approval', 'Cancelled'],
@@ -114,7 +117,7 @@ function toDateInput(value) {
 
 // Named from the shared definition so a movement's operation reads the same
 // here as it does everywhere else, in the viewer's language. A standalone
-// movement belongs to Movements & Facilitation itself, which is not a linkable
+// movement belongs to Facilitation itself, which is not a linkable
 // area but is very much an operation for the purpose of reading a record.
 function areaLabel(area) {
   if (!area) return translate(displayLanguage(), 'filter.notLinked');
@@ -156,8 +159,8 @@ export default function MovementModule({ user, onOpenFile, fetchJson, upload, op
   const dialog = useDialog();
   const [busy, run] = useBusy();
   const isDirector = user.role === 'super-admin';
-  // An all-operations manager covers Movements & Facilitation like any other.
-  const coversMovements = Boolean(user.coversAllSectors) || user.sector === 'movement';
+  // An all-operations manager covers Facilitation like any other.
+  const coversMovements = runsTrips(user);
   // Team members follow the trips but do not raise them; the API refuses them too.
   const canCreate = isDirector || (coversMovements && user.role === 'manager');
   // The open movement lives in the address (#/movements/MOV-...), so a link from
@@ -807,7 +810,7 @@ function MovementDetail({ detail, user, onOpenFile, isDirector, busy = false, on
     setApproval({ approvedBudget: String(movement.estimatedTotal), adminNote: '' });
   }, [movement.updatedAt, movement.fundsReleased, movement.actualExpense, movement.evidenceStatus, movement.estimatedTotal]);
 
-  const coversMovements = Boolean(user.coversAllSectors) || user.sector === 'movement';
+  const coversMovements = runsTrips(user);
   const canEdit = isDirector || (coversMovements && movement.createdBy === user.id && ['Draft', 'Pending Approval'].includes(movement.status));
   const canAttach = isDirector || (coversMovements && movement.createdBy === user.id);
   // Whether this user is the person the record is waiting on. The API checks

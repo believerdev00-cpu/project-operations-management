@@ -102,9 +102,22 @@ const statements = [
   `ALTER TABLE movements DROP CONSTRAINT IF EXISTS movements_evidence_status_check`,
   `ALTER TABLE movements ADD CONSTRAINT movements_evidence_status_check
      CHECK (evidence_status IN ('Pending', 'Partial', 'Complete'))`,
+  // A trip may name ANY of the four operations as the one it supports, or none.
+  //
+  // This used to forbid related_area = 'movement'. That made sense while the
+  // operation with that id ran the trips register: movements.sector is
+  // 'movement' on every row, so pointing a trip's related area at it was a
+  // self-reference. The trips register belongs to Movement & Facilitation (see
+  // TRIPS_OPERATION), and the operation reading as "Facilitation" is an ordinary
+  // business concern a trip can be run for -- delivering to a facilitation case
+  // is exactly as real as delivering to a mine. Forbidding it left such a trip
+  // recordable only as "not linked", which hid it from the Facilitation partner
+  // and from every per-operation total.
+  //
+  // Nothing replaces the constraint: related_area already REFERENCES sectors(id),
+  // so only one of the four ids (or NULL) can ever be stored. Dropped rather
+  // than relaxed because there is no longer any value to exclude.
   `ALTER TABLE movements DROP CONSTRAINT IF EXISTS movements_related_area_check`,
-  `ALTER TABLE movements ADD CONSTRAINT movements_related_area_check
-     CHECK (related_area IS NULL OR related_area <> 'movement')`,
 
   `CREATE TABLE IF NOT EXISTS movement_evidence (
      id SERIAL PRIMARY KEY,

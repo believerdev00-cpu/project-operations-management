@@ -206,3 +206,60 @@ export function isLive(status) {
 export function isPlanOpen(plan) {
   return plan.status !== 'Closed';
 }
+
+// ---- how far the month's objectives have got -------------------------------
+//
+// THE RULE: progress is calculated from the work actually recorded, never typed.
+// A manager cannot set "60%" on an objective; they record the 1.2 hectares they
+// cultivated and the percentage follows. That is the whole point of keeping the
+// daily records -- a typed percentage and the days behind it drift apart, and
+// then the month's figure is somebody's opinion rather than its history.
+//
+// An objective with no countable target (no target_quantity) has no percentage.
+// It is not 0% -- "nothing to count" and "nothing done" are different things,
+// and showing the second for the first makes a month look failed when it is
+// simply not measured that way.
+export function objectiveProgress(targetQuantity, quantityDone) {
+  const target = targetQuantity === null || targetQuantity === undefined
+    ? null
+    : fromCents(cents(targetQuantity));
+  const done = fromCents(cents(quantityDone || 0));
+  if (target === null || target <= 0) {
+    return { target: null, done, remaining: null, percent: null, complete: false };
+  }
+  const remaining = fromCents(Math.max(0, cents(target) - cents(done)));
+  // Capped at 100: the report route refuses work that would take an objective
+  // past its target, but a target lowered after the fact must not print 140%.
+  const percent = Math.min(100, Math.round((done / target) * 100));
+  return { target, done, remaining, percent, complete: cents(done) >= cents(target) };
+}
+
+// The month as one figure, from its objectives.
+//
+// Weighted by `weight` when any objective carries one, so "produce 500 tons"
+// need not count for the same as "file 2 reports". When none does -- the usual
+// case -- it is the plain average of the objectives' percentages, which is what
+// the spec asks for and what people expect when nobody has said otherwise.
+//
+// Objectives with no countable target are left out of the average rather than
+// counted as zero, for the same reason they have no percentage of their own. A
+// month made entirely of uncountable objectives has no overall percentage.
+export function planProgress(objectives) {
+  const counted = (objectives || []).filter((objective) => objective.percent !== null);
+  if (!counted.length) return null;
+  const weighted = counted.some((objective) => Number(objective.weight) > 0);
+  if (!weighted) {
+    const total = counted.reduce((sum, objective) => sum + objective.percent, 0);
+    return Math.round(total / counted.length);
+  }
+  // An objective with no weight among weighted ones counts as 1, so adding a
+  // weight to one objective does not silently erase the others.
+  let weightSum = 0;
+  let scoreSum = 0;
+  for (const objective of counted) {
+    const weight = Number(objective.weight) > 0 ? Number(objective.weight) : 1;
+    weightSum += weight;
+    scoreSum += weight * objective.percent;
+  }
+  return weightSum ? Math.round(scoreSum / weightSum) : null;
+}

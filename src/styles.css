@@ -897,3 +897,129 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .day-form h4 { margin: 16px 0 8px; color: var(--navy); font-size: .84rem; }
 .day-proof { display: grid; gap: 10px; }
 .plan-activities { margin-top: 22px; padding-top: 6px; border-top: 1px solid var(--line); }
+
+/* ---- the month's objectives ----------------------------------------------
+   The Director types a list of commitments; the manager reads them as progress
+   and records a day against one. Both sides use these. */
+
+/* The Director's editor: one row per commitment, widest field first so the
+   sentence ("cultivate land -- 2 -- hectares") reads left to right. */
+.objective-editor { margin-top: 18px; }
+.objective-row { display: grid; grid-template-columns: 28px minmax(0, 1fr) 110px 150px auto; gap: 12px; align-items: end; padding: 12px 0; border-bottom: 1px dashed var(--line); }
+.objective-row:last-child { border-bottom: 0; }
+/* The number of the commitment, or a "+" on the spare line that is not one yet. */
+.objective-index { display: flex; align-items: center; justify-content: center; height: 42px; color: var(--muted); font-size: .8rem; font-weight: 800; }
+.objective-remove { align-self: center; white-space: nowrap; }
+
+/* The manager's board: what must be done this month, and what is already done. */
+.objective-board { display: grid; gap: 12px; margin-bottom: 22px; }
+.objective-card { padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
+.objective-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.objective-card-head strong { font-size: .98rem; }
+.objective-percent { flex: none; color: var(--blue); font-size: 1.05rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.objective-percent.is-done { color: var(--green); }
+/* The bar is the figure, so it is never the only thing carrying the meaning:
+   the percentage is printed beside it for anyone who cannot judge a length. */
+.objective-bar { height: 8px; margin: 10px 0 8px; overflow: hidden; background: var(--canvas); border: 1px solid var(--line); border-radius: 999px; }
+.objective-bar span { display: block; height: 100%; background: var(--blue); border-radius: 999px; transition: width .25s ease; }
+.objective-card:has(.is-done) .objective-bar span { background: var(--green); }
+.objective-figures { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: .85rem; }
+
+/* Budget, category and notes: real, but not what the month is about. */
+.plan-optional { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.plan-optional > summary { color: var(--muted); font-size: .85rem; font-weight: 700; cursor: pointer; }
+.plan-optional > summary:hover { color: var(--ink); }
+
+/* On a phone the objective row stacks: the label above each field is what makes
+   a stacked form readable, and they are already there. */
+@media (max-width: 760px) {
+  .objective-row { grid-template-columns: 1fr 1fr; gap: 10px; padding: 14px 0; }
+  .objective-index { justify-content: flex-start; height: auto; grid-column: 1 / -1; }
+  .objective-title { grid-column: 1 / -1; }
+  .objective-remove { grid-column: 1 / -1; justify-self: start; }
+}
+
+/* ---- what happened lately -------------------------------------------------
+   The Director's monitoring feed: one line per day a manager recorded, across
+   every operation. Clicking a line opens the month it belongs to. */
+.update-feed { display: grid; gap: 2px; margin: 0 0 8px; padding: 0; list-style: none; }
+.update-row { display: flex; align-items: center; gap: 10px; padding: 2px 0; border-bottom: 1px solid var(--line); }
+.update-row:last-child { border-bottom: 0; }
+.update-main { display: flex; flex: 1; align-items: center; gap: 12px; min-width: 0; padding: 9px 6px; color: inherit; text-align: left; background: none; border: 0; border-radius: 5px; cursor: pointer; }
+.update-main:hover { background: var(--blue-soft); }
+.update-when { flex: none; width: 62px; color: var(--muted); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.update-what { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 10px; min-width: 0; }
+.update-what strong { font-size: .88rem; }
+.update-objective { color: var(--ink); font-size: .88rem; }
+.update-detail { color: var(--muted); font-size: .85rem; }
+.update-percent { flex: none; color: var(--blue); font-size: .9rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.update-by { flex: none; color: var(--muted); font-size: .78rem; }
+
+/* Objective bars on the operation cards, so the Director reads the month's
+   commitments at a glance without opening it. */
+.operation-objectives { display: grid; gap: 9px; margin: 4px 0 14px; }
+.operation-overall { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.operation-overall span { color: var(--muted); font-size: .78rem; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; }
+.operation-overall strong { color: var(--blue); font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+.operation-objective-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: .85rem; }
+.operation-objective-head small { flex: none; font-weight: 800; font-variant-numeric: tabular-nums; }
+.operation-objective .objective-bar { height: 6px; margin: 5px 0 0; }
+
+@media (max-width: 640px) {
+  .update-main { flex-wrap: wrap; gap: 4px 10px; }
+  .update-when { width: auto; }
+  .update-by { display: none; }
+}
+
+/* ---- the manager's month, on their home screen ----------------------------
+   Section 12: what must be completed this month, what is already done, and one
+   button to record today's work. It sits above the queues because leading the
+   operation is the manager's job and the queues are secondary. */
+.my-month { margin-top: 22px; padding: 20px 22px; background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--blue); border-radius: 6px; box-shadow: 0 4px 14px rgba(16,43,70,.03); }
+.my-month-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
+.my-month-head h3 { margin: 0; font-size: 1rem; }
+.my-month-head small { color: var(--muted); font-size: .82rem; }
+.my-month-overall { flex: none; color: var(--blue); font-size: 1.6rem; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+.my-month-objectives { display: grid; gap: 13px; }
+.my-month-objective-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.my-month-objective-head strong { font-size: .92rem; }
+.my-month-objective-head small { flex: none; font-weight: 800; font-variant-numeric: tabular-nums; }
+.my-month-objective-head small.is-done { color: var(--green); }
+/* The one action the manager is here to take. */
+.my-month-record { width: 100%; margin-top: 18px; }
+
+/* The compiled month-end report. */
+.month-report { margin-top: 18px; }
+.month-report .is-done { color: var(--green); }
+
+@media (min-width: 720px) {
+  .my-month-record { width: auto; }
+}
+
+/* ---- support work, and who it is for --------------------------------------
+   Movement & Facilitation coordinates for Mining, Agriculture and Farming, so
+   each of its objectives carries the operation it serves. Without this a
+   coordination month reads as a set of numbers belonging to nobody. */
+.supports-badge { display: inline-block; margin-top: 6px; padding: 2px 9px; color: var(--navy); font-size: .74rem; font-weight: 700; letter-spacing: .02em; background: var(--blue-soft); border-radius: 999px; }
+.objective-supports { grid-column: 1 / -1; }
+
+/* Per-operation roll-up on a coordination month's report. */
+.support-summary { margin-top: 16px; }
+.support-summary ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.support-summary li { display: flex; align-items: baseline; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.support-summary li:last-child { border-bottom: 0; }
+.support-summary li span { flex: 1; min-width: 0; font-size: .9rem; }
+.support-summary li strong { flex: none; color: var(--blue); font-variant-numeric: tabular-nums; }
+.support-summary li small { flex: none; color: var(--muted); font-size: .8rem; }
+
+@media (min-width: 761px) {
+  /* The editor row gains a fourth field on a coordination plan. */
+  .objective-editor .objective-row:has(.objective-supports) { grid-template-columns: 28px minmax(0, 1fr) 90px 120px auto; }
+  .objective-supports { grid-column: 2 / -1; }
+}
+
+/* One-tap amounts on the daily form, where a kind of work has a typical day.
+   Filtered against what is left, so a button can never push past the target. */
+.quick-amounts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+.quick-amount { padding: 5px 12px; color: var(--navy); font-size: .82rem; font-weight: 700; background: var(--blue-soft); border: 1px solid var(--line); border-radius: 999px; cursor: pointer; }
+.quick-amount:hover { background: var(--surface); border-color: var(--blue); }

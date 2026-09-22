@@ -111,7 +111,10 @@ try {
     if (created1.status !== 201) continue;
     plans[operation.id] = created1.body;
     created.plans.push(created1.body.id);
-    check(`  status is Draft`, created1.body.status === 'Draft', created1.body.status);
+    // Created live, not as a draft. The plan is agreed with the managers in a
+    // meeting before anybody opens the screen, so typing it in IS the decision;
+    // there is no second, ceremonial press before the manager can see it.
+    check(`  status is Confirmed straight away`, created1.body.status === 'Confirmed', created1.body.status);
     check(`  names the manager`, created1.body.managerId === managers[operation.id].id);
     check(`  carries the budget the Director approved`,
       created1.body.approvedBudget === (operation.id === 'farming' ? 4000 : 1000),
@@ -170,33 +173,39 @@ try {
       body: JSON.stringify({ activity: 'ZZTEST no description', category: 'Planned work', approvedBudget: 10 })
     })).status === 400);
 
-  const confirmed = await api(adminToken, `/api/monthly-plans/${farmingId}/confirm`, { method: 'POST' });
-  check('the Director can confirm the plan', confirmed.status === 200, JSON.stringify(confirmed.body).slice(0, 160));
-  check('  status becomes Confirmed', confirmed.body.status === 'Confirmed', confirmed.body.status);
-  check('  the approved allocation is the Director\'s $4,000', confirmed.body.approvedBudget === 4000,
-    String(confirmed.body.approvedBudget));
-  check('  confirming does not rewrite it from the activities', confirmed.body.committedBudget === 3000,
-    String(confirmed.body.committedBudget));
-  check('  it is not confirmable twice', (await api(adminToken, `/api/monthly-plans/${farmingId}/confirm`, { method: 'POST' })).status === 409);
+  // THERE IS NO CONFIRMATION STAGE. The month was agreed with the managers
+  // before anybody opened the screen, so it is the manager's from the moment the
+  // Director saves it. /confirm survives only for months written before this and
+  // refuses a plan that is already live.
+  const confirmed = await api(adminToken, `/api/monthly-plans/${farmingId}`);
+  check('the plan is already the manager\'s', confirmed.body.plan.status === 'Confirmed', confirmed.body.plan.status);
+  check('  the approved allocation is the Director\'s $4,000', confirmed.body.plan.approvedBudget === 4000,
+    String(confirmed.body.plan.approvedBudget));
+  check('  and is not rewritten from the activities', confirmed.body.plan.committedBudget === 3000,
+    String(confirmed.body.plan.committedBudget));
+  check('  confirming an already-live month is refused',
+    (await api(adminToken, `/api/monthly-plans/${farmingId}/confirm`, { method: 'POST' })).status === 409);
 
-  // Confirm the rest so every operation is exercised end to end.
   for (const operation of BUSINESS_OPERATIONS) {
     if (operation.id === 'farming') continue;
-    const result = await api(adminToken, `/api/monthly-plans/${plans[operation.id].id}/confirm`, { method: 'POST' });
-    check(`confirm the ${operation.name} plan ($1,000)`, result.status === 200 && result.body.approvedBudget === 1000,
-      `${result.status} ${result.body.approvedBudget}`);
+    const result = await api(adminToken, `/api/monthly-plans/${plans[operation.id].id}`);
+    check(`the ${operation.name} plan is live with its $1,000`,
+      result.body.plan.status === 'Confirmed' && result.body.plan.approvedBudget === 1000,
+      `${result.body.plan.status} ${result.body.plan.approvedBudget}`);
   }
 
   section('NO money movement anywhere in the workflow');
-  const planShape = JSON.stringify(confirmed.body).toLowerCase();
+  const planShape = JSON.stringify(confirmed.body.plan).toLowerCase();
   const banned = ['transaction', 'transfer', 'wallet', 'gateway', 'payout', 'disburse'];
-  check('the confirmed plan exposes no payment concepts',
+  check('the live plan exposes no payment concepts',
     !banned.some((word) => planShape.includes(word)),
     banned.filter((w) => planShape.includes(w)).join(', '));
   const history = (await api(adminToken, `/api/monthly-plans/${farmingId}`)).body.history;
-  const confirmEntry = history.find((entry) => entry.action === 'Plan confirmed');
+  // The allocation is recorded when the Director states it, which is now at
+  // creation rather than at a separate confirmation.
+  const allocationEntry = history.find((entry) => entry.action === 'Approved allocation changed');
   check('the trail records an allocation, not a payment',
-    confirmEntry && /outside the platform/i.test(confirmEntry.note), confirmEntry?.note);
+    allocationEntry && /outside the platform|approved for the month/i.test(allocationEntry.note), allocationEntry?.note);
 
   // ---- 3: the manager sees only their own month --------------------------
   section('3. The manager sees only their own activities');

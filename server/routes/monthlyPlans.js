@@ -48,11 +48,14 @@ import {
 } from '../lib/storage.js';
 import { asyncRoute, contentDisposition, hasFullScope, isAdmin, isValidDate, parseId, requiredText, sectorIds, validNumber, withinScope } from '../lib/http.js';
 import { PLAN_PRIORITIES, REPORT_STATUSES } from '../db/monthlySchema.js';
+import { isPrimaryOperation, isSupportOperation, operationName } from '../../shared/businessOperations.js';
+import { aiConfigured, derive as deriveForm, improve as improveForm } from '../lib/objectiveForm.js';
 import { getCurrentRate, round2 } from '../lib/rates.js';
 import {
   COMPLETED_STATUS, OVER_BUDGET_MESSAGE, canReadPlan, canWorkPlan, cents, currentMonth, fitsBudget,
   fitsRemaining, formatUsd, fromCents, isPlanManager, isPlanOpen, monthKey, monthStart,
-  overActivityBudgetMessage, overMonthlyBudgetMessage, toDateOnly, uncommitted
+  objectiveProgress, overActivityBudgetMessage, overMonthlyBudgetMessage, planProgress,
+  toDateOnly, uncommitted
 } from '../lib/monthly.js';
 
 const router = express.Router();
@@ -106,10 +109,49 @@ async function refuse(client, res, status, body) {
 }
 
 // One day of the manager's work, as the screens read it.
+// One of the month's commitments, with how far it has actually got.
+//
+// target/done/remaining/percent all come from objectiveProgress, so the figure
+// on the Director's dashboard, the figure on the manager's screen and the
+// figure in the month-end report are the same calculation and cannot drift.
+function mapObjective(row) {
+  const progress = objectiveProgress(row.target_quantity, row.quantity_done);
+  return {
+    id: row.id,
+    planId: row.plan_id,
+    title: row.title,
+    targetQuantity: progress.target,
+    targetUnit: row.target_unit || '',
+    weight: row.weight === null || row.weight === undefined ? null : Number(row.weight),
+    sortOrder: Number(row.sort_order || 0),
+    // Which primary operation this supports. Null on a primary operation's own
+    // objectives, and on support work that serves all three at once.
+    supportsOperation: row.supports_operation ?? null,
+    // The daily form this objective is recorded through, and where its wording
+    // came from. Always present -- every objective is written with the derived
+    // form, so the manager's screen never has to cope with its absence.
+    form: row.form_spec || deriveForm({
+      title: row.title,
+      targetQuantity: row.target_quantity === null ? null : Number(row.target_quantity),
+      targetUnit: row.target_unit || ''
+    }),
+    formSource: row.form_source || 'derived',
+    // Summed from the manager's days, never typed by anybody.
+    quantityDone: progress.done,
+    quantityRemaining: progress.remaining,
+    percent: progress.percent,
+    complete: progress.complete,
+    costSpent: round2(Number(row.cost_spent || 0)),
+    updateCount: Number(row.update_count || 0),
+    lastReportedOn: row.last_reported_on ? toDateOnly(row.last_reported_on) : null
+  };
+}
+
 function mapDailyReport(row) {
   return {
     id: row.id,
     planId: row.plan_id,
+    objectiveId: row.objective_id ?? null,
     date: toDateOnly(row.report_date),
     quantityDone: round2(Number(row.quantity_done || 0)),
     cost: round2(Number(row.cost || 0)),
@@ -156,6 +198,165 @@ function readTarget(payload) {
     return { error: 'Say what the target is counted in -- hectares, chickens, trips, square metres.' };
   }
   return { quantity: round2(raw), unit, output };
+}
+
+// The month's commitments as the Director typed them, validated as a set.
+//
+// The list is what the Director and the managers agreed in the meeting that
+// happens outside this system. Everything here is about refusing a list that
+// would read as nonsense later: an objective with no title, or a target with no
+// unit ("2" of what?). A target is optional -- "provide the agreed services" is
+// a real commitment that no number measures -- and such an objective simply has
+// no percentage rather than sitting at 0%.
+//
+// MAX_OBJECTIVES exists because this is typed once from an agreed list, not
+// accumulated; a plan arriving with hundreds of rows is a mistake or an abuse,
+// and either way the Director should see it refused rather than stored.
+const MAX_OBJECTIVES = 40;
+
+function readObjectives(payload, operation) {
+  const raw = payload?.objectives;
+  if (raw === undefined || raw === null) return { objectives: [] };
+  if (!Array.isArray(raw)) return { error: 'The month\'s objectives must be a list.' };
+  if (raw.length > MAX_OBJECTIVES) {
+    return { error: `A month cannot carry more than ${MAX_OBJECTIVES} objectives.` };
+  }
+
+  const objectives = [];
+  for (const entry of raw) {
+    const title = optionalText(entry?.title, 500);
+    const unit = optionalText(entry?.targetUnit, 40);
+    const hasQuantity = entry?.targetQuantity !== '' && entry?.targetQuantity !== null
+      && entry?.targetQuantity !== undefined;
+    // A row the Director started and abandoned is dropped rather than refused,
+    // so an empty trailing line in the form does not block the whole month.
+    if (!title && !hasQuantity && !unit) continue;
+    if (!title) {
+      return { error: 'Every objective needs saying in words -- "cultivate 2 hectares", "buy 1 irrigation system".' };
+    }
+    if (hasQuantity) {
+      if (!validNumber(entry.targetQuantity) || Number(entry.targetQuantity) <= 0) {
+        return { error: `"${title}": the target must be a number greater than zero, or left empty.` };
+      }
+      if (!unit) {
+        return { error: `"${title}": say what the target is counted in -- hectares, tons, systems, trips, cases.` };
+      }
+    }
+    let weight = null;
+    if (entry?.weight !== '' && entry?.weight !== null && entry?.weight !== undefined) {
+      if (!validNumber(entry.weight) || Number(entry.weight) <= 0) {
+        return { error: `"${title}": the weight must be a number greater than zero, or left empty.` };
+      }
+      weight = round2(entry.weight);
+    }
+
+    // Which primary operation this objective supports.
+    //
+    // Only meaningful on the support function's own plan: Movement &
+    // Facilitation coordinates transport and logistics FOR Mining, Agriculture
+    // and Farming, so "50 transport trips" is always 50 trips for one of them.
+    // An objective on a primary operation's own plan supports nothing -- it
+    // produces -- so naming a supported operation there is refused rather than
+    // quietly stored, which would make Mining's month look like support work.
+    let supportsOperation = null;
+    const supports = optionalText(entry?.supportsOperation, 50);
+    if (supports) {
+      if (!isSupportOperation(operation)) {
+        return {
+          error: `"${title}": only a Movement & Facilitation objective says which operation it supports.`
+        };
+      }
+      if (!isPrimaryOperation(supports)) {
+        return {
+          error: `"${title}": support is given to Mining, Agriculture or Farming.`
+        };
+      }
+      supportsOperation = supports;
+    }
+
+    objectives.push({
+      title,
+      targetQuantity: hasQuantity ? round2(entry.targetQuantity) : null,
+      targetUnit: hasQuantity ? unit : unit || '',
+      weight,
+      supportsOperation
+    });
+  }
+  return { objectives };
+}
+
+// Ask Claude to write better daily forms for objectives that still have the
+// derived ones, and store what comes back.
+//
+// Called AFTER the response has gone out, never before: the Director's month is
+// already saved and their screen has already moved on, so this is free to take a
+// few seconds, to fail, or to do nothing at all because no key is configured.
+// Every failure path leaves the derived form in place.
+//
+// Objectives are done one at a time rather than in parallel -- a month has a
+// handful, and a burst of concurrent calls buys nothing but rate limits.
+function improveObjectiveForms(planId, operation) {
+  if (!aiConfigured()) return;
+  setImmediate(async () => {
+    try {
+      const pending = await pool.query(
+        `SELECT id, title, target_quantity, target_unit, supports_operation
+           FROM plan_objectives
+          WHERE plan_id = $1 AND (form_source IS NULL OR form_source = 'derived')
+          ORDER BY sort_order, id`,
+        [planId]
+      );
+      for (const row of pending.rows) {
+        const objective = {
+          title: row.title,
+          targetQuantity: row.target_quantity === null ? null : Number(row.target_quantity),
+          targetUnit: row.target_unit || '',
+          supportsOperation: row.supports_operation || null
+        };
+        const form = await improveForm(objective, operationName(operation, 'en'));
+        if (!form) continue;
+        // Guarded on form_source so a Director who edited the objective while
+        // this was in flight is not overwritten by a form describing the old one.
+        await pool.query(
+          `UPDATE plan_objectives
+              SET form_spec = $2, form_source = 'ai', form_generated_at = NOW()
+            WHERE id = $1 AND (form_source IS NULL OR form_source = 'derived')`,
+          [row.id, JSON.stringify(form)]
+        );
+      }
+    } catch (error) {
+      console.warn('[objective-form] background generation stopped:', error?.message || error);
+    }
+  });
+}
+
+// Writes the agreed list onto a plan, in the order the Director typed it.
+async function insertObjectives(client, planId, objectives, startOrder = 0) {
+  const created = [];
+  for (let index = 0; index < objectives.length; index += 1) {
+    const objective = objectives[index];
+    const inserted = await client.query(
+      `INSERT INTO plan_objectives
+         (plan_id, title, target_quantity, target_unit, weight, sort_order, supports_operation,
+          form_spec, form_source, form_generated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'derived', NOW())
+       RETURNING id, title, supports_operation`,
+      [
+        planId, objective.title, objective.targetQuantity, objective.targetUnit, objective.weight,
+        startOrder + index, objective.supportsOperation ?? null,
+        // The deterministic form, written with the objective itself. The manager
+        // therefore has a working daily form the instant the Director saves,
+        // whether or not a model is configured and whether or not it answers.
+        JSON.stringify(deriveForm({
+          title: objective.title,
+          targetQuantity: objective.targetQuantity,
+          targetUnit: objective.targetUnit
+        }))
+      ]
+    );
+    created.push(inserted.rows[0]);
+  }
+  return created;
 }
 
 async function logPlanHistory(client, planId, user, entries) {
@@ -480,7 +681,43 @@ router.get('/review', asyncRoute(async (req, res) => {
     scope = ` AND p.sector = $${values.length}`;
   }
   const plans = await pool.query(`${SELECT_PLAN} WHERE p.month = $1::date${scope} ORDER BY p.sector`, values);
-  const rows = plans.rows.map(mapPlan);
+
+  // Each month's commitments, so the Director's dashboard can show a bar per
+  // objective rather than one number per operation. Fetched in a single query
+  // for every plan on the screen instead of one request per operation.
+  const planIds = plans.rows.map((plan) => plan.id);
+  const objectiveRows = planIds.length
+    ? await pool.query(
+      `SELECT o.*,
+              COALESCE((SELECT SUM(r.quantity_done) FROM plan_daily_reports r
+                         WHERE r.objective_id = o.id), 0) AS quantity_done,
+              COALESCE((SELECT SUM(r.cost) FROM plan_daily_reports r
+                         WHERE r.objective_id = o.id), 0) AS cost_spent,
+              COALESCE((SELECT COUNT(*) FROM plan_daily_reports r
+                         WHERE r.objective_id = o.id), 0)::int AS update_count,
+              (SELECT MAX(r.report_date) FROM plan_daily_reports r
+                WHERE r.objective_id = o.id) AS last_reported_on
+         FROM plan_objectives o WHERE o.plan_id = ANY($1::int[])
+        ORDER BY o.plan_id, o.sort_order, o.id`,
+      [planIds]
+    )
+    : { rows: [] };
+  const objectivesByPlan = new Map();
+  for (const row of objectiveRows.rows) {
+    const list = objectivesByPlan.get(row.plan_id) || [];
+    list.push(mapObjective(row));
+    objectivesByPlan.set(row.plan_id, list);
+  }
+
+  const rows = plans.rows.map((plan) => {
+    const objectives = objectivesByPlan.get(plan.id) || [];
+    return {
+      ...mapPlan(plan),
+      objectives,
+      overallProgress: planProgress(objectives),
+      objectiveCount: objectives.length
+    };
+  });
 
   res.json({
     month: monthKey(month),
@@ -499,6 +736,79 @@ router.get('/review', asyncRoute(async (req, res) => {
       expensesWithoutEvidence: rows.reduce((sum, plan) => sum + plan.expensesWithoutEvidence, 0),
       completedWithoutEvidence: rows.reduce((sum, plan) => sum + plan.completedWithoutEvidence, 0)
     }
+  });
+}));
+
+// ---- what actually happened, across every operation -------------------------
+//
+// The Director should not have to ask a manager what happened. Every day a
+// manager records lands here, newest first, already joined to the objective it
+// counted towards and the operation it belongs to -- "Agriculture · cultivated
+// 0.8 hectares · 65%".
+//
+// Scoped like everything else: a manager sees their own operation's updates, the
+// Director sees all four. Declared before the '/:id' routes below, or Express
+// would read "updates" as a plan id.
+router.get('/updates', asyncRoute(async (req, res) => {
+  const limit = Math.min(Math.max(parseId(req.query.limit) || 30, 1), 100);
+  const values = [];
+  let scope = '';
+  if (!hasFullScope(req.user)) {
+    values.push(req.user.sector);
+    scope = ` WHERE p.sector = $${values.length}`;
+  }
+  // The month filter is optional: the dashboard wants "lately", not "this
+  // calendar month", so a day recorded on the 1st still shows on the 2nd.
+  if (req.query.month) {
+    const month = monthStart(req.query.month);
+    if (!month) return res.status(400).json({ message: 'The month must be in YYYY-MM form.' });
+    values.push(month);
+    scope += `${scope ? ' AND' : ' WHERE'} p.month = $${values.length}::date`;
+  }
+  values.push(limit);
+
+  const updates = await pool.query(
+    `SELECT r.id, r.report_date, r.quantity_done, r.cost, r.notes, r.submitted_by_name, r.created_at,
+            p.id AS plan_id, p.sector, p.month,
+            o.id AS objective_id, o.title AS objective_title,
+            o.target_quantity, o.target_unit,
+            COALESCE((SELECT SUM(d.quantity_done) FROM plan_daily_reports d
+                       WHERE d.objective_id = o.id), 0) AS objective_done,
+            (SELECT COUNT(*) FROM plan_report_evidence e WHERE e.report_id = r.id)::int AS evidence_count
+       FROM plan_daily_reports r
+       JOIN monthly_plans p ON p.id = r.plan_id
+       LEFT JOIN plan_objectives o ON o.id = r.objective_id
+       ${scope}
+      ORDER BY r.report_date DESC, r.id DESC
+      LIMIT $${values.length}`,
+    values
+  );
+
+  res.json({
+    updates: updates.rows.map((row) => {
+      // The objective's standing *after* this day, which is what makes the feed
+      // readable: "cultivated 0.8 ha -- now 65%".
+      const progress = objectiveProgress(row.target_quantity, row.objective_done);
+      return {
+        id: row.id,
+        planId: row.plan_id,
+        operation: row.sector,
+        month: monthKey(row.month),
+        date: toDateOnly(row.report_date),
+        objectiveId: row.objective_id ?? null,
+        objectiveTitle: row.objective_title || '',
+        targetUnit: row.target_unit || '',
+        quantityDone: round2(Number(row.quantity_done || 0)),
+        cost: round2(Number(row.cost || 0)),
+        notes: row.notes || '',
+        submittedByName: row.submitted_by_name || '',
+        evidenceCount: Number(row.evidence_count || 0),
+        objectivePercent: progress.percent,
+        objectiveDone: progress.done,
+        objectiveTarget: progress.target,
+        createdAt: row.created_at
+      };
+    })
   });
 }));
 
@@ -555,7 +865,25 @@ function mapPlanActivity(activity) {
 // on it is still one round trip.
 async function planDetail(planId, user) {
   const row = await loadPlan(planId, user);
-  const [activities, dailyReports, reportEvidence, history, report] = await Promise.all([
+  const [objectives, activities, dailyReports, reportEvidence, history, report] = await Promise.all([
+    // The month's commitments, each with what has actually been recorded
+    // against it. The totals are summed here rather than stored on the row: a
+    // stored figure and the days it is made of can disagree, and then nobody
+    // knows which is true.
+    pool.query(
+      `SELECT o.*,
+              COALESCE((SELECT SUM(r.quantity_done) FROM plan_daily_reports r
+                         WHERE r.objective_id = o.id), 0) AS quantity_done,
+              COALESCE((SELECT SUM(r.cost) FROM plan_daily_reports r
+                         WHERE r.objective_id = o.id), 0) AS cost_spent,
+              COALESCE((SELECT COUNT(*) FROM plan_daily_reports r
+                         WHERE r.objective_id = o.id), 0)::int AS update_count,
+              (SELECT MAX(r.report_date) FROM plan_daily_reports r
+                WHERE r.objective_id = o.id) AS last_reported_on
+         FROM plan_objectives o WHERE o.plan_id = $1
+        ORDER BY o.sort_order, o.id`,
+      [planId]
+    ),
     pool.query(
       `SELECT a.id, a.activity, a.description, a.category, a.sector, a.status, a.priority,
               COALESCE(a.approved_budget, a.requested_budget) AS approved_budget,
@@ -662,8 +990,21 @@ async function planDetail(planId, user) {
     evidenceByReport.set(file.report_id, list);
   }
 
+  // What the month committed to, and how far each commitment has got. This is
+  // the month now: the Director writes these once and stops, and everything the
+  // manager records afterwards counts against one of them.
+  const planObjectives = objectives.rows.map(mapObjective);
+
   return {
-    plan: mapPlan(row),
+    plan: {
+      ...mapPlan(row),
+      // The month as one number, from its objectives. Null when none of them is
+      // countable -- a month measured only in notes has no percentage, and
+      // printing 0% for it would read as failure rather than "not counted".
+      overallProgress: planProgress(planObjectives),
+      objectiveCount: planObjectives.length
+    },
+    objectives: planObjectives,
     // The manager's daily work against this month: the main record of how the
     // month was actually done.
     dailyReports: dailyReports.rows.map((day) => ({
@@ -746,6 +1087,32 @@ router.post('/', asyncRoute(async (req, res) => {
   const target = readTarget(req.body || {});
   if (target.error) return res.status(400).json({ message: target.error });
 
+  // One plan per operation per month. Checked here as well as by the unique
+  // index, so a duplicate is answered as a duplicate rather than as whatever
+  // else happens to be wrong with the body -- a second POST for a month that
+  // already exists is not really a validation problem, and saying "add an
+  // objective" would send the caller off to fix the wrong thing.
+  const duplicate = await pool.query(
+    'SELECT id FROM monthly_plans WHERE sector = $1 AND month = $2::date',
+    [operation, month]
+  );
+  if (duplicate.rowCount) {
+    return res.status(409).json({ message: 'A plan already exists for that business operation and month.' });
+  }
+
+  // The agreed list of commitments for the month. This is the Director's whole
+  // job: they type what was agreed in the meeting and stop. They do not break it
+  // into daily tasks, assign days or approve the manager's work afterwards.
+  const objectiveList = readObjectives(req.body || {}, operation);
+  if (objectiveList.error) return res.status(400).json({ message: objectiveList.error });
+  // A month has to say what it is for. Either the agreed objectives, or -- for
+  // a month written the old way -- the single target and objective text.
+  if (!objectiveList.objectives.length && !requiredText(req.body?.objective) && target.quantity === null) {
+    return res.status(400).json({
+      message: 'Say what this month is for: add at least one objective the manager works towards.'
+    });
+  }
+
   // The project the month's work belongs to, when the operation runs more than
   // one. It must be a project of this operation, or the plan would point at
   // work in somebody else's area.
@@ -784,7 +1151,12 @@ router.post('/', asyncRoute(async (req, res) => {
       `INSERT INTO monthly_plans
          (sector, month, manager_id, status, notes, created_by, category, objective, project_id, approved_budget,
           target_quantity, target_unit, expected_output)
-       VALUES ($1, $2::date, $3, 'Draft', $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
+       -- 'Confirmed' on creation, not 'Draft'. THERE IS NO APPROVAL STAGE: the
+       -- plan was agreed with the managers in a meeting before anybody opened
+       -- this screen, so the Director typing it in IS the decision. A Draft
+       -- state meant the Director saved the agreed plan and the manager still
+       -- saw nothing until a second, entirely ceremonial press.
+       VALUES ($1, $2::date, $3, 'Confirmed', $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
       [
         operation, month, manager?.id ?? null, optionalText(req.body?.notes, 2000), req.user.id,
         optionalText(req.body?.category, 100), optionalText(req.body?.objective, 4000),
@@ -792,9 +1164,36 @@ router.post('/', asyncRoute(async (req, res) => {
         target.quantity, target.unit, target.output
       ]
     );
+    // Created Confirmed, so the month is the manager's from this moment. Stamped
+    // as confirmed by the Director who wrote it, because it is: the agreement
+    // happened in the meeting and this is the record of it.
+    await client.query(
+      'UPDATE monthly_plans SET confirmed_by = $2, confirmed_at = NOW() WHERE id = $1',
+      [inserted.rows[0].id, req.user.id]
+    );
+    // A month written the old way -- one target and a sentence, no objectives
+    // list -- becomes a month with exactly one objective. Everything that
+    // measures a month now reads plan_objectives, so a plan with none would
+    // have no target to reach, no progress and no completion. This is the same
+    // conversion the migration does for months written before objectives
+    // existed, applied to callers that still post the old shape.
+    const toInsert = objectiveList.objectives.length ? objectiveList.objectives : [{
+      title: optionalText(req.body?.objective, 500)
+        || optionalText(req.body?.expectedOutput, 500)
+        || 'Monthly objective',
+      targetQuantity: target.quantity,
+      targetUnit: target.unit,
+      weight: null
+    }];
+    const savedObjectives = await insertObjectives(client, inserted.rows[0].id, toInsert);
     await logPlanHistory(client, inserted.rows[0].id, req.user, [
       { action: 'Plan created', field: 'month', oldValue: null, newValue: monthKey(month) },
       ...(manager ? [{ action: 'Manager assigned', field: 'managerId', oldValue: null, newValue: String(manager.id) }] : []),
+      // Each commitment recorded on its own line, so the trail shows what was
+      // agreed for the month rather than only that a month was made.
+      ...savedObjectives.map((objective) => ({
+        action: 'Objective set', field: 'objective', oldValue: null, newValue: objective.title
+      })),
       ...(approvedBudget ? [{
         action: 'Approved allocation changed', field: 'approvedBudget', oldValue: null, newValue: approvedBudget,
         note: 'Budget approved for the month by the Director.'
@@ -819,6 +1218,8 @@ router.post('/', asyncRoute(async (req, res) => {
   // one was still checked out waited out connectionTimeoutMillis and threw.
   // That happened *after* the COMMIT, so the plan was written and the caller
   // still got "Server or database error".
+  // The month is saved and answered; the forms are written afterwards.
+  improveObjectiveForms(planId, operation);
   res.status(201).json(mapPlan(await loadPlan(planId, req.user)));
 }));
 
@@ -1157,6 +1558,147 @@ router.post('/:id/reopen', asyncRoute(async (req, res) => {
   res.json(mapPlan(await loadPlan(existing.id, req.user)));
 }));
 
+// ---- correcting the agreed list ---------------------------------------------
+//
+// The Director types the agreed objectives once and is finished. These routes
+// exist for the case the meeting's outcome was typed wrongly, or a commitment
+// was genuinely added or dropped afterwards -- not as a way of managing the
+// month. There is deliberately no route here for the Director to record work:
+// the manager owns what happened, and the Director reads it.
+
+// Add a commitment to a month that is already running.
+router.post('/:id/objectives', asyncRoute(async (req, res) => {
+  requireAdmin(req.user, 'change a month\'s objectives');
+  const plan = await loadPlan(req.params.id, req.user);
+  if (!isPlanOpen(plan)) {
+    return res.status(400).json({ message: 'This month has been closed. Ask for it to be reopened first.' });
+  }
+  const parsed = readObjectives({ objectives: [req.body || {}] }, plan.sector);
+  if (parsed.error) return res.status(400).json({ message: parsed.error });
+  if (!parsed.objectives.length) {
+    return res.status(400).json({ message: 'Say what the objective is.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Added at the end of the list, so the order the Director typed is kept.
+    const next = await client.query(
+      'SELECT COALESCE(MAX(sort_order) + 1, 0) AS next FROM plan_objectives WHERE plan_id = $1',
+      [plan.id]
+    );
+    const [created] = await insertObjectives(client, plan.id, parsed.objectives, Number(next.rows[0].next));
+    await logPlanHistory(client, plan.id, req.user, [
+      { action: 'Objective set', field: 'objective', oldValue: null, newValue: created.title }
+    ]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+  improveObjectiveForms(plan.id, plan.sector);
+  res.status(201).json(await planDetail(plan.id, req.user));
+}));
+
+// Correct the wording or the figure of a commitment.
+router.patch('/:id/objectives/:objectiveId', asyncRoute(async (req, res) => {
+  requireAdmin(req.user, 'change a month\'s objectives');
+  const plan = await loadPlan(req.params.id, req.user);
+  if (!isPlanOpen(plan)) {
+    return res.status(400).json({ message: 'This month has been closed. Ask for it to be reopened first.' });
+  }
+  const objectiveId = parseId(req.params.objectiveId);
+  const existing = await pool.query(
+    `SELECT o.*, COALESCE((SELECT SUM(r.quantity_done) FROM plan_daily_reports r
+                            WHERE r.objective_id = o.id), 0) AS done
+       FROM plan_objectives o WHERE o.id = $1 AND o.plan_id = $2`,
+    [objectiveId, plan.id]
+  );
+  if (!existing.rowCount) return res.status(404).json({ message: 'That objective is not on this month.' });
+  const parsed = readObjectives({ objectives: [{ ...existing.rows[0], supportsOperation: existing.rows[0].supports_operation, ...(req.body || {}) }] }, plan.sector);
+  if (parsed.error) return res.status(400).json({ message: parsed.error });
+  const [next] = parsed.objectives;
+
+  // A target cannot be lowered below the work already recorded against it: the
+  // objective would read as more than 100% done, or the remainder would go
+  // negative. The days are the record; the target has to accommodate them.
+  const done = round2(Number(existing.rows[0].done || 0));
+  if (next.targetQuantity !== null && cents(next.targetQuantity) < cents(done)) {
+    return res.status(400).json({
+      message: `${done} ${next.targetUnit || existing.rows[0].target_unit} has already been recorded against "${next.title}". The target cannot be lower than that.`
+    });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE plan_objectives SET title = $2, target_quantity = $3, target_unit = $4, weight = $5,
+              supports_operation = $6, updated_at = NOW()
+       WHERE id = $1`,
+      [objectiveId, next.title, next.targetQuantity, next.targetUnit, next.weight, next.supportsOperation ?? null]
+    );
+    await logPlanHistory(client, plan.id, req.user, [
+      {
+        action: 'Objective changed', field: 'objective',
+        oldValue: existing.rows[0].title, newValue: next.title,
+        note: `Target ${next.targetQuantity ?? '--'} ${next.targetUnit || ''}`.trim()
+      }
+    ]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+  res.json(await planDetail(plan.id, req.user));
+}));
+
+// Drop a commitment that should not have been on the month.
+router.delete('/:id/objectives/:objectiveId', asyncRoute(async (req, res) => {
+  requireAdmin(req.user, 'change a month\'s objectives');
+  const plan = await loadPlan(req.params.id, req.user);
+  if (!isPlanOpen(plan)) {
+    return res.status(400).json({ message: 'This month has been closed. Ask for it to be reopened first.' });
+  }
+  const objectiveId = parseId(req.params.objectiveId);
+  const existing = await pool.query(
+    `SELECT o.title,
+            (SELECT COUNT(*) FROM plan_daily_reports r WHERE r.objective_id = o.id)::int AS days
+       FROM plan_objectives o WHERE o.id = $1 AND o.plan_id = $2`,
+    [objectiveId, plan.id]
+  );
+  if (!existing.rowCount) return res.status(404).json({ message: 'That objective is not on this month.' });
+  // Deleting would cascade the manager's days away with it. Their record of what
+  // they did is not the Director's to erase -- the objective has to be emptied
+  // by whoever recorded the work before it can go.
+  if (Number(existing.rows[0].days) > 0) {
+    return res.status(409).json({
+      message: `"${existing.rows[0].title}" already has ${existing.rows[0].days} day(s) of work recorded against it, so it cannot be removed.`,
+      code: 'OBJECTIVE_HAS_WORK'
+    });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM plan_objectives WHERE id = $1 AND plan_id = $2', [objectiveId, plan.id]);
+    await logPlanHistory(client, plan.id, req.user, [
+      { action: 'Objective removed', field: 'objective', oldValue: existing.rows[0].title, newValue: null }
+    ]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+  res.json(await planDetail(plan.id, req.user));
+}));
+
 // ---- working the month ------------------------------------------------------
 //
 // THE MONTH IS THE WORK. The Director writes one objective for a business
@@ -1218,6 +1760,19 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
   if (!canWorkPlan(req.user, plan)) {
     return res.status(403).json({ message: 'Only the manager of this business operation can report on this month.' });
   }
+  // THE MANAGER OWNS THE OPERATIONAL RECORD. The Director monitors the month;
+  // they do not lead it and they do not enter what happened in it. Letting them
+  // post a day made the progress figure partly the Director's own typing, which
+  // is exactly the "manual Admin progress entry" the design rules out -- and it
+  // would put words in a manager's mouth in a record the manager is answerable
+  // for. The Director keeps the correcting powers that follow (removing a day
+  // that should not be there), because reviewing an account is not writing it.
+  if (isAdmin(req.user)) {
+    return res.status(403).json({
+      message: 'The manager of this business operation records what happened. The Director reads it.',
+      code: 'MANAGER_RECORDS'
+    });
+  }
   if (plan.status === 'Draft') {
     return res.status(409).json({ message: 'The Director has not confirmed this month yet, so there is nothing to report against.' });
   }
@@ -1235,6 +1790,33 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
   if (monthKey(reportDate) !== monthKey(plan.month)) {
     return res.status(400).json({ message: `That day is outside this month. Choose a day in ${monthKey(plan.month)}.` });
   }
+  // Which of the month's commitments this day counted towards. A day of
+  // irrigating and a day of cultivating are different work, and pooling them
+  // under the plan left neither objective able to show its own progress.
+  //
+  // Optional only for a month that has no objectives on it -- one written before
+  // objectives existed. Every month written since has them, and a day on such a
+  // month must say which one it served.
+  const objectives = await pool.query(
+    'SELECT id, title, target_quantity, target_unit FROM plan_objectives WHERE plan_id = $1',
+    [plan.id]
+  );
+  let objectiveId = null;
+  if (objectives.rowCount === 1 && !payload.objectiveId) {
+    // One commitment on the month: there is nothing to choose, so it is not
+    // asked for. This is also what keeps a caller that knows nothing about
+    // objectives -- the old single-target shape -- working unchanged.
+    objectiveId = objectives.rows[0].id;
+  } else if (objectives.rowCount) {
+    objectiveId = parseId(payload.objectiveId);
+    if (!objectiveId || !objectives.rows.some((objective) => objective.id === objectiveId)) {
+      return res.status(400).json({
+        message: 'Choose which of this month\'s objectives this work counted towards.',
+        code: 'OBJECTIVE_REQUIRED'
+      });
+    }
+  }
+
   if (!validNumber(payload.quantityDone ?? 0)) {
     return res.status(400).json({ message: 'The work done must be a number that is not negative.' });
   }
@@ -1263,24 +1845,45 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
       [plan.id]
     );
     const row = locked.rows[0];
-    const target = row.target_quantity === null ? null : round2(Number(row.target_quantity));
-    const done = round2(Number(row.done || 0));
 
-    // A month cannot be more than finished. Reporting 0.5 against 0.1 remaining
-    // would leave the plan showing 140% and the remaining work negative.
-    if (target !== null && quantityDone > 0) {
-      const remaining = round2(target - done);
-      if (quantityDone > remaining) {
-        return await refuse(client, res, 400, {
-          message: `Only ${remaining} ${row.target_unit} of this month's target is left. Reporting ${quantityDone} would take it past the target.`,
-          code: 'OVER_TARGET',
-          remaining
-        });
+    // An objective cannot be more than finished. Reporting 0.5 against 0.1
+    // remaining would leave it showing 140% and the remaining work negative.
+    //
+    // Locked and re-read here rather than trusting the figures fetched above, so
+    // two days saved at the same instant cannot both fit in the same remainder.
+    if (objectiveId && quantityDone > 0) {
+      const lockedObjective = await client.query(
+        `SELECT o.title, o.target_quantity, o.target_unit,
+                COALESCE((SELECT SUM(r.quantity_done) FROM plan_daily_reports r
+                           WHERE r.objective_id = o.id), 0) AS done
+           FROM plan_objectives o WHERE o.id = $1 FOR UPDATE`,
+        [objectiveId]
+      );
+      const objective = lockedObjective.rows[0];
+      if (objective?.target_quantity !== null && objective?.target_quantity !== undefined) {
+        const target = round2(Number(objective.target_quantity));
+        const alreadyDone = round2(Number(objective.done || 0));
+        const remaining = round2(target - alreadyDone);
+        if (quantityDone > remaining) {
+          return await refuse(client, res, 400, {
+            message: `Only ${remaining} ${objective.target_unit} of "${objective.title}" is left. Reporting ${quantityDone} would take it past the target.`,
+            code: 'OVER_TARGET',
+            remaining
+          });
+        }
       }
     }
     // And the month's spending stays inside the budget the Director approved.
-    if (cost > 0) {
-      const approved = round2(Number(row.approved_budget || 0));
+    //
+    // WHEN THERE IS NO BUDGET THERE IS NO CEILING. A month is now agreed as a
+    // set of objectives; stating a figure for it is optional, and the Director
+    // often does not. Treating "no budget" as "a budget of zero" refused every
+    // cost the manager tried to record, with a message telling them to request a
+    // budget change -- so a month agreed as objectives alone could record the
+    // work but never what it cost. A ceiling the Director actually set is still
+    // enforced to the cent, exactly as before.
+    const approved = round2(Number(row.approved_budget || 0));
+    if (cost > 0 && cents(approved) > 0) {
       const spentSoFar = round2(Number(row.spent || 0));
       if (!fitsRemaining(cost, approved, spentSoFar)) {
         return await refuse(client, res, 400, {
@@ -1293,16 +1896,35 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
     }
 
     const inserted = await client.query(
-      `INSERT INTO plan_daily_reports (plan_id, report_date, quantity_done, cost, notes, submitted_by, submitted_by_name)
-       VALUES ($1, $2::date, $3, $4, $5, $6, $7) RETURNING *`,
-      [plan.id, reportDate, quantityDone, cost, notes, req.user.id, req.user.name]
+      `INSERT INTO plan_daily_reports (plan_id, objective_id, report_date, quantity_done, cost, notes, submitted_by, submitted_by_name)
+       VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8) RETURNING *`,
+      [plan.id, objectiveId, reportDate, quantityDone, cost, notes, req.user.id, req.user.name]
     );
     created = inserted.rows[0];
 
     // Starting is implied by reporting: somebody who writes down a day's work has
     // plainly begun, and making them press Start first only loses the typing.
-    const nowDone = round2(done + quantityDone);
-    const reachedTarget = target !== null && nowDone >= target;
+    //
+    // The month is finished when every countable objective has been met -- read
+    // back inside the transaction, after this day has landed, so the figure the
+    // decision is made on is the one that was just written. Objectives with no
+    // countable target cannot be "reached" by arithmetic, so a month made only
+    // of those never completes itself and the Director closes it as before.
+    const totals = await client.query(
+      `SELECT COUNT(*) FILTER (WHERE o.target_quantity IS NOT NULL)::int AS countable,
+              COUNT(*) FILTER (
+                WHERE o.target_quantity IS NOT NULL
+                  AND COALESCE((SELECT SUM(r.quantity_done) FROM plan_daily_reports r
+                                 WHERE r.objective_id = o.id), 0) >= o.target_quantity
+              )::int AS met,
+              COALESCE(SUM(COALESCE((SELECT SUM(r.quantity_done) FROM plan_daily_reports r
+                                      WHERE r.objective_id = o.id), 0)), 0) AS done_total
+         FROM plan_objectives o WHERE o.plan_id = $1`,
+      [plan.id]
+    );
+    const counts = totals.rows[0] || { countable: 0, met: 0, done_total: 0 };
+    const nowDone = round2(Number(counts.done_total || 0));
+    const reachedTarget = Number(counts.countable) > 0 && Number(counts.met) === Number(counts.countable);
     const nextStatus = reachedTarget ? 'Completed' : 'In Progress';
     if (row.status !== nextStatus && row.status !== 'Closed') {
       await client.query(
@@ -1322,7 +1944,8 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
       ]);
     }
     await logPlanHistory(client, plan.id, req.user, [{
-      action: 'Day reported', field: 'quantityDone', oldValue: done, newValue: nowDone,
+      action: 'Day reported', field: 'quantityDone',
+      oldValue: round2(nowDone - quantityDone), newValue: nowDone,
       note: reportDate + (cost ? ' · ' + formatUsd(cost) : '') + (notes ? ' · ' + notes.slice(0, 200) : '')
     }]);
     await client.query('COMMIT');
@@ -1333,7 +1956,15 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
     client.release();
   }
 
-  res.status(201).json({ report: mapDailyReport(created), ...(await planDetail(plan.id, req.user)) });
+  // The day that was just saved, under its own key.
+  //
+  // It used to be returned as `report`, and planDetail below ALSO returns a
+  // `report` -- the month-end report, which is null until somebody files one.
+  // The spread comes second, so it overwrote the day with null and the client's
+  // `saved.report.id` threw "Cannot read properties of null (reading 'id')" the
+  // moment a manager attached a photo to their day. Two different records
+  // cannot share one key.
+  res.status(201).json({ day: mapDailyReport(created), ...(await planDetail(plan.id, req.user)) });
 }));
 
 // Proof of a particular day: the photograph of the cleared field, the receipt for
@@ -1852,6 +2483,111 @@ router.post('/:id/attach/:activityId', asyncRoute(async (req, res) => {
 // Section 11: the manager's account of the month. The figures are taken from
 // the plan at the moment of submission rather than typed, so the report cannot
 // disagree with the records it summarises.
+// ---- the month-end report, compiled by the system ---------------------------
+//
+// Section 19: at the end of the month the Director reads what was achieved
+// without anybody assembling it. Every figure here is derived from the days the
+// manager recorded -- objective by objective, target against actual -- so there
+// is nothing to type and nothing that can disagree with the history it is made
+// of. This is read-only on purpose: the manager owns the operational records,
+// and the report is a view of them, not a second place to state them.
+//
+// Distinct from POST /:id/report below, which is the manager's own account of
+// the month's money and is a different document.
+router.get('/:id/month-report', asyncRoute(async (req, res) => {
+  const plan = await loadPlan(req.params.id, req.user);
+  if (!canReadPlan(req.user, plan)) {
+    return res.status(403).json({ message: 'This plan belongs to another business operation.' });
+  }
+
+  const [objectiveRows, counts] = await Promise.all([
+    pool.query(
+      `SELECT o.*,
+              COALESCE((SELECT SUM(r.quantity_done) FROM plan_daily_reports r
+                         WHERE r.objective_id = o.id), 0) AS quantity_done,
+              COALESCE((SELECT SUM(r.cost) FROM plan_daily_reports r
+                         WHERE r.objective_id = o.id), 0) AS cost_spent,
+              COALESCE((SELECT COUNT(*) FROM plan_daily_reports r
+                         WHERE r.objective_id = o.id), 0)::int AS update_count,
+              (SELECT MAX(r.report_date) FROM plan_daily_reports r
+                WHERE r.objective_id = o.id) AS last_reported_on
+         FROM plan_objectives o WHERE o.plan_id = $1
+        ORDER BY o.sort_order, o.id`,
+      [plan.id]
+    ),
+    pool.query(
+      `SELECT COUNT(*)::int AS days,
+              COUNT(DISTINCT r.report_date)::int AS distinct_days,
+              COALESCE(SUM(r.cost), 0) AS reported_cost
+         FROM plan_daily_reports r WHERE r.plan_id = $1`,
+      [plan.id]
+    )
+  ]);
+
+  const objectives = objectiveRows.rows.map(mapObjective);
+  const totals = counts.rows[0] || { days: 0, distinct_days: 0, reported_cost: 0 };
+  const approvedBudget = round2(Number(plan.approved_budget || 0));
+  const totalSpent = round2(Number(plan.total_spent || 0));
+
+  res.json({
+    planId: plan.id,
+    operation: plan.sector,
+    month: monthKey(plan.month),
+    managerName: plan.manager_name ?? null,
+    status: plan.status,
+    // One line per commitment: what was promised, what was recorded, how far
+    // that got. An objective with no countable target reports its actual and
+    // leaves the percentage empty rather than claiming 0%.
+    objectives: objectives.map((objective) => ({
+      id: objective.id,
+      title: objective.title,
+      targetQuantity: objective.targetQuantity,
+      targetUnit: objective.targetUnit,
+      actual: objective.quantityDone,
+      percent: objective.percent,
+      complete: objective.complete,
+      updateCount: objective.updateCount,
+      // On a Movement & Facilitation report this is the whole point: the reader
+      // sees that the 50 trips were 30 for Mining and 20 for Farming.
+      supportsOperation: objective.supportsOperation
+    })),
+    // Support given to each primary operation this month, for the Director
+    // reading Mining's month: its own objectives, plus what M&F promised it.
+    // Empty on a primary operation's own report.
+    supportByOperation: isSupportOperation(plan.sector)
+      ? Object.values(objectives.reduce((groups, objective) => {
+        if (!objective.supportsOperation) return groups;
+        const group = groups[objective.supportsOperation] || {
+          operation: objective.supportsOperation, objectives: 0, updates: 0, percents: []
+        };
+        group.objectives += 1;
+        group.updates += objective.updateCount;
+        if (objective.percent !== null) group.percents.push(objective.percent);
+        groups[objective.supportsOperation] = group;
+        return groups;
+      }, {})).map((group) => ({
+        operation: group.operation,
+        objectives: group.objectives,
+        updates: group.updates,
+        percent: group.percents.length
+          ? Math.round(group.percents.reduce((sum, value) => sum + value, 0) / group.percents.length)
+          : null
+      }))
+      : [],
+    overallCompletion: planProgress(objectives),
+    objectiveCount: objectives.length,
+    // "Daily operational updates: 18" -- how much work went into the month.
+    dailyUpdateCount: Number(totals.days || 0),
+    daysWorked: Number(totals.distinct_days || 0),
+    approvedBudget,
+    totalSpent,
+    // Only meaningful when the Director actually set a ceiling.
+    remainingBalance: cents(approvedBudget) > 0
+      ? fromCents(cents(approvedBudget) - cents(totalSpent))
+      : null
+  });
+}));
+
 router.post('/:id/report', asyncRoute(async (req, res) => {
   const plan = await loadPlan(req.params.id, req.user);
   if (!canReadPlan(req.user, plan)) {

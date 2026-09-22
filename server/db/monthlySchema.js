@@ -112,6 +112,92 @@ const statements = [
   `ALTER TABLE monthly_plans ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ`,
   `ALTER TABLE monthly_plans ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ`,
 
+  // ---- the month's objectives ----------------------------------------------
+  //
+  // A month is not one target. The Director and the four managers agree a set of
+  // commitments outside the system -- "cultivate 2 hectares", "buy 1 irrigation
+  // system", "irrigate 2 hectares" -- and the Director types that agreed list in.
+  // Each one is measured on its own, so a month can be 100% on the equipment and
+  // 40% on the irrigation instead of collapsing into a single misleading figure.
+  //
+  // WHY A TABLE AND NOT COLUMNS: monthly_plans already carried target_quantity
+  // and target_unit, which forced a month to have exactly one countable aim. A
+  // month with three commitments had to be written as three plans (the unique
+  // index on (sector, month) forbids that) or squashed into one number. The
+  // single-target columns are kept and backfilled below rather than dropped, so
+  // months written before this still read correctly.
+  //
+  // The quantity/unit pair stays deliberately ignorant of any trade: hectares,
+  // tons, systems, inspections, trips and cases are all just a number and a word.
+  `CREATE TABLE IF NOT EXISTS plan_objectives (
+     id SERIAL PRIMARY KEY,
+     plan_id INTEGER NOT NULL REFERENCES monthly_plans(id) ON DELETE CASCADE,
+     title TEXT NOT NULL,
+     target_quantity NUMERIC(14,2),
+     target_unit VARCHAR(40) NOT NULL DEFAULT '',
+     -- Optional importance. When no objective on a plan carries one, the month's
+     -- overall progress is the plain average of the objectives' percentages.
+     weight NUMERIC(6,2),
+     sort_order INTEGER NOT NULL DEFAULT 0,
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   )`,
+  `ALTER TABLE plan_objectives DROP CONSTRAINT IF EXISTS plan_objectives_target_check`,
+  `ALTER TABLE plan_objectives ADD CONSTRAINT plan_objectives_target_check
+     CHECK (target_quantity IS NULL OR target_quantity > 0)`,
+  `ALTER TABLE plan_objectives DROP CONSTRAINT IF EXISTS plan_objectives_weight_check`,
+  `ALTER TABLE plan_objectives ADD CONSTRAINT plan_objectives_weight_check
+     CHECK (weight IS NULL OR weight > 0)`,
+  `CREATE INDEX IF NOT EXISTS plan_objectives_plan_idx ON plan_objectives(plan_id, sort_order)`,
+
+  // ---- what a support objective is FOR --------------------------------------
+  //
+  // Movement & Facilitation is not a fourth production operation: it coordinates
+  // transport, logistics and the other support that Mining, Agriculture and
+  // Farming need. So an objective on ITS monthly plan is always support given to
+  // one of those three, and this column says which.
+  //
+  // "50 transport trips" on its own is a number nobody can act on. "50 transport
+  // trips for Mining" is the commitment that was actually agreed, and it lets
+  // the Director read Mining's month as Mining's own objectives plus the support
+  // promised to it.
+  //
+  // NULL on every objective of a primary operation's plan -- Mining's own
+  // objectives support nothing, they produce. NULL is also allowed on a support
+  // objective that genuinely serves all three at once (a shared fuel contract,
+  // say) rather than forcing a false choice.
+  //
+  // Only a primary operation may be named, enforced in the route: support that
+  // supports the support function is a loop, and nothing could read it.
+  `ALTER TABLE plan_objectives ADD COLUMN IF NOT EXISTS supports_operation VARCHAR(50)
+     REFERENCES sectors(id) ON DELETE SET NULL`,
+  `CREATE INDEX IF NOT EXISTS plan_objectives_supports_idx ON plan_objectives(supports_operation)`,
+
+  // ---- the daily form this objective is recorded through ---------------------
+  //
+  // The Director writes "Ore extraction, 500 tonnes" and the manager should be
+  // asked "Tonnes extracted today", not "Work done". The wording of that one
+  // question is what decides whether a manager records their day at all, and it
+  // is different for every objective in every operation -- tonnes, inspections,
+  // hectares, sessions, trips, cases.
+  //
+  // So the form is generated FROM the objective rather than hard-coded, and
+  // stored here: generated once when the objective is written, not on every page
+  // load. form_source says where it came from -- 'derived' for the deterministic
+  // reading of the objective's own words, 'ai' once a model has improved it --
+  // so a reader can always tell, and so a failed or unconfigured model leaves a
+  // working form behind rather than nothing.
+  //
+  // IT IS ONLY THE QUESTION, NEVER THE ANSWER. Nothing in here affects progress:
+  // that is still summed from plan_daily_reports. A generated form cannot change
+  // a figure, only how the manager is asked for it.
+  `ALTER TABLE plan_objectives ADD COLUMN IF NOT EXISTS form_spec JSONB`,
+  `ALTER TABLE plan_objectives ADD COLUMN IF NOT EXISTS form_source VARCHAR(20)`,
+  `ALTER TABLE plan_objectives ADD COLUMN IF NOT EXISTS form_generated_at TIMESTAMPTZ`,
+  `ALTER TABLE plan_objectives DROP CONSTRAINT IF EXISTS plan_objectives_form_source_check`,
+  `ALTER TABLE plan_objectives ADD CONSTRAINT plan_objectives_form_source_check
+     CHECK (form_source IS NULL OR form_source IN ('derived', 'ai'))`,
+
   // ---- the manager's day, reported against the month ------------------------
   //
   // One row per working day. This is the manager's main record and the source of
@@ -138,6 +224,47 @@ const statements = [
   `ALTER TABLE plan_daily_reports ADD CONSTRAINT plan_daily_reports_amounts_check
      CHECK (quantity_done >= 0 AND cost >= 0)`,
   `CREATE INDEX IF NOT EXISTS plan_daily_reports_plan_idx ON plan_daily_reports(plan_id, report_date DESC)`,
+
+  // Which of the month's commitments this day's work counted towards. Without
+  // it a day of irrigating and a day of cultivating both just added to one pile
+  // and neither objective could show its own progress.
+  //
+  // Nullable because the months that existed before objectives did have days
+  // recorded against the plan as a whole; the backfill below gives those a home
+  // rather than stranding them. ON DELETE CASCADE, because a day's work towards
+  // an objective is meaningless once that objective is gone -- and the Director
+  // can only remove an objective that has no work against it (see the route).
+  `ALTER TABLE plan_daily_reports ADD COLUMN IF NOT EXISTS objective_id INTEGER
+     REFERENCES plan_objectives(id) ON DELETE CASCADE`,
+  `CREATE INDEX IF NOT EXISTS plan_daily_reports_objective_idx ON plan_daily_reports(objective_id)`,
+
+  // Backfill: every month written when a plan had a single target becomes a
+  // month with a single objective, so nothing written before this reads as an
+  // empty plan. Idempotent by the NOT EXISTS guard -- a plan that already has
+  // objectives is left exactly as it is, on this boot and every later one.
+  `INSERT INTO plan_objectives (plan_id, title, target_quantity, target_unit, sort_order)
+   SELECT p.id,
+          -- The objective text the Director wrote is the best title there is;
+          -- falling back to the expected output, then to a plain label, so the
+          -- row is never nameless.
+          COALESCE(NULLIF(TRIM(p.objective), ''), NULLIF(TRIM(p.expected_output), ''), 'Monthly objective'),
+          p.target_quantity,
+          p.target_unit,
+          0
+     FROM monthly_plans p
+    WHERE (p.target_quantity IS NOT NULL
+           OR NULLIF(TRIM(p.objective), '') IS NOT NULL
+           OR NULLIF(TRIM(p.expected_output), '') IS NOT NULL)
+      AND NOT EXISTS (SELECT 1 FROM plan_objectives o WHERE o.plan_id = p.id)`,
+
+  // And point that month's existing days at the objective just made for them,
+  // so their quantities keep counting. Only days with no objective are touched.
+  `UPDATE plan_daily_reports r
+      SET objective_id = (SELECT o.id FROM plan_objectives o
+                           WHERE o.plan_id = r.plan_id
+                           ORDER BY o.sort_order, o.id LIMIT 1)
+    WHERE r.objective_id IS NULL
+      AND EXISTS (SELECT 1 FROM plan_objectives o WHERE o.plan_id = r.plan_id)`,
 
   // Proof of a particular day's work. Kept apart from activity_evidence because
   // that table's rows belong to an activity and are served through the activity
