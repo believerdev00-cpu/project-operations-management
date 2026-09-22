@@ -6,7 +6,7 @@
   "functions": {
     "api/**": {
       "maxDuration": 30,
-      "includeFiles": "node_modules/pdfkit/js/data/**"
+      "includeFiles": "{node_modules/pdfkit/js/data/**,public/logo.png}"
     }
   },
   "rewrites": [

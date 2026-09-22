@@ -16,6 +16,7 @@
 
 import express from 'express';
 import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
@@ -44,6 +45,20 @@ function logoPath() {
   for (const candidate of LOGO_CANDIDATES) {
     const file = fileURLToPath(new URL(candidate, import.meta.url));
     if (existsSync(file)) { resolvedLogo = file; break; }
+  }
+  // Serverless: the function is unpacked at a task root that is not this file's
+  // repository, so the relative walk above can miss even though the file was
+  // bundled. Tried from the working directory as well before giving up.
+  //
+  // The file only reaches the bundle at all because vercel.json lists it in
+  // `includeFiles` -- the path above is built with new URL() at runtime, which
+  // Vercel's file tracing cannot follow, so without that entry the logo is
+  // simply absent from the deployment and every printed report loses its mark.
+  if (!resolvedLogo) {
+    for (const candidate of ['public/logo.png', 'dist/logo.png']) {
+      const file = resolve(process.cwd(), candidate);
+      if (existsSync(file)) { resolvedLogo = file; break; }
+    }
   }
   return resolvedLogo;
 }
