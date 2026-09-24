@@ -1,15 +1,17 @@
 // External Business Partner / Business Operation Access.
 //
-// A read-only window onto ONE business operation, for someone outside the
-// organisation who needs to follow how that operation is working.
+// A read-only window onto the business operations the Director granted a
+// partner -- one or several -- for someone outside the organisation who needs
+// to follow how that work is going.
 //
 // Three rules hold for every query in this file, without exception:
 //
-//   1. The operation comes from req.user.sector -- the account row -- and never
-//      from anything the caller sends. There is no operation parameter to
-//      tamper with, so a Mining partner asking for Farming has nothing to ask
-//      with; and even if a filter were added later, the WHERE clause below is
-//      what actually decides.
+//   1. The operations come from req.user.operations -- the partner's grants,
+//      read from partner_operations on every request -- and never from
+//      anything else the caller sends. A partner may NARROW to one of their own
+//      operations with ?operation=; naming one they were not granted is refused,
+//      and every other parameter name is ignored. A Mining partner asking for
+//      Farming has nothing to ask with: the WHERE clause below is what decides.
 //   2. Only approved records are returned. approval_status = 'approved' is read
 //      at query time, so a record reopened for correction stops being visible
 //      by itself.
@@ -18,22 +20,38 @@
 // What a partner never sees, by construction rather than by hiding a menu:
 // internal administration, the account register, private internal notes,
 // rejection reasons, the audit trail, evidence files, approval controls, or any
-// other operation. Nothing here writes, so a partner cannot approve, reject, or
+// other operation. The only write here is a comment to the Director (at the
+// end of this file), into a table of its own; a partner cannot approve, reject, or
 // change anything.
 
 import express from 'express';
-import { pool } from '../db/database.js';
-import { asyncRoute } from '../lib/http.js';
+import { pool, safeRollback } from '../db/database.js';
+import { asyncRoute, parseId } from '../lib/http.js';
 import { TRIPS_OPERATION, operationById } from '../../shared/businessOperations.js';
 import { round2 } from '../lib/rates.js';
+import { COMMENT_SUBJECTS, PARTNER_COMMENTS_PER_HOUR, commentBody, loadThreads } from '../lib/partnerComments.js';
+import { notifyDirectors } from '../lib/notifications.js';
 
 const router = express.Router();
 
+class PartnerScopeError extends Error {}
+
+// Which of the partner's operations this request reads: all of them, or the
+// one named in ?operation= when it is one of theirs. Anything else is refused
+// rather than silently answered with the full set, so a wrong link is visible.
+function scopeFor(req) {
+  const granted = req.user.operations || [req.user.sector];
+  const asked = typeof req.query.operation === 'string' ? req.query.operation : '';
+  if (!asked || asked === 'All') return granted;
+  if (!granted.includes(asked)) throw new PartnerScopeError('That business operation is not part of your access.');
+  return [asked];
+}
+
 // The single clause that every query in this file is built on. It takes the
-// operation from the authenticated account and nowhere else.
-function activityVisibility(user, values) {
-  values.push(user.sector);
-  return `a.sector = $${values.length}
+// operations from the authenticated account's grants and nowhere else.
+function activityVisibility(operations, values) {
+  values.push(operations);
+  return `a.sector = ANY(${values.length}::text[])
     AND a.approval_status = 'approved'
     AND a.externally_visible = TRUE
     AND a.status NOT IN ('Draft', 'Cancelled', 'Rejected')`;
@@ -46,12 +64,12 @@ function activityVisibility(user, values) {
 // Linkage is decided by related_area alone. movements.sector is 'movement' on
 // every row, so testing it here once let a Logistics partner read movements
 // that support Mining, Farming or Agriculture.
-function movementVisibility(user, values) {
-  values.push(user.sector);
-  const operation = `$${values.length}`;
-  const belongs = user.sector === TRIPS_OPERATION
-    ? `(m.related_area IS NULL OR m.related_area = ${operation})`
-    : `m.related_area = ${operation}`;
+function movementVisibility(operations, values) {
+  values.push(operations);
+  const granted = `${values.length}::text[]`;
+  const belongs = operations.includes(TRIPS_OPERATION)
+    ? `(m.related_area IS NULL OR m.related_area = ANY(${granted}))`
+    : `m.related_area = ANY(${granted})`;
   return `${belongs}
     AND m.approval_status = 'approved'
     AND m.externally_visible = TRUE
@@ -125,12 +143,16 @@ function safeLimit(value, fallback = 50, max = 200) {
 // ---- the operation at a glance --------------------------------------------
 
 router.get('/overview', asyncRoute(async (req, res) => {
-  const operation = operationById(req.user.sector);
+  const scope = scopeFor(req);
+  // The operation the overview is headed with: the one asked for, or the
+  // partner's first. `operations` below lists everything they may follow.
+  const headline = scope.length === 1 ? scope[0] : req.user.operations[0];
+  const operation = operationById(headline);
 
   const activityValues = [];
-  const activityWhere = activityVisibility(req.user, activityValues);
+  const activityWhere = activityVisibility(scope, activityValues);
   const movementValues = [];
-  const movementWhere = movementVisibility(req.user, movementValues);
+  const movementWhere = movementVisibility(scope, movementValues);
 
   const [activities, movements, recent] = await Promise.all([
     pool.query(
@@ -159,10 +181,14 @@ router.get('/overview', asyncRoute(async (req, res) => {
   const total = activityStats.total;
   res.json({
     operation: {
-      id: req.user.sector,
-      name: operation?.name || req.user.sector,
+      id: headline,
+      name: operation?.name || headline,
       translations: operation?.translations || null
     },
+    // Every operation this partner may follow, and which of them this answer
+    // covers -- all of them unless one was asked for.
+    operations: req.user.operations,
+    scope,
     accessLevel: req.user.accessLevel,
     activities: {
       total,
@@ -186,7 +212,7 @@ router.get('/overview', asyncRoute(async (req, res) => {
 
 router.get('/activities', asyncRoute(async (req, res) => {
   const values = [];
-  const filters = [activityVisibility(req.user, values)];
+  const filters = [activityVisibility(scopeFor(req), values)];
 
   // A partner may narrow what they are already entitled to see. They cannot
   // widen it: the visibility clause above is always present, and these filters
@@ -215,7 +241,7 @@ router.get('/activities', asyncRoute(async (req, res) => {
 
 router.get('/movements', asyncRoute(async (req, res) => {
   const values = [];
-  const filters = [movementVisibility(req.user, values)];
+  const filters = [movementVisibility(scopeFor(req), values)];
 
   if (req.query.status && req.query.status !== 'All') {
     values.push(req.query.status);
@@ -238,8 +264,9 @@ router.get('/report', asyncRoute(async (req, res) => {
   const months = Number(req.query.months);
   const window = Number.isInteger(months) && months > 0 && months <= 24 ? months : 3;
 
+  const scope = scopeFor(req);
   const values = [];
-  const where = activityVisibility(req.user, values);
+  const where = activityVisibility(scope, values);
   values.push(window);
   // An activity belongs to the month its work was approved (or, failing that,
   // handed out or raised). updated_at moved every time the record was touched --
@@ -269,7 +296,8 @@ router.get('/report', asyncRoute(async (req, res) => {
   ]);
 
   res.json({
-    operation: req.user.sector,
+    operation: scope.length === 1 ? scope[0] : req.user.operations[0],
+    scope,
     months: window,
     byMonth: byMonth.rows.map((row) => ({
       period: row.period,
@@ -292,7 +320,7 @@ router.get('/report', asyncRoute(async (req, res) => {
 // names, notes and budget arguments are internal and are not carried across.
 router.get('/updates', asyncRoute(async (req, res) => {
   const values = [];
-  const where = activityVisibility(req.user, values);
+  const where = activityVisibility(scopeFor(req), values);
   values.push(safeLimit(req.query.limit, 25, 100));
 
   const result = await pool.query(
@@ -316,8 +344,136 @@ router.get('/updates', asyncRoute(async (req, res) => {
   })));
 }));
 
+// ---- comments to the Director ---------------------------------------------
+//
+// The one thing a partner may write, and it goes to the Director only: a
+// comment on an operation they follow, or on a record they can already see
+// here. It lands in partner_comments, which holds nothing internal and which no
+// manager route reads, and it reaches the Director through the same in-app
+// notifications every other "this is waiting for you" uses. Every check below
+// is made with the same visibility clauses as the reads above, so a partner can
+// only comment on what they can see.
+
+async function canSeeSubject(operation, subjectType, subjectId) {
+  const values = [];
+  const [table, where] = subjectType === 'activity'
+    ? ['activities a', activityVisibility([operation], values)]
+    : ['movements m', movementVisibility([operation], values)];
+  values.push(subjectId);
+  const alias = subjectType === 'activity' ? 'a' : 'm';
+  const result = await pool.query(`SELECT 1 FROM ${table} WHERE ${where} AND ${alias}.id = ${values.length}`, values);
+  return result.rowCount > 0;
+}
+
+// Counted in the database rather than in memory, so the limit holds across
+// serverless instances, which the in-memory rate limiter does not.
+async function underHourlyLimit(partnerId) {
+  const result = await pool.query(
+    `SELECT COUNT(*)::int AS total FROM partner_comments
+     WHERE partner_id = $1 AND author_role = 'partner' AND created_at > NOW() - INTERVAL '1 hour'`,
+    [partnerId]
+  );
+  return result.rows[0].total < PARTNER_COMMENTS_PER_HOUR;
+}
+
+const TOO_MANY = 'You have sent a lot of comments in the last hour. Please wait before sending more.';
+
+// Writes one partner message and tells the Director, in one transaction, so a
+// notification never points at a comment that failed to save.
+async function savePartnerMessage(req, { operation, subjectType, subjectId, parentId, body }) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const inserted = await client.query(
+      `INSERT INTO partner_comments (partner_id, sector, subject_type, subject_id, parent_id, author_id, author_name, author_role, body)
+       VALUES ($1, $2, $3, $4, $5, $1, $6, 'partner', $7) RETURNING id`,
+      [req.user.id, operation, subjectType, subjectId, parentId, req.user.name, body]
+    );
+    await notifyDirectors(client, {
+      kind: 'partner_comment',
+      // The sentence is written by the browser in the Director's language
+      // (notice.kind.partner_comment): the partner's name comes from the
+      // actor, and `reason` carries the opening of what they wrote.
+      params: { operation, reason: body.slice(0, 140) },
+      link: '#/partners',
+      actor: req.user
+    });
+    await client.query('COMMIT');
+    return parentId || inserted.rows[0].id;
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+router.get('/comments', asyncRoute(async (req, res) => {
+  const threads = await loadThreads({ partnerId: req.user.id });
+  // Opening the list is reading the Director's replies.
+  await pool.query(
+    `UPDATE partner_comments SET read_by_partner_at = NOW()
+     WHERE partner_id = $1 AND author_role = 'super-admin' AND read_by_partner_at IS NULL`,
+    [req.user.id]
+  );
+  res.json(threads);
+}));
+
+router.post('/comments', asyncRoute(async (req, res) => {
+  const { operation, subjectType = 'operation', subjectId = null } = req.body || {};
+  if (!req.user.operations.includes(operation)) {
+    return res.status(403).json({ message: 'That business operation is not part of your access.' });
+  }
+  if (!COMMENT_SUBJECTS.includes(subjectType)) {
+    return res.status(400).json({ message: 'A comment is about the operation, an activity or a movement.' });
+  }
+  const subject = subjectType === 'operation' ? null : String(subjectId || '');
+  if (subjectType !== 'operation' && (!subject || !(await canSeeSubject(operation, subjectType, subject)))) {
+    // The same answer whether the record does not exist or is not theirs to
+    // see, so the reply cannot be used to probe for records.
+    return res.status(404).json({ message: 'That record is not one you can see.' });
+  }
+  const text = commentBody(req.body?.body);
+  if (text.error) return res.status(400).json({ message: text.error });
+  if (!(await underHourlyLimit(req.user.id))) return res.status(429).json({ message: TOO_MANY });
+
+  const threadId = await savePartnerMessage(req, {
+    operation, subjectType, subjectId: subject, parentId: null, body: text.body
+  });
+  const [thread] = await loadThreads({ partnerId: req.user.id, threadId });
+  res.status(201).json(thread);
+}));
+
+router.post('/comments/:id/replies', asyncRoute(async (req, res) => {
+  const id = parseId(req.params.id);
+  if (!id) return res.status(404).json({ message: 'Comment not found.' });
+  // Only a thread this partner opened, and only while they still follow the
+  // operation it is about.
+  const thread = await pool.query(
+    'SELECT id, sector, subject_type, subject_id FROM partner_comments WHERE id = $1 AND partner_id = $2 AND parent_id IS NULL',
+    [id, req.user.id]
+  );
+  if (!thread.rowCount) return res.status(404).json({ message: 'Comment not found.' });
+  const row = thread.rows[0];
+  if (!req.user.operations.includes(row.sector)) {
+    return res.status(403).json({ message: 'That business operation is not part of your access.' });
+  }
+  const text = commentBody(req.body?.body);
+  if (text.error) return res.status(400).json({ message: text.error });
+  if (!(await underHourlyLimit(req.user.id))) return res.status(429).json({ message: TOO_MANY });
+
+  await savePartnerMessage(req, {
+    operation: row.sector, subjectType: row.subject_type, subjectId: row.subject_id, parentId: row.id, body: text.body
+  });
+  const [updated] = await loadThreads({ partnerId: req.user.id, threadId: row.id });
+  res.status(201).json(updated);
+}));
+
 // Handed on to the application's error handler, which tells bad input apart
 // from a genuine server fault.
-router.use((error, req, res, next) => next(error));
+router.use((error, req, res, next) => {
+  if (error instanceof PartnerScopeError) return res.status(403).json({ message: error.message });
+  return next(error);
+});
 
 export default router;

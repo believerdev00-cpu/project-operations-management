@@ -50,6 +50,22 @@ const STARTABLE_STATUSES = ['Approved', 'Budget Adjusted', 'Needs Correction'];
 // A deadline on a record that is finished or refused is history, not a warning.
 const CLOSED_STATUSES = ['Completed', 'Rejected', 'Cancelled'];
 
+// The shortest reason the Director may send work back with. Mirrors
+// MIN_CORRECTION_NOTE in server/routes/activities.js, which is what decides.
+export const MIN_CORRECTION_NOTE = 10;
+
+// Whether this reader may change the record itself. A manager's record is
+// locked to them once it has gone to the Director: they may edit their own
+// Draft, or work the Director judged not good enough -- sent back, or refused.
+// Mirrors canEditRequest in server/routes/activities.js.
+const MANAGER_EDITABLE_STATUSES = ['Draft', 'Needs Correction', 'Rejected'];
+export function canManagerEdit(user, activity) {
+  if (user.role === 'super-admin' || !MANAGER_EDITABLE_STATUSES.includes(activity.status)) return false;
+  const inArea = Boolean(user.coversAllSectors) || user.sector === activity.sector;
+  return inArea && (Number(activity.createdBy) === Number(user.id)
+    || (activity.status === 'Needs Correction' && Number(activity.assignedTo) === Number(user.id)));
+}
+
 export function statusTone(status) {
   if (status === 'Completed' || status === 'Approved') return 'tone-done';
   if (status === 'Rejected' || status === 'Cancelled') return 'tone-stopped';
@@ -156,7 +172,7 @@ export function ActivityReview({
   detail, user, onOpenFile, sectorLabel, managers = [], busy = false,
   onClose, onDecision, onStatus, onAssign, onUpload, onRemoveEvidence, onSubmitCompletion, onApprove, onReject,
   onVisibility, onRecordExpense, onRemoveExpense, onRequestBudget, onDecideBudget, onDelete, onSendDraft,
-  onFinish, onSendBack, onReopen, onSchedule
+  onFinish, onSendBack, onReopen, onSchedule, onEdit
 }) {
   const { language, t } = useI18n();
   const { activity, evidence, history, expenses = [], expenseSummary = null, budgetRequests = [] } = detail;
@@ -302,6 +318,9 @@ export function ActivityReview({
     && !(activity.parentActivityId && activity.scheduledFor && !isDirector && user.role !== 'manager');
   // A draft is sent on by whoever wrote it, or the Director.
   const canSendDraft = monthOpen && activity.status === 'Draft' && (isDirector || activity.createdBy === user.id);
+  // The manager's own correction of the record; the Director edits through
+  // the decision and assignment tools instead.
+  const canEdit = Boolean(onEdit) && monthOpen && canManagerEdit(user, activity);
   // The Director may delete; the author may withdraw a request nobody has
   // decided yet. Both mirror the delete route, which also keeps closed months.
   const canWithdraw = !isDirector && activity.createdBy === user.id
@@ -428,7 +447,23 @@ export function ActivityReview({
 
     <Journey journey={journey} />
 
-    <NextStep tone={next.tone} title={next.title} actions={next.actions}>{next.text}</NextStep>
+    <NextStep tone={next.tone} title={next.title} actions={canEdit
+      ? <>{next.actions}<button className="secondary-btn" type="button" onClick={() => goToSection('correct')}>
+        {activity.status === 'Draft' ? t('action.editActivity') : t('action.correctActivity')}
+      </button></>
+      : next.actions}>
+      {next.text}
+      {/* Who sent it back and when, under the reason itself, so the manager
+          knows whose words they are acting on. */}
+      {['Needs Correction', 'Rejected'].includes(activity.status) && activity.reviewedAt && <small className="sent-back-by">
+        {fill(t('review.sentBackBy'), { name: activity.reviewedByName || t('role.super-admin'), date: formatDateTime(activity.reviewedAt) })}
+      </small>}
+    </NextStep>
+
+    {canEdit && <Section id="correct" title={activity.status === 'Draft' ? t('action.editActivity') : t('action.correctActivity')}
+      defaultOpen={activity.status === 'Needs Correction'}>
+      <CorrectionForm key={`${activity.id}:${activity.updatedAt}`} activity={activity} busy={busy} onSave={onEdit} />
+    </Section>}
 
     {canSetDate && <form className="work-date" onSubmit={(event) => { event.preventDefault(); onSchedule(activity, workDate); }}>
       <label className="form-field">
@@ -963,6 +998,66 @@ export function EvidenceList({ activity, evidence, onOpenFile, canRemove, busy =
       </td>
     </tr>)}</tbody>
   </table></div>;
+}
+
+// The manager's edit of the record itself: what the work is and how it is
+// described. On work sent back for correction the money is shown but cannot
+// be changed -- it was already decided, and a different figure is asked for
+// through a budget change -- and the manager can say what they changed, which
+// goes into the trail as the answer to the return. Keyed on the record's
+// updatedAt by its caller, so a saved change reads back what was stored.
+function CorrectionForm({ activity, busy, onSave }) {
+  const t = useT();
+  const correcting = activity.status === 'Needs Correction';
+  const [form, setForm] = useState({
+    activity: activity.activity || '',
+    category: activity.category || '',
+    description: activity.description || '',
+    materials: activity.materials || '',
+    quantity: String(activity.quantity ?? ''),
+    costUsd: String(activity.requestedBudget ?? 0),
+    correctionNote: ''
+  });
+  const set = (field) => (event) => setForm({ ...form, [field]: event.target.value });
+
+  return <form className="decision-form" onSubmit={(event) => {
+    event.preventDefault();
+    onSave(activity, {
+      activity: form.activity.trim(),
+      category: form.category.trim(),
+      description: form.description.trim(),
+      materials: form.materials.trim(),
+      quantity: Number(form.quantity),
+      costUsd: correcting ? activity.requestedBudget : Number(form.costUsd || 0),
+      correctionNote: form.correctionNote.trim()
+    });
+  }}>
+    <div className="form-grid">
+      <label className="form-field"><span>{t('field.activity')}</span>
+        <input required maxLength={200} value={form.activity} onChange={set('activity')} />
+      </label>
+      <label className="form-field"><span>{t('field.category')}</span>
+        <input required maxLength={100} value={form.category} onChange={set('category')} />
+      </label>
+      <label className="form-field"><span>{t('field.quantity')}</span>
+        <input required type="number" min="0.01" step="0.01" inputMode="decimal" value={form.quantity} onChange={set('quantity')} />
+      </label>
+      <label className="form-field"><span>{t('form.requestedBudgetUsd')}</span>
+        <input type="number" min="0" step="0.01" inputMode="decimal" value={form.costUsd} disabled={correcting} onChange={set('costUsd')} />
+      </label>
+      <label className="form-field form-field-wide"><span>{t('field.description')}</span>
+        <textarea required rows="3" value={form.description} onChange={set('description')} />
+      </label>
+      <label className="form-field form-field-wide"><span>{t('form.materialsRequested')} ({t('field.optional')})</span>
+        <textarea rows="2" value={form.materials} onChange={set('materials')} />
+      </label>
+      {correcting && <label className="form-field form-field-wide"><span>{t('review.whatYouChanged')} ({t('field.optional')})</span>
+        <textarea rows="2" maxLength={2000} value={form.correctionNote} onChange={set('correctionNote')} />
+      </label>}
+    </div>
+    {correcting && <p className="decision-hint">{t('review.correctionMoneyLocked')}</p>}
+    <button className="primary-btn" type="submit" disabled={busy}>{t('action.saveCorrection')}</button>
+  </form>;
 }
 
 export default ActivityReview;

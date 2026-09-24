@@ -1,5 +1,5 @@
 import { Component, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { storedLanguage, translate, useT } from './i18n.js';
+import { fill, storedLanguage, translate, useT } from './i18n.js';
 
 // Shared interface pieces every screen uses: the error boundary, the page
 // address, the dialog that replaces the browser's prompt/confirm, the detail
@@ -229,6 +229,12 @@ function Dialog({ dialog, onClose }) {
   const text = value.trim();
   let problem = null;
   if (dialog.kind === 'prompt' && dialog.required && !text) problem = t('dialog.required');
+  // A floor on what counts as an answer, for prompts whose answer someone else
+  // has to act on -- the reason work is sent back, which the API holds to the
+  // same length.
+  else if (dialog.kind === 'prompt' && dialog.minLength && text && text.length < dialog.minLength) {
+    problem = fill(t('dialog.tooShort'), { count: dialog.minLength });
+  }
   if (dialog.kind === 'password') {
     if (dialog.current && !current) problem = t('dialog.required');
     else if (value.trim().length < MINIMUM_PASSWORD_LENGTH) problem = t('dialog.passwordTooShort');

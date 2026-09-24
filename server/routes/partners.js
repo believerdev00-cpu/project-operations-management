@@ -1,7 +1,7 @@
 // The Director's control over external business partner access.
 //
-// Invite a partner, assign them one business operation, change it, suspend or
-// revoke their access. Partners are ordinary rows in `users` with role
+// Invite a partner, grant them one or more business operations, change the
+// grants, suspend or revoke their access. Partners are ordinary rows in `users` with role
 // 'partner', so they authenticate, have their password reset and appear in the
 // register through the paths that already exist -- this router is only the
 // management surface the Director works from.
@@ -11,10 +11,10 @@
 // runs.
 
 import express from 'express';
-import { pool } from '../db/database.js';
+import { pool, safeRollback } from '../db/database.js';
 import { asyncRoute, isAdmin, parseId, requiredText, sectorIds } from '../lib/http.js';
 import { hashPassword, passwordProblem } from '../lib/passwords.js';
-import { operationById } from '../../shared/businessOperations.js';
+import { TRIPS_OPERATION, operationById } from '../../shared/businessOperations.js';
 
 const router = express.Router();
 
@@ -37,15 +37,19 @@ router.param('id', (req, res, next, value) => {
 
 function mapPartner(row) {
   const operation = operationById(row.sector);
+  const operations = row.operations?.length ? row.operations : [row.sector];
   return {
     id: row.id,
     name: row.name,
     username: row.username,
     email: row.email || '',
-    // The one business operation this partner may see. Named as well as keyed,
-    // so the register never shows a bare id.
+    // The partner's first operation, for the callers that read one, and
+    // `operations`: everything they may follow. Named as well as keyed, so the
+    // register never shows a bare id.
     operation: row.sector,
     operationName: operation?.name || row.sector,
+    operations,
+    operationNames: operations.map((id) => operationById(id)?.name || id),
     accessLevel: row.access_level || 'view-only',
     status: row.status || 'active',
     createdAt: row.created_at,
@@ -57,17 +61,27 @@ function mapPartner(row) {
   };
 }
 
+// The grants, with the account's own operation standing in when there are
+// none -- the same reading authMiddleware makes, so the register and the
+// partner agree on what the partner can see.
+const PARTNER_GRANTS = `COALESCE((SELECT array_agg(po.sector::text ORDER BY po.sector)
+                                  FROM partner_operations po WHERE po.partner_id = u.id), ARRAY[u.sector::text])`;
+
+// The counts mirror activityVisibility/movementVisibility in partner.js. The
+// trips register belongs to TRIPS_OPERATION (see shared/businessOperations.js);
+// this used to compare against the literal 'movement', so a Farming partner's
+// count left out the unlinked trips they can in fact read.
 const PARTNER_SELECT = `
   SELECT u.id, u.username, u.name, u.email, u.sector, u.status, u.access_level,
          u.created_at, u.password_changed_at,
+         ${PARTNER_GRANTS} AS operations,
          (SELECT COUNT(*) FROM activities a
-           WHERE a.sector = u.sector AND a.approval_status = 'approved'
+           WHERE a.sector = ANY(${PARTNER_GRANTS}) AND a.approval_status = 'approved'
              AND a.externally_visible = TRUE
              AND a.status NOT IN ('Draft', 'Cancelled', 'Rejected'))::int AS visible_activities,
          (SELECT COUNT(*) FROM movements m
-           WHERE (CASE WHEN u.sector = 'movement'
-                       THEN (m.related_area IS NULL OR m.related_area = u.sector)
-                       ELSE m.related_area = u.sector END)
+           WHERE (m.related_area = ANY(${PARTNER_GRANTS})
+                  OR (m.related_area IS NULL AND '${TRIPS_OPERATION}' = ANY(${PARTNER_GRANTS})))
              AND m.approval_status = 'approved' AND m.externally_visible = TRUE
              AND m.status NOT IN ('Draft', 'Cancelled', 'Rejected'))::int AS visible_movements
   FROM users u
@@ -85,23 +99,66 @@ function validOperation(value) {
   return typeof value === 'string' && sectorIds.has(value);
 }
 
+// The set of operations a request asks for: `operations` as a list, or the
+// older single `operation`. Duplicates are dropped; an unknown id or an empty
+// set makes the whole request invalid rather than quietly granting less.
+function requestedOperations(body) {
+  const list = Array.isArray(body?.operations) ? body.operations : (body?.operation ? [body.operation] : []);
+  const unique = [...new Set(list)];
+  if (!unique.length || !unique.every(validOperation)) return null;
+  return unique;
+}
+
+const OPERATIONS_MESSAGE = 'Choose at least one business operation: Mining, Agriculture, Farming, or Movement & Facilitation.';
+
+// Replace a partner's grants with exactly this set, in the caller's
+// transaction. users.sector becomes the first of them, so the account row
+// always names an operation the partner actually holds.
+async function setGrants(client, partnerId, operations, grantedBy) {
+  await client.query("UPDATE users SET sector = $2 WHERE id = $1 AND role = 'partner'", [partnerId, operations[0]]);
+  await client.query('DELETE FROM partner_operations WHERE partner_id = $1 AND NOT (sector = ANY($2::text[]))', [partnerId, operations]);
+  await client.query(
+    `INSERT INTO partner_operations (partner_id, sector, granted_by)
+     SELECT $1, UNNEST($2::text[]), $3
+     ON CONFLICT DO NOTHING`,
+    [partnerId, operations, grantedBy]
+  );
+}
+
+async function replaceGrants(partnerId, operations, grantedBy) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await setGrants(client, partnerId, operations, grantedBy);
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 router.get('/', asyncRoute(async (req, res) => {
   const result = await pool.query(`${PARTNER_SELECT} ORDER BY u.name`);
   const partners = result.rows.map(mapPartner);
   res.json({
     total: partners.length,
-    byOperation: partners.reduce(
-      (counts, partner) => ({ ...counts, [partner.operation]: (counts[partner.operation] || 0) + 1 }),
-      {}
-    ),
+    // A partner following two operations counts towards both.
+    byOperation: partners.reduce((counts, partner) => {
+      for (const operation of partner.operations) counts[operation] = (counts[operation] || 0) + 1;
+      return counts;
+    }, {}),
     active: partners.filter((partner) => partner.status === 'active').length,
     partners
   });
 }));
 
-// Invite a partner: an account, one business operation, view-only.
+// Invite a partner: an account, the business operations they may follow,
+// view-only.
 router.post('/', asyncRoute(async (req, res) => {
-  const { name, email, username, password, operation } = req.body || {};
+  const { name, email, username, password } = req.body || {};
+  const operations = requestedOperations(req.body);
 
   if (!requiredText(name)) return res.status(400).json({ message: 'The partner\'s name is required.' });
   if (!requiredText(username)) return res.status(400).json({ message: 'A username is required for the partner to sign in with.' });
@@ -110,9 +167,7 @@ router.post('/', asyncRoute(async (req, res) => {
   }
   const weak = passwordProblem(password, { username });
   if (weak) return res.status(400).json({ message: weak });
-  if (!validOperation(operation)) {
-    return res.status(400).json({ message: 'Choose one business operation: Mining, Agriculture, Farming, or Movement & Facilitation.' });
-  }
+  if (!operations) return res.status(400).json({ message: OPERATIONS_MESSAGE });
   // View-only is the only level an external partner is given. Anything else in
   // the request is refused outright rather than quietly downgraded, so a
   // mistaken call is visible instead of silently doing something else.
@@ -121,34 +176,55 @@ router.post('/', asyncRoute(async (req, res) => {
     return res.status(400).json({ message: 'An external partner can only be given View Only access.' });
   }
 
+  const passwordHash = await hashPassword(password);
+  const client = await pool.connect();
+  let partnerId;
   try {
-    const inserted = await pool.query(
+    await client.query('BEGIN');
+    const inserted = await client.query(
       // Temporary, like every password the Director sets: the partner chooses
       // their own at first sign-in.
       `INSERT INTO users (username, password_hash, name, email, role, sector, status, access_level, must_change_password)
        VALUES ($1, $2, $3, $4, 'partner', $5, 'active', 'view-only', TRUE) RETURNING id`,
-      [username.trim(), await hashPassword(password), name.trim(), email.trim(), operation]
+      [username.trim(), passwordHash, name.trim(), email.trim(), operations[0]]
     );
-    res.status(201).json(await loadPartner(inserted.rows[0].id));
+    partnerId = inserted.rows[0].id;
+    await setGrants(client, partnerId, operations, req.user.id);
+    await client.query('COMMIT');
   } catch (error) {
+    await safeRollback(client);
     if (error?.code === '23505') return res.status(400).json({ message: 'That username is already taken.' });
     throw error;
+  } finally {
+    client.release();
   }
+  // Read back once the connection is in the pool again: on Vercel the pool
+  // holds exactly one.
+  res.status(201).json(await loadPartner(partnerId));
 }));
 
-// Change which business operation a partner may see. This is the whole of their
-// access: moving it moves everything they can read, at once, on their next
-// request -- there is no cached grant to expire.
+// Change which business operations a partner may see: the whole set at once.
+// It moves everything they can read on their very next request -- the grants
+// are read on every call, so there is no cached access to expire.
+router.patch('/:id/operations', asyncRoute(async (req, res) => {
+  const operations = requestedOperations(req.body);
+  if (!operations) return res.status(400).json({ message: OPERATIONS_MESSAGE });
+  if (!(await loadPartner(req.params.id))) return res.status(404).json({ message: 'External partner not found.' });
+
+  await replaceGrants(req.params.id, operations, req.user.id);
+
+  const partner = await loadPartner(req.params.id);
+  res.json({ ...partner, message: `${partner.name} now sees ${partner.operationNames.join(', ')}.` });
+}));
+
+// The older single-operation form: replaces every grant with this one.
 router.patch('/:id/operation', asyncRoute(async (req, res) => {
   const { operation } = req.body || {};
   if (!validOperation(operation)) {
     return res.status(400).json({ message: 'Choose one business operation: Mining, Agriculture, Farming, or Movement & Facilitation.' });
   }
-  const result = await pool.query(
-    "UPDATE users SET sector = $2 WHERE id = $1 AND role = 'partner' RETURNING id",
-    [req.params.id, operation]
-  );
-  if (!result.rowCount) return res.status(404).json({ message: 'External partner not found.' });
+  if (!(await loadPartner(req.params.id))) return res.status(404).json({ message: 'External partner not found.' });
+  await replaceGrants(req.params.id, [operation], req.user.id);
 
   const partner = await loadPartner(req.params.id);
   res.json({ ...partner, message: `${partner.name} now sees ${partner.operationName} only.` });

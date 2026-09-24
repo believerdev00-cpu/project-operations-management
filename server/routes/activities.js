@@ -110,6 +110,24 @@ function optionalText(value, limit) {
   return typeof value === 'string' ? value.trim().slice(0, limit) : '';
 }
 
+// Work sent back for correction has to say what is wrong in words the manager
+// can act on: "no", "fix" or a full stop is not that, so there is a short
+// floor (mirrored by the send-back dialog). The note must also be written for
+// THIS return. The record's standing note describes an earlier decision, and
+// the decision route used to fall back to it when no note was sent, so a
+// return could go out carrying a sentence about something else entirely.
+export const MIN_CORRECTION_NOTE = 10;
+
+function correctionNoteProblem(note, existingNote) {
+  if (!note || note.length < MIN_CORRECTION_NOTE) {
+    return `Say exactly what needs fixing (at least ${MIN_CORRECTION_NOTE} characters) when you send an activity back.`;
+  }
+  if (note === String(existingNote || '').trim()) {
+    return 'Write what needs fixing this time. The note already on the record describes an earlier decision.';
+  }
+  return null;
+}
+
 function stringify(value) {
   if (value === null || value === undefined) return null;
   return String(value);
@@ -423,11 +441,39 @@ function assertPlanOpen(row) {
   }
 }
 
-// A manager may correct their own request only while it is still undecided --
-// once the Director has decided it, the record is read-only to them.
+// A manager's record is locked to them once it has gone to the Director. They
+// may change it in two situations only:
+//   - it is still their own Draft, not yet sent; or
+//   - the Director judged it not good enough and handed it back -- sent back
+//     for correction, or refused -- so changing it is exactly what was asked.
+// Waiting on a decision ('Pending Approval') is deliberately NOT editable any
+// more: a request rewritten while the Director is reading it is how the latest
+// submissions ended up muddled (administrator feedback). Mirrored by
+// canManagerEdit in ActivityReview.jsx.
+export const MANAGER_EDITABLE_STATUSES = ['Draft', 'Needs Correction', 'Rejected'];
+
 function canEditRequest(user, row) {
   if (isAdmin(user)) return true;
-  return row.created_by === user.id && ['Draft', 'Pending Approval'].includes(row.status);
+  if (!MANAGER_EDITABLE_STATUSES.includes(row.status) || !withinScope(user, row.sector)) return false;
+  // Their own request; or, once it is sent back for correction, work that
+  // names them as the one carrying it out, whoever wrote it.
+  return Number(row.created_by) === Number(user.id)
+    || (row.status === 'Needs Correction' && Number(row.assigned_to) === Number(user.id));
+}
+
+// Each project belongs to exactly one business operation, and so do its
+// activities. The sector used to be taken from the request first and the
+// project only as a fallback, so an activity could sit under a Farming project
+// while counting as Mining -- and a Mining partner would then read a Farming
+// project's name. The project decides; a request naming another operation is
+// refused rather than quietly overridden.
+function projectSector(payload, project) {
+  const sector = validateSector(project.sector);
+  if (!sector) return { error: 'That project has no valid business operation.' };
+  if (payload.sector && payload.sector !== sector) {
+    return { error: 'The business operation must match the project’s. Choose a project in that operation, or change the operation.' };
+  }
+  return { sector };
 }
 
 // Evidence belongs to whoever carries the work: the Director, the sector's
@@ -466,6 +512,12 @@ router.get('/', asyncRoute(async (req, res) => {
   if (search) {
     values.push(`%${search}%`);
     filters.push(`(a.activity ILIKE $${values.length} OR a.description ILIKE $${values.length} OR a.category ILIKE $${values.length} OR a.materials ILIKE $${values.length})`);
+  }
+  // What managers themselves put into the register, newest first -- the
+  // Director's "latest from managers" on Home, so the most recent arrivals are
+  // read in order instead of being hunted for in the register.
+  if (req.query.raisedBy === 'managers') {
+    filters.push(`EXISTS (SELECT 1 FROM users raiser WHERE raiser.id = a.created_by AND raiser.role = 'manager')`);
   }
   // "What I Need to Approve", built from the signed-in user rather than from a
   // hard-coded role: approval_required_from = me AND approval_status = pending.
@@ -581,8 +633,9 @@ router.post('/', asyncRoute(async (req, res) => {
   );
   if (!projectResult.rowCount) return res.status(404).json({ message: 'Select an existing project before assigning an activity.' });
 
-  const sector = validateSector(payload.sector, projectResult.rows[0].sector);
-  if (!sector) return res.status(400).json({ message: 'Choose a valid business operation.' });
+  const resolved = projectSector(payload, projectResult.rows[0]);
+  if (resolved.error) return res.status(400).json({ message: resolved.error });
+  const sector = resolved.sector;
   if (!withinScope(req.user, sector)) {
     return res.status(403).json({ message: 'You can only add work in your own business operation.' });
   }
@@ -756,7 +809,7 @@ router.put('/:id', asyncRoute(async (req, res) => {
   const existing = await loadActivity(req.params.id, req.user);
   assertPlanOpen(existing);
   if (!canEditRequest(req.user, existing)) {
-    return res.status(403).json({ message: 'This request has been reviewed and can no longer be edited. Ask the Director to reopen it.' });
+    return res.status(403).json({ message: 'This activity is with the Director and cannot be edited. You can change it once it is sent back to you.' });
   }
 
   const payload = req.body || {};
@@ -769,13 +822,26 @@ router.put('/:id', asyncRoute(async (req, res) => {
   );
   if (!projectResult.rowCount) return res.status(404).json({ message: 'Select an existing project before assigning an activity.' });
 
-  const sector = validateSector(payload.sector, projectResult.rows[0].sector);
-  if (!sector) return res.status(400).json({ message: 'Choose a valid business operation.' });
+  const resolved = projectSector(payload, projectResult.rows[0]);
+  if (resolved.error) return res.status(400).json({ message: resolved.error });
+  const sector = resolved.sector;
   if (!withinScope(req.user, sector)) {
     return res.status(403).json({ message: 'You can only add work in your own business operation.' });
   }
 
   const requestedBudget = round2(payload.costUsd || 0);
+  // A correction changes what the work is and how it is described. It does not
+  // reopen the money or move the work: the record was already decided, a
+  // different figure is asked for through a budget request the Director
+  // answers, and planned work stays in the project and month it was set in.
+  if (!isAdmin(req.user) && existing.status === 'Needs Correction') {
+    if (requestedBudget !== round2(existing.requested_budget)) {
+      return res.status(400).json({ message: 'The budget cannot be changed while correcting. Ask for a budget change instead.' });
+    }
+    if (payload.projectId !== existing.project_id) {
+      return res.status(400).json({ message: 'Work sent back for correction stays in its project.' });
+    }
+  }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -799,7 +865,13 @@ router.put('/:id', asyncRoute(async (req, res) => {
       await safeRollback(client);
       return res.status(409).json({ message: 'This request was decided while you were editing it. Refresh to see the decision.' });
     }
-    const entries = [{ action: 'Request edited', field: 'activity', oldValue: existing.activity, newValue: payload.activity }];
+    // A change made because the Director sent the work back is recorded as the
+    // answer to that return, so the trail reads "sent back -> corrected".
+    const editAction = existing.status === 'Needs Correction' ? 'Correction made' : 'Request edited';
+    const entries = [{
+      action: editAction, field: 'activity', oldValue: existing.activity, newValue: payload.activity,
+      note: optionalText(payload.correctionNote, 2000)
+    }];
     if (round2(existing.requested_budget) !== requestedBudget) {
       entries.push({ action: 'Request edited', field: 'requestedBudget', oldValue: round2(existing.requested_budget), newValue: requestedBudget });
     }
@@ -1112,10 +1184,12 @@ router.patch('/:id/decision', asyncRoute(async (req, res) => {
   if (status === 'Rejected' && !adminNote) {
     return res.status(400).json({ message: 'A note is required when a request is rejected.' });
   }
-  // Sending finished work back has to say what needs correcting, or the manager
-  // has nothing to act on.
-  if (status === 'Needs Correction' && !adminNote) {
-    return res.status(400).json({ message: 'Say what needs correcting when you send an activity back.' });
+  // Sending work back has to say what needs correcting, or the manager has
+  // nothing to act on -- checked against the note sent with THIS request, never
+  // the one the record already carries (see correctionNoteProblem).
+  if (status === 'Needs Correction' && status !== existing.status) {
+    const problem = correctionNoteProblem(freshNote, existing.admin_note);
+    if (problem) return res.status(400).json({ message: problem });
   }
   // Section 10: moving an approved budget is a financial change, so it needs a
   // reason given for the change itself -- not one inherited from the record.
@@ -1443,6 +1517,18 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
   if (!managerStart) requireAdmin(req.user, 'change the status of an activity');
 
   const note = optionalText(req.body?.note, 2000);
+  // This route reaches Needs Correction and Rejected just as /decision does, so
+  // it is held to the same rules. It used to accept a return with no note at
+  // all, kept any note only in the trail, and told the manager nothing -- they
+  // opened the record and found no reason to act on.
+  if (status === 'Needs Correction') {
+    const problem = correctionNoteProblem(note, existing.admin_note);
+    if (problem) return res.status(400).json({ message: problem });
+  }
+  if (status === 'Rejected' && !note) {
+    return res.status(400).json({ message: 'A note is required when a request is rejected.' });
+  }
+  const addressedToManager = status === 'Needs Correction' || status === 'Rejected';
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1481,18 +1567,36 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
            -- in the final-check list with a /completion that answered 409.
            completion_submitted_at = CASE WHEN $7 THEN NULL ELSE completion_submitted_at END,
            evidence_status = CASE WHEN $7 AND evidence_status = 'Complete' THEN 'Partial' ELSE evidence_status END,
+           -- A return or a refusal is addressed to the manager, so its note goes
+           -- where the record screen shows it, stamped with who sent it back.
+           admin_note = CASE WHEN $8 THEN $5 ELSE admin_note END,
+           reviewed_by = CASE WHEN $8 THEN $4 ELSE reviewed_by END,
+           reviewed_at = CASE WHEN $8 THEN NOW() ELSE reviewed_at END,
            updated_at = NOW()
        WHERE id = $1 AND status = $6::text`,
       [existing.id, status, APPROVED_STATUSES, req.user.id, note, existing.status,
-        existing.status === 'Completed' || status === 'Needs Correction']
+        existing.status === 'Completed' || status === 'Needs Correction', addressedToManager]
     );
     if (!written.rowCount) {
       await safeRollback(client);
       return res.status(409).json({ message: 'This activity changed a moment ago. Refresh and try again.' });
     }
-    await logHistory(client, existing.id, req.user, [
-      { action: 'Status changed', field: 'status', oldValue: existing.status, newValue: status, note }
-    ]);
+    const entries = [{ action: 'Status changed', field: 'status', oldValue: existing.status, newValue: status, note }];
+    if (addressedToManager && note !== (existing.admin_note || '')) {
+      entries.push({ action: 'Note recorded', field: 'adminNote', oldValue: existing.admin_note || null, newValue: note });
+    }
+    await logHistory(client, existing.id, req.user, entries);
+    // The same announcement the decision route makes: whoever carries the work
+    // hears that it came back, and why.
+    if (status === 'Needs Correction' && existing.assigned_to
+      && Number(existing.assigned_to) !== Number(req.user.id)) {
+      await notify(client, {
+        userId: existing.assigned_to,
+        kind: 'work_returned',
+        params: { activity: existing.activity, operation: existing.sector, reason: note },
+        link: `#/activities/${existing.id}`, activityId: existing.id, actor: req.user
+      });
+    }
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);

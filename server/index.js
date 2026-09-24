@@ -22,6 +22,7 @@ import activityRouter, { mapActivity } from './routes/activities.js';
 import reportRouter from './routes/reports.js';
 import partnerRouter from './routes/partner.js';
 import partnersRouter from './routes/partners.js';
+import partnerCommentsRouter from './routes/partnerComments.js';
 import monthlyPlanRouter from './routes/monthlyPlans.js';
 import notificationRouter from './routes/notifications.js';
 
@@ -1025,6 +1026,10 @@ app.use('/api/partner', authMiddleware, partnerRouter);
 // The Director's side of the same thing: invite a partner, assign or change
 // their business operation, suspend or revoke their access.
 app.use('/api/partners', authMiddleware, partnersRouter);
+
+// Comments external partners address to the Director, and the Director's
+// answers. Director only, and outside the partner allowlist by its path.
+app.use('/api/partner-comments', authMiddleware, partnerCommentsRouter);
 
 // Monthly planning: the Director plans and confirms a month per business
 // operation, the manager works it and records what was spent, and the month is

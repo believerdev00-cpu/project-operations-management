@@ -17,7 +17,8 @@ running is left alone.
 | `account-security.test.mjs` | temporary passwords, choosing and changing your own, suspending accounts, team members raising nothing, short-lived evidence links |
 | `approval-workflow.test.mjs` | who must approve a record, and that nobody else can |
 | `workflow-fixes.test.mjs` | the dead ends and lost-money cases from the usability audit stay fixed |
-| `partner-access.test.mjs` | an external partner sees one business operation and nothing else |
+| `partner-access.test.mjs` | an external partner sees their business operation and nothing else |
+| `feedback-workflow.test.mjs` | a partner on several operations and only those, an activity matching its project's operation, a return that must say what to fix and reaches the manager, a manager editing only what was sent back, the Director's latest-from-managers list, partner comments reaching only the Director, nothing internal reaching a partner |
 | `monthly-workflow.test.mjs` | planning, the approved allocation, expenses, the budget block, evidence, month-end |
 | `monthly-target.test.mjs` | a month as one objective with a target, started and reported day by day by the operation's manager |
 | `reports.test.mjs` | a period report: a month of objectives reads as a full report, an objective nobody worked on says so, the month’s money kept apart from the register’s, no person named anywhere, and the PDF and spreadsheet written in each of the four languages |

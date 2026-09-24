@@ -2272,13 +2272,19 @@ router.post('/:id/activities', asyncRoute(async (req, res) => {
   }
 
   // Activities belong to a project, as they always have. The operation's
-  // project is used unless the Director names one.
-  const projectResult = await pool.query(
-    'SELECT id FROM projects WHERE id = $1 OR sector = $2 ORDER BY (id = $1) DESC, updated_at DESC LIMIT 1',
-    [payload.projectId || '', plan.sector]
-  );
+  // project is used unless the Director names one -- and a named project must
+  // belong to this plan's operation, as the two lookups above already require.
+  // The old `id = $1 OR sector = $2` let a Mining month file its work under a
+  // Farming project by naming it.
+  const projectResult = payload.projectId
+    ? await pool.query('SELECT id FROM projects WHERE id = $1 AND sector = $2', [payload.projectId, plan.sector])
+    : await pool.query('SELECT id FROM projects WHERE sector = $1 ORDER BY updated_at DESC LIMIT 1', [plan.sector]);
   if (!projectResult.rowCount) {
-    return res.status(400).json({ message: 'No project exists for this business operation. Add one first.' });
+    return res.status(400).json({
+      message: payload.projectId
+        ? 'That project does not belong to this business operation.'
+        : 'No project exists for this business operation. Add one first.'
+    });
   }
 
   const budget = round2(payload.approvedBudget);

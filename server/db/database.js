@@ -317,6 +317,67 @@ export async function initDatabase() {
     // Monthly planning sits on top of the activity register, so it migrates last.
     await migrateMonthlyModule(pool);
 
+    // ---- what an external partner may follow ---------------------------------
+    //
+    // A partner may follow more than one business operation. Each operation
+    // they may read is one row here, granted by the Director; nothing else
+    // widens what a partner sees. users.sector stays as the partner's first
+    // operation -- so users_partner_needs_operation still guarantees at least
+    // one -- and the partner routes always keep it among the grants.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS partner_operations (
+        partner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        sector VARCHAR(50) NOT NULL REFERENCES sectors(id) ON DELETE CASCADE,
+        granted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (partner_id, sector)
+      )
+    `);
+    // Every partner that predates the table keeps exactly the operation it had.
+    // Safe to run again: an existing grant is left alone.
+    await pool.query(`
+      INSERT INTO partner_operations (partner_id, sector)
+      SELECT id, sector FROM users WHERE role = 'partner' AND sector IS NOT NULL
+      ON CONFLICT DO NOTHING
+    `);
+
+    // ---- a partner's comments to the Director ---------------------------------
+    //
+    // A partner's question or remark about an operation they follow, addressed
+    // to the Director and nobody else, and the Director's answers. Its own
+    // table on purpose: nothing internal -- admin notes, rejection reasons, the
+    // audit trail -- lives here, so no query on it can carry an internal note
+    // out to a partner, and no manager route reads it.
+    //
+    // A thread is the row with parent_id NULL, opened by the partner; replies
+    // hang off it. partner_id names the thread's partner on every row, so
+    // "this partner's threads" is one indexed predicate.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS partner_comments (
+        id SERIAL PRIMARY KEY,
+        partner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        sector VARCHAR(50) NOT NULL REFERENCES sectors(id),
+        subject_type VARCHAR(20) NOT NULL DEFAULT 'operation',
+        subject_id VARCHAR(50),
+        parent_id INTEGER REFERENCES partner_comments(id) ON DELETE CASCADE,
+        author_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        author_name VARCHAR(150) NOT NULL DEFAULT '',
+        author_role VARCHAR(20) NOT NULL,
+        body TEXT NOT NULL,
+        read_by_director_at TIMESTAMPTZ,
+        read_by_partner_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT partner_comments_subject_check CHECK (subject_type IN ('operation', 'activity', 'movement')),
+        CONSTRAINT partner_comments_subject_id_check CHECK ((subject_type = 'operation') = (subject_id IS NULL)),
+        CONSTRAINT partner_comments_author_check CHECK (author_role IN ('partner', 'super-admin')),
+        CONSTRAINT partner_comments_body_check CHECK (char_length(body) BETWEEN 1 AND 2000)
+      )
+    `);
+    await pool.query('CREATE INDEX IF NOT EXISTS partner_comments_partner_idx ON partner_comments(partner_id, created_at DESC)');
+    await pool.query('CREATE INDEX IF NOT EXISTS partner_comments_parent_idx ON partner_comments(parent_id)');
+    await pool.query(`CREATE INDEX IF NOT EXISTS partner_comments_unread_idx ON partner_comments(read_by_director_at)
+      WHERE author_role = 'partner' AND read_by_director_at IS NULL`);
+
   // The Director is identified by the role, not by a fixed username. Keyed on
   // username = 'admin', renaming that account -- which its owner is free to do
   // from User management -- made the next boot conclude no Director existed and

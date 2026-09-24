@@ -1,19 +1,43 @@
 import { useState } from 'react';
 import { BUSINESS_OPERATIONS, operationName } from '../shared/businessOperations.js';
+import { fill } from './i18n.js';
 
 // The Director's control over External Business Partner access.
 //
-// Invite a partner, assign them one of the four business operations, change it,
-// suspend, restore, revoke, or remove them. Access Level is View Only and is
+// Invite a partner, grant them any of the four business operations, change the
+// grants, suspend, restore, revoke, or remove them; and read and answer what
+// partners write to the Director. Access Level is View Only and is
 // not a choice: an external partner never gets approval authority, so the field
 // is shown as a fixed value rather than a dropdown that could be set wrong.
 
-const emptyForm = { name: '', email: '', username: '', password: '', operation: 'farming' };
+const emptyForm = { name: '', email: '', username: '', password: '', operations: [BUSINESS_OPERATIONS[0].id] };
+
+// The operations ticked, with one toggled. The last one cannot be unticked --
+// the API refuses a partner with none -- and the order stays the catalogue's.
+function toggled(operations, id) {
+  if (operations.includes(id)) return operations.length > 1 ? operations.filter((item) => item !== id) : operations;
+  return BUSINESS_OPERATIONS.map((operation) => operation.id).filter((item) => item === id || operations.includes(item));
+}
+
+function OperationChecks({ selected, language, disabled, label, onChange }) {
+  return <div className="operation-checks" role="group" aria-label={label}>
+    {BUSINESS_OPERATIONS.map((operation) => <label key={operation.id} className="check-field">
+      <input type="checkbox" checked={selected.includes(operation.id)}
+        disabled={disabled || (selected.length === 1 && selected.includes(operation.id))}
+        onChange={() => onChange(toggled(selected, operation.id))} />
+      <span>{operationName(operation.id, language)}</span>
+    </label>)}
+  </div>;
+}
 
 const STATUS_TONE = { active: 'tone-done', suspended: 'tone-waiting', revoked: 'tone-stopped' };
 
-export default function ExternalPartners({ register, language, t, busy = false, onInvite, onChangeOperation, onChangeStatus, onResetPassword, onRemove }) {
+export default function ExternalPartners({
+  register, language, t, busy = false, onInvite, onChangeOperation, onChangeStatus, onResetPassword, onRemove,
+  inbox = { unread: 0, threads: [] }, onReply, onMarkRead
+}) {
   const [form, setForm] = useState(emptyForm);
+  const [replies, setReplies] = useState({});
 
   // Cleared only once the invitation is saved, so a refused one keeps what was typed.
   const submit = (event) => {
@@ -66,16 +90,13 @@ export default function ExternalPartners({ register, language, t, busy = false, 
           {/* Changing this one cell changes everything the partner can read, on
               their very next request -- which is why the change is confirmed. */}
           <td data-label={t('app.businessOperation')}>
-            <select
-              aria-label={`${t('app.businessOperation')}: ${partner.name}`}
+            <OperationChecks
+              label={`${t('app.businessOperation')}: ${partner.name}`}
               disabled={busy}
-              value={partner.operation}
-              onChange={(event) => onChangeOperation(partner, event.target.value)}
-            >
-              {BUSINESS_OPERATIONS.map((operation) => <option key={operation.id} value={operation.id}>
-                {operationName(operation.id, language)}
-              </option>)}
-            </select>
+              selected={partner.operations || [partner.operation]}
+              language={language}
+              onChange={(operations) => onChangeOperation(partner, operations)}
+            />
           </td>
           <td data-label={t('partners.accessLevel')}><span className="status-badge">{t('partners.viewOnly')}</span></td>
           <td data-label={t('partners.status')}><span className={`status-badge ${STATUS_TONE[partner.status] || ''}`}>
@@ -100,6 +121,43 @@ export default function ExternalPartners({ register, language, t, busy = false, 
       </div>}
     </section>
 
+    {/* What partners wrote to the Director. Nobody else reads it -- not the
+        operation's manager, not a manager covering all of them -- and each
+        answer goes back only to the partner who wrote. */}
+    <section className="panel" id="partner-inbox">
+      <div className="panel-header">
+        <div>
+          <h2>{t('partners.inbox')}</h2>
+          <span>{fill(t('partners.inboxCount'), { count: inbox.threads.length, unread: inbox.unread })}</span>
+        </div>
+      </div>
+      {inbox.threads.length ? <div className="message-threads">{inbox.threads.map((thread) => <article
+        className={thread.unreadByDirector ? 'message-thread unread' : 'message-thread'} key={thread.id}>
+        <header>
+          <strong>{thread.partnerName}</strong>
+          <span>{operationName(thread.operation, language)} · {thread.subjectTitle || t('portal.theWholeOperation')}</span>
+          {thread.unreadByDirector > 0 && <button className="text-btn" type="button" disabled={busy} onClick={() => onMarkRead(thread)}>{t('partners.markRead')}</button>}
+        </header>
+        {thread.messages.map((message) => <div key={message.id} className={message.authorRole === 'partner' ? 'message theirs' : 'message mine'}>
+          <small>{message.authorName} · {new Date(message.createdAt).toLocaleString(language)}</small>
+          <p>{message.body}</p>
+        </div>)}
+        <form className="message-reply" onSubmit={(event) => {
+          event.preventDefault();
+          const body = (replies[thread.id] || '').trim();
+          if (!body) return;
+          Promise.resolve(onReply(thread, body)).then((saved) => { if (saved) setReplies({ ...replies, [thread.id]: '' }); });
+        }}>
+          <input maxLength={2000} aria-label={t('portal.reply')} placeholder={t('portal.replyPlaceholder')} value={replies[thread.id] || ''}
+            onChange={(event) => setReplies({ ...replies, [thread.id]: event.target.value })} />
+          <button className="secondary-btn" type="submit" disabled={busy || !(replies[thread.id] || '').trim()}>{t('portal.reply')}</button>
+        </form>
+      </article>)}</div> : <div className="empty-state">
+        <strong>{t('partners.inboxEmpty')}</strong>
+        <span>{t('table.noData')}</span>
+      </div>}
+    </section>
+
     <form className="form-panel" id="partner-form" onSubmit={submit}>
       <div className="panel-header">
         <div>
@@ -120,15 +178,12 @@ export default function ExternalPartners({ register, language, t, busy = false, 
         <label className="form-field"><span>{t('partners.password')}</span>
           <input required type="password" autoComplete="new-password" minLength={6} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} />
         </label>
-        {/* Exactly one of the four. There is no "all operations" option, because
-            an external partner is only ever given one. */}
-        <label className="form-field"><span>{t('app.businessOperation')}</span>
-          <select value={form.operation} onChange={(event) => setForm({ ...form, operation: event.target.value })}>
-            {BUSINESS_OPERATIONS.map((operation) => <option key={operation.id} value={operation.id}>
-              {operationName(operation.id, language)}
-            </option>)}
-          </select>
-        </label>
+        {/* One or more of the four, each ticked deliberately. A partner sees
+            exactly the operations ticked here and nothing else. */}
+        <div className="form-field form-field-wide"><span>{t('partners.operationsGranted')}</span>
+          <OperationChecks label={t('partners.operationsGranted')} selected={form.operations} language={language}
+            onChange={(operations) => setForm({ ...form, operations })} />
+        </div>
         {/* Not a choice: an external partner is view-only, and the API refuses
             any other level outright rather than quietly downgrading it. */}
         <label className="form-field"><span>{t('partners.accessLevel')}</span>

@@ -24,8 +24,9 @@ export const JWT_ALGORITHMS = ['HS256'];
 // somebody deliberately writes it into this list. A blocklist would silently
 // expose every new endpoint.
 //
-// The partner router itself is read-only, so this also means a partner has no
-// path to any write anywhere in the system.
+// The partner router writes exactly one thing: a comment addressed to the
+// Director, into partner_comments. A partner has no path to any other write
+// anywhere in the system -- no record, approval, note or account.
 const PARTNER_ALLOWED_PATHS = [
   /^\/api\/partner(\/|$)/,
   /^\/api\/auth\/session$/,
@@ -33,6 +34,24 @@ const PARTNER_ALLOWED_PATHS = [
   /^\/api\/sectors$/,
   /^\/api\/health$/
 ];
+
+// The operations a partner may read, from partner_operations. A database the
+// migration has not reached yet has no such table (42P01); the partner then
+// keeps the single operation on their account -- exactly what they had before
+// -- rather than every partner request failing until the migration runs.
+export async function partnerOperations(user) {
+  try {
+    const result = await pool.query(
+      'SELECT sector FROM partner_operations WHERE partner_id = $1 ORDER BY sector',
+      [user.id]
+    );
+    const granted = result.rows.map((row) => row.sector);
+    return granted.length ? granted : (user.sector ? [user.sector] : []);
+  } catch (error) {
+    if (error?.code === '42P01') return user.sector ? [user.sector] : [];
+    throw error;
+  }
+}
 
 function partnerMayReach(originalUrl) {
   const path = String(originalUrl || '').split('?')[0];
@@ -176,13 +195,21 @@ export async function authMiddleware(req, res, next) {
     // handler has to remember to do it and none can forget.
     if (user.role === 'partner' && !partnerMayReach(req.originalUrl)) {
       return res.status(403).json({
-        message: 'External partner access is limited to your assigned business operation.'
+        message: 'External partner access is limited to your assigned business operations.'
       });
     }
     // An account with no operation cannot be scoped to one, so it would read
     // either nothing or everything depending on the query. Refuse instead.
     if (user.role === 'partner' && !user.sector) {
       return res.status(403).json({ message: 'This partner account has no business operation assigned.' });
+    }
+    // Every operation the Director granted this partner, read on every request
+    // like the role and the status, so a grant taken away bites at once.
+    if (user.role === 'partner') {
+      user.operations = await partnerOperations(user);
+      if (!user.operations.length) {
+        return res.status(403).json({ message: 'This partner account has no business operation assigned.' });
+      }
     }
 
     req.user = user;

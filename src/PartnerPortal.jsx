@@ -5,21 +5,24 @@ import { categoryLabel } from './ActivityReview.jsx';
 // External Business Partner / Business Operation Access.
 //
 // The whole application, as seen by someone outside the organisation who has
-// been given ONE business operation to follow. It is not a cut-down copy of the
-// internal screens: it reads a different API (/api/partner/*) that returns only
-// approved, externally released records for the operation on their own account.
+// been given one or more business operations to follow. It is not a cut-down
+// copy of the internal screens: it reads a different API (/api/partner/*) that
+// returns only approved, externally released records for the operations the
+// Director granted their account.
 //
-// There is deliberately nothing here that writes. No approve, no reject, no
-// edit, no internal notes, no evidence, no audit trail, no other operation.
-// That is enforced by the backend -- authMiddleware refuses a partner account
-// anything outside /api/partner -- and this file simply has nothing to draw.
+// The one thing written from here is a comment to the Director. No approve, no
+// reject, no edit, no internal notes, no evidence, no audit trail, no operation
+// outside their grants. That is enforced by the backend -- authMiddleware
+// refuses a partner account anything outside /api/partner, and the partner
+// routes scope every query to the grants -- and this file has nothing else to draw.
 
 const TABS = [
   ['overview', 'nav.overview'],
   ['activities', 'nav.activities'],
   ['movements', 'nav.movements'],
   ['reports', 'nav.reports'],
-  ['updates', 'nav.updates']
+  ['updates', 'nav.updates'],
+  ['messages', 'portal.messages']
 ];
 
 function formatMoney(value) {
@@ -52,29 +55,37 @@ export default function PartnerPortal({ user, fetchJson, language, t, tab = 'ove
   const [movements, setMovements] = useState([]);
   const [report, setReport] = useState(null);
   const [updates, setUpdates] = useState([]);
+  const [threads, setThreads] = useState([]);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
+  // '' reads every operation the partner was granted; an id narrows to that
+  // one. The API refuses an operation outside the grants, so this can only
+  // ever narrow.
+  const [scope, setScope] = useState('');
 
-  // The operation is read from the signed-in account, never chosen here. There
-  // is no operation picker in this interface because there is nothing to pick:
-  // the account carries exactly one, and the API would refuse any other.
-  const operation = operationName(user.sector, language);
+  const granted = overview?.operations || [user.sector];
+  const operation = scope
+    ? operationName(scope, language)
+    : granted.map((id) => operationName(id, language)).join(' · ');
 
   const load = useCallback(async () => {
     setLoading(true);
+    const narrow = scope ? `&operation=${encodeURIComponent(scope)}` : '';
     try {
-      const [overviewResult, activityResult, movementResult, reportResult, updateResult] = await Promise.all([
-        fetchJson('/api/partner/overview'),
-        fetchJson('/api/partner/activities?limit=100'),
-        fetchJson('/api/partner/movements?limit=100'),
-        fetchJson('/api/partner/report?months=6'),
-        fetchJson('/api/partner/updates?limit=30')
+      const [overviewResult, activityResult, movementResult, reportResult, updateResult, threadResult] = await Promise.all([
+        fetchJson(`/api/partner/overview?${narrow.slice(1)}`),
+        fetchJson(`/api/partner/activities?limit=100${narrow}`),
+        fetchJson(`/api/partner/movements?limit=100${narrow}`),
+        fetchJson(`/api/partner/report?months=6${narrow}`),
+        fetchJson(`/api/partner/updates?limit=30${narrow}`),
+        fetchJson('/api/partner/comments').catch(() => [])
       ]);
       setOverview(overviewResult);
       setActivities(activityResult);
       setMovements(movementResult);
       setReport(reportResult);
       setUpdates(updateResult);
+      setThreads(threadResult);
       setFailed(false);
     } catch (loadError) {
       setFailed(true);
@@ -82,6 +93,23 @@ export default function PartnerPortal({ user, fetchJson, language, t, tab = 'ove
     } finally {
       setLoading(false);
     }
+  }, [fetchJson, onError, scope]);
+
+  // Handlers report success so the form clears only once a message is saved.
+  const sendComment = useCallback(async (comment) => {
+    try {
+      await fetchJson('/api/partner/comments', { method: 'POST', body: JSON.stringify(comment) });
+      setThreads(await fetchJson('/api/partner/comments'));
+      return true;
+    } catch (sendError) { onError(sendError.message); return false; }
+  }, [fetchJson, onError]);
+
+  const sendReply = useCallback(async (thread, body) => {
+    try {
+      await fetchJson(`/api/partner/comments/${thread.id}/replies`, { method: 'POST', body: JSON.stringify({ body }) });
+      setThreads(await fetchJson('/api/partner/comments'));
+      return true;
+    } catch (sendError) { onError(sendError.message); return false; }
   }, [fetchJson, onError]);
 
   useEffect(() => { load(); }, [load]);
@@ -108,6 +136,15 @@ export default function PartnerPortal({ user, fetchJson, language, t, tab = 'ove
         <strong>{t('partners.viewOnly')}</strong>
       </div>
     </section>
+
+    {/* Only drawn when there is a choice: a partner following one operation
+        has nothing to pick. */}
+    {granted.length > 1 && <section className="toolbar-row"><div className="filter-group">
+      <select value={scope} onChange={(event) => setScope(event.target.value)} aria-label={t('app.businessOperation')}>
+        <option value="">{t('portal.allMyOperations')}</option>
+        {granted.map((id) => <option key={id} value={id}>{operationName(id, language)}</option>)}
+      </select>
+    </div></section>}
 
     <p className="partner-notice">
       <strong>{t('portal.approvedOnly')}.</strong> {t('portal.approvedOnlyNote')}
@@ -201,6 +238,96 @@ export default function PartnerPortal({ user, fetchJson, language, t, tab = 'ove
         <small>{formatDateTime(update.at, language)}</small>
       </li>)}</ul> : <EmptyState t={t}>{t('portal.noUpdates')}</EmptyState>}
     </Panel>}
+
+    {tab === 'messages' && <PartnerMessages
+      threads={threads}
+      granted={granted}
+      activities={activities}
+      language={language}
+      t={t}
+      onSend={sendComment}
+      onReply={sendReply}
+    />}
+  </>;
+}
+
+// Comments to the Director and the Director's answers. Addressed to the
+// Director only -- managers never see them -- about an operation the partner
+// follows, or one of the activities listed in this portal.
+function PartnerMessages({ threads, granted, activities, language, t, onSend, onReply }) {
+  const [form, setForm] = useState({ operation: granted[0], subject: '', body: '' });
+  const [replies, setReplies] = useState({});
+  const [sending, setSending] = useState(false);
+  const subjects = activities.filter((activity) => activity.operation === form.operation);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (sending || !form.body.trim()) return;
+    setSending(true);
+    const saved = await onSend({
+      operation: form.operation,
+      subjectType: form.subject ? 'activity' : 'operation',
+      subjectId: form.subject || null,
+      body: form.body.trim()
+    });
+    setSending(false);
+    if (saved) setForm({ ...form, subject: '', body: '' });
+  };
+
+  const reply = async (event, thread) => {
+    event.preventDefault();
+    const body = (replies[thread.id] || '').trim();
+    if (sending || !body) return;
+    setSending(true);
+    const saved = await onReply(thread, body);
+    setSending(false);
+    if (saved) setReplies({ ...replies, [thread.id]: '' });
+  };
+
+  return <>
+    <form className="form-panel" onSubmit={submit}>
+      <div className="panel-header"><div>
+        <h2>{t('portal.writeToDirector')}</h2>
+        <span>{t('portal.writeToDirectorBlurb')}</span>
+      </div></div>
+      <div className="form-grid">
+        <label className="form-field"><span>{t('app.businessOperation')}</span>
+          <select value={form.operation} onChange={(event) => setForm({ ...form, operation: event.target.value, subject: '' })}>
+            {granted.map((id) => <option key={id} value={id}>{operationName(id, language)}</option>)}
+          </select>
+        </label>
+        <label className="form-field"><span>{t('portal.about')}</span>
+          <select value={form.subject} onChange={(event) => setForm({ ...form, subject: event.target.value })}>
+            <option value="">{t('portal.theWholeOperation')}</option>
+            {subjects.map((activity) => <option key={activity.id} value={activity.id}>{activity.activity}</option>)}
+          </select>
+        </label>
+        <label className="form-field form-field-wide"><span>{t('portal.yourComment')}</span>
+          <textarea required rows="4" maxLength={2000} value={form.body} onChange={(event) => setForm({ ...form, body: event.target.value })} />
+        </label>
+      </div>
+      <div className="form-submit-bar">
+        <button className="primary-btn" type="submit" disabled={sending || !form.body.trim()}>{t('portal.sendToDirector')}</button>
+      </div>
+    </form>
+
+    <Panel title={t('portal.messages')} subtitle={`${threads.length}`}>
+      {threads.length ? <div className="message-threads">{threads.map((thread) => <article className="message-thread" key={thread.id}>
+        <header>
+          <strong>{operationName(thread.operation, language)}</strong>
+          <span>{thread.subjectTitle || t('portal.theWholeOperation')}</span>
+        </header>
+        {thread.messages.map((message) => <div key={message.id} className={message.authorRole === 'partner' ? 'message mine' : 'message theirs'}>
+          <small>{message.authorRole === 'partner' ? t('portal.you') : t('role.super-admin')} · {formatDateTime(message.createdAt, language)}</small>
+          <p>{message.body}</p>
+        </div>)}
+        <form className="message-reply" onSubmit={(event) => reply(event, thread)}>
+          <input maxLength={2000} aria-label={t('portal.reply')} placeholder={t('portal.replyPlaceholder')} value={replies[thread.id] || ''}
+            onChange={(event) => setReplies({ ...replies, [thread.id]: event.target.value })} />
+          <button className="secondary-btn" type="submit" disabled={sending || !(replies[thread.id] || '').trim()}>{t('portal.reply')}</button>
+        </form>
+      </article>)}</div> : <EmptyState t={t}>{t('portal.noMessages')}</EmptyState>}
+    </Panel>
   </>;
 }
 

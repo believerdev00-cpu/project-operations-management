@@ -373,6 +373,31 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .decision-hint { margin: 10px 0 0; color: #94671c; font-size: .78rem; font-weight: 650; line-height: 1.45; }
 .decision-readout { margin-top: 18px; }
 .admin-note { padding: 10px 12px; border-left: 3px solid var(--blue); background: var(--blue-soft); font-style: italic; }
+/* Who sent work back, under the reason in the next-step box. */
+.sent-back-by { display: block; margin-top: 6px; color: var(--muted); font-size: .76rem; font-weight: 700; }
+
+/* A partner's operations: ticked, one or more. */
+.operation-checks { display: flex; flex-wrap: wrap; gap: 0 14px; }
+.operation-checks .check-field { min-height: 32px; text-transform: none; letter-spacing: 0; }
+td .operation-checks { display: grid; gap: 0; }
+
+/* Partner comments to the Director, and the answers: one thread per card. */
+.message-threads { display: grid; gap: 14px; }
+.message-thread { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; }
+.message-thread.unread { border-color: var(--blue); box-shadow: inset 3px 0 0 var(--blue); }
+.message-thread header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.message-thread header span { color: var(--muted); font-size: .78rem; }
+.message-thread header .text-btn { margin-left: auto; }
+.message { max-width: 85%; padding: 8px 11px; border-radius: 8px; background: #f3f5f8; }
+.message.mine { justify-self: end; background: var(--blue-soft); }
+.message small { color: var(--muted); font-size: .7rem; font-weight: 700; }
+.message p { margin: 3px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.message-reply { display: flex; gap: 8px; }
+.message-reply input { flex: 1; min-width: 0; }
+@media (max-width: 640px) {
+  .message { max-width: 100%; }
+  .message-reply { flex-direction: column; }
+}
 .completion-note { max-width: 320px; }
 .awaiting-flag { display: block; margin-top: 4px; color: #7a5416; font-size: .72rem; font-weight: 800; white-space: normal; }
 .review-row { cursor: pointer; }

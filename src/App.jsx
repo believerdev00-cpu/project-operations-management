@@ -21,7 +21,7 @@ import { LANGUAGES, LanguageContext, displayLanguage, fill, setDisplayLanguage, 
 import { BUSINESS_OPERATIONS, operationName, runsTrips } from '../shared/businessOperations.js';
 import { OPERATIONS_WITH_CATEGORIES, OTHER_CATEGORY } from '../shared/categories.js';
 import ActivityReview, {
-  ACTIVITY_STATUSES, approvalTone, approverName, categoryLabel,
+  ACTIVITY_STATUSES, MIN_CORRECTION_NOTE, approvalTone, approverName, categoryLabel,
   deadlineNote, formatDate, statusTone
 } from './ActivityReview.jsx';
 import { formatUsd } from './format.js';
@@ -724,7 +724,7 @@ function Banners({ message, error, onDismissMessage, onDismissError }) {
 
 // ---- the external partner's application ---------------------------------------
 
-const PARTNER_TABS = ['overview', 'activities', 'movements', 'reports', 'updates'];
+const PARTNER_TABS = ['overview', 'activities', 'movements', 'reports', 'updates', 'messages'];
 
 function PartnerWorkspace({ token, user, onLogout, onExpired, onSessionRenewed, welcome, onWelcomeShown }) {
   const { language, t } = useI18n();
@@ -819,6 +819,8 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const [register, setRegister] = useState(emptyRegister);
   const [approvalQueue, setApprovalQueue] = useState(emptyQueue);
   const [partnerRegister, setPartnerRegister] = useState(emptyPartnerRegister);
+  // What partners wrote to the Director. Only the Director asks for it.
+  const [partnerInbox, setPartnerInbox] = useState({ unread: 0, threads: [] });
   const [rate, setRate] = useState(fallbackRate);
   // Secondary lists that failed to load. A failure is shown as a failure with a
   // retry, never as an empty list that looks like "nothing to do".
@@ -901,7 +903,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       ['approvals', t('nav.approvals'), 0, 'review'],
       ['projects', t('nav.projects'), 0, 'manage'],
       ['users', t('nav.users'), 0, 'manage'],
-      ['partners', t('nav.partners'), 0, 'manage']
+      ['partners', t('nav.partners'), partnerInbox.unread, 'manage']
     ];
   } else if (isManager) {
     // A manager's job is the month they were given: the plan is the front door,
@@ -971,12 +973,13 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       isDirector ? fetchJson('/api/users') : Promise.resolve(emptyRegister),
       isDirector ? fetchJson('/api/partners') : Promise.resolve(emptyPartnerRegister),
       fetchJson('/api/rates'),
-      fetchJson('/api/notifications?limit=40')
+      fetchJson('/api/notifications?limit=40'),
+      isDirector ? fetchJson('/api/partner-comments') : Promise.resolve({ unread: 0, threads: [] })
     ]);
     if (requestNumber !== latestLoad.current) return;
     setRefreshing(false);
 
-    const [summaryResult, projectResult, activityResult, approvalResult, managerResult, queueResult, peopleResult, userResult, partnerResult, rateResult, noticeResult] = results;
+    const [summaryResult, projectResult, activityResult, approvalResult, managerResult, queueResult, peopleResult, userResult, partnerResult, rateResult, noticeResult, inboxResult] = results;
     if (noticeResult.status === 'fulfilled') setNotices(noticeResult.value);
     const criticalFailure = [summaryResult, projectResult, activityResult, approvalResult].find((result) => result.status === 'rejected');
     if (criticalFailure) {
@@ -995,6 +998,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     setApprovalQueue(queueResult.status === 'fulfilled' ? queueResult.value : emptyQueue);
     setRegister(userResult.status === 'fulfilled' ? userResult.value : emptyRegister);
     setPartnerRegister(partnerResult.status === 'fulfilled' ? partnerResult.value : emptyPartnerRegister);
+    setPartnerInbox(inboxResult.status === 'fulfilled' ? inboxResult.value : { unread: 0, threads: [] });
     if (rateResult.status === 'fulfilled') setRate(rateResult.value);
     setIssues({
       managers: managerResult.status === 'rejected',
@@ -1543,12 +1547,46 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     } catch (finishError) { fail(finishError.message); }
   });
 
+  // A manager putting right what the Director sent back, or their own draft.
+  // The record keeps its project, operation and rate; the money is read back
+  // as it stands, because a correction may not move it (the API refuses).
+  const editActivity = act(async (activity, changes) => {
+    setError('');
+    const usd = Number(changes.costUsd ?? activity.requestedBudget);
+    const rwfPerUsd = activity.costUsd > 0 ? activity.costRwf / activity.costUsd : 0;
+    const cdfPerUsd = activity.costUsd > 0 ? activity.costCdf / activity.costUsd : 0;
+    try {
+      await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          projectId: activity.projectId,
+          sector: activity.sector,
+          signed: activity.signed,
+          materials: activity.materials || '',
+          ...changes,
+          costUsd: usd,
+          costRwf: usd * rwfPerUsd,
+          costCdf: usd * cdfPerUsd
+        })
+      });
+      notify(activity.status === 'Needs Correction' ? t('msg.correctionSaved') : t('msg.activityUpdated'));
+      await refreshActivity(activity.id);
+      return true;
+    } catch (editError) {
+      fail(editError.message);
+      return false;
+    }
+  });
+
   const sendBackActivity = act(async (activity) => {
     const reason = await dialog.prompt({
       title: t('action.sendBack'),
       message: activity.activity,
       label: t('msg.sendBackReason'),
       required: true,
+      // The API refuses a shorter reason (MIN_CORRECTION_NOTE in
+      // server/routes/activities.js): the manager has to be able to act on it.
+      minLength: MIN_CORRECTION_NOTE,
       multiline: true,
       confirmLabel: t('action.sendBack')
     });
@@ -1639,11 +1677,38 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // Invite someone outside the organisation and give them exactly one business
   // operation to follow, view only. Resolves true once saved, so the form only
   // clears on success.
+  // The Director's answer reaches the one partner whose thread it is.
+  const replyToPartner = (thread, body) => runAction(async () => {
+    setError('');
+    try {
+      const result = await fetchJson(`/api/partner-comments/${thread.id}/replies`, { method: 'POST', body: JSON.stringify({ body }) });
+      setPartnerInbox((current) => ({
+        unread: result.unread,
+        threads: current.threads.map((item) => (item.id === thread.id ? result.thread : item))
+      }));
+      notify(t('msg.replySent'));
+      return true;
+    } catch (replyError) {
+      fail(replyError.message);
+      return false;
+    }
+  });
+
+  const markPartnerThreadRead = act(async (thread) => {
+    try {
+      const result = await fetchJson(`/api/partner-comments/${thread.id}/read`, { method: 'PATCH' });
+      setPartnerInbox((current) => ({
+        unread: result.unread,
+        threads: current.threads.map((item) => (item.id === thread.id ? { ...item, unreadByDirector: 0 } : item))
+      }));
+    } catch (readError) { fail(readError.message); }
+  });
+
   const invitePartner = (form) => runAction(async () => {
     setError('');
     try {
       const result = await fetchJson('/api/partners', { method: 'POST', body: JSON.stringify(form) });
-      notify(fill(t('msg.partnerInvited'), { name: result.name, operation: operationName(result.operation, language) }));
+      notify(fill(t('msg.partnerInvited'), { name: result.name, operation: (result.operations || [result.operation]).map((id) => operationName(id, language)).join(', ') }));
       await loadData();
       return true;
     } catch (inviteError) {
@@ -1654,16 +1719,18 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
 
   // Moving the operation moves everything they can read, on their next request,
   // so it is confirmed rather than applied the instant the select changes.
-  const changePartnerOperation = act(async (partner, operation) => {
+  // The whole set is sent, never a single toggle, so two quick clicks cannot
+  // leave the grants half-applied.
+  const changePartnerOperation = act(async (partner, operations) => {
     const confirmed = await dialog.confirm({
       title: t('msg.partnerOperationTitle'),
-      message: fill(t('msg.partnerOperationBody'), { name: partner.name, operation: operationName(operation, language) }),
+      message: fill(t('msg.partnerOperationBody'), { name: partner.name, operation: operations.map((id) => operationName(id, language)).join(', ') }),
       confirmLabel: t('dialog.confirm')
     });
     if (!confirmed) return;
     setError('');
     try {
-      const result = await fetchJson(`/api/partners/${partner.id}/operation`, { method: 'PATCH', body: JSON.stringify({ operation }) });
+      const result = await fetchJson(`/api/partners/${partner.id}/operations`, { method: 'PATCH', body: JSON.stringify({ operations }) });
       notify(result.message);
     } catch (changeError) { fail(changeError.message); }
     await loadData();
@@ -2031,6 +2098,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
           managers={people.length ? people : managers}
           onClose={closeActivity}
           onDecision={saveDecision}
+          onEdit={editActivity}
           onStatus={changeActivityStatus}
           onAssign={saveActivityAssignment}
           onUpload={uploadActivityEvidence}
@@ -2193,6 +2261,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         onChangeStatus={changePartnerStatus}
         onResetPassword={resetPartnerPassword}
         onRemove={removePartner}
+        inbox={partnerInbox}
+        onReply={replyToPartner}
+        onMarkRead={markPartnerThreadRead}
       />;
   } else if (view === 'movements') {
     content = <MovementModule

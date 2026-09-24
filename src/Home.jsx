@@ -4,6 +4,9 @@ import { fill, useI18n } from './i18n.js';
 import { MoneyBar, activityJourney, journeyLabel, journeyTone, nextAction } from './journey.jsx';
 import { todayLocal } from './format.js';
 
+// How many of the newest manager-raised activities the Director's Home lists.
+const LATEST_FROM_MANAGERS = 5;
+
 // The home screen: "what do I need to do?", before anything else.
 //
 // It used to be a report -- five metrics, two of them measuring something other
@@ -86,6 +89,10 @@ export default function Home({
   const [myWork, setMyWork] = useState(null);
   const [recent, setRecent] = useState([]);
   const [finalChecks, setFinalChecks] = useState(null);
+  // The five newest records managers put into the register, whatever state
+  // they are in, so the latest arrivals are in front of the Director in order.
+  // The whole history is the report export.
+  const [latestFromManagers, setLatestFromManagers] = useState([]);
   // What the managers have actually recorded lately, across every operation in
   // scope. The Director monitors rather than asks: this arrives with the page.
   const [updates, setUpdates] = useState([]);
@@ -103,9 +110,11 @@ export default function Home({
       isWorker ? fetchJson('/api/activities?status=Completed&assignedTo=me&limit=3') : Promise.resolve([]),
       // The operational history, newest first. A team member has no month of
       // their own to monitor, so they are not asked for it.
-      isWorker ? Promise.resolve({ updates: [] }) : fetchJson('/api/monthly-plans/updates?limit=12')
-    ]).then(([planResult, workResult, checkResult, doneResult, updateResult]) => {
+      isWorker ? Promise.resolve({ updates: [] }) : fetchJson('/api/monthly-plans/updates?limit=12'),
+      isDirector ? fetchJson(`/api/activities?raisedBy=managers&limit=${LATEST_FROM_MANAGERS}`) : Promise.resolve([])
+    ]).then(([planResult, workResult, checkResult, doneResult, updateResult, latestResult]) => {
       if (request !== latest.current) return;
+      setLatestFromManagers(latestResult.status === 'fulfilled' ? latestResult.value : []);
       setUpdates(updateResult.status === 'fulfilled' ? updateResult.value.updates || [] : []);
       setRecent(doneResult.status === 'fulfilled' ? doneResult.value : []);
       setPlans(planResult.status === 'fulfilled' ? planResult.value.operations || [] : []);
@@ -372,6 +381,12 @@ export default function Home({
     {isDirector && finalChecks && finalChecks.length > 0 && <>
       <h3 className="home-heading">{t('home.tileChecks')}</h3>
       <WorkList items={finalChecks} user={user} t={t} language={language} onOpen={onOpenActivity} />
+    </>}
+
+    {isDirector && latestFromManagers.length > 0 && <>
+      <h3 className="home-heading">{t('home.latestFromManagers')}</h3>
+      <p className="field-hint">{t('home.latestFromManagersHint')}</p>
+      <WorkList items={latestFromManagers} user={user} t={t} language={language} onOpen={onOpenActivity} />
     </>}
 
     {/* WHAT HAPPENED. The Director does not ask a manager how the month is
