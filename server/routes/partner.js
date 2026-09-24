@@ -51,7 +51,7 @@ function scopeFor(req) {
 // operations from the authenticated account's grants and nowhere else.
 function activityVisibility(operations, values) {
   values.push(operations);
-  return `a.sector = ANY(${values.length}::text[])
+  return `a.sector = ANY($${values.length}::text[])
     AND a.approval_status = 'approved'
     AND a.externally_visible = TRUE
     AND a.status NOT IN ('Draft', 'Cancelled', 'Rejected')`;
@@ -66,7 +66,7 @@ function activityVisibility(operations, values) {
 // that support Mining, Farming or Agriculture.
 function movementVisibility(operations, values) {
   values.push(operations);
-  const granted = `${values.length}::text[]`;
+  const granted = `$${values.length}::text[]`;
   const belongs = operations.includes(TRIPS_OPERATION)
     ? `(m.related_area IS NULL OR m.related_area = ANY(${granted}))`
     : `m.related_area = ANY(${granted})`;
@@ -361,7 +361,7 @@ async function canSeeSubject(operation, subjectType, subjectId) {
     : ['movements m', movementVisibility([operation], values)];
   values.push(subjectId);
   const alias = subjectType === 'activity' ? 'a' : 'm';
-  const result = await pool.query(`SELECT 1 FROM ${table} WHERE ${where} AND ${alias}.id = ${values.length}`, values);
+  const result = await pool.query(`SELECT 1 FROM ${table} WHERE ${where} AND ${alias}.id = $${values.length}`, values);
   return result.rowCount > 0;
 }
 

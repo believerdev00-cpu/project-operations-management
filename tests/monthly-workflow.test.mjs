@@ -6,7 +6,7 @@ import bcrypt from 'bcryptjs';
 import { pool } from '../server/db/database.js';
 import { BUSINESS_OPERATIONS } from '../shared/businessOperations.js';
 import { directorSession } from './director.mjs';
-import { PROJECT_IDS, createProject, removeProject } from './fixtures.mjs';
+import { PROJECT_IDS, createProject, removeAllProjects } from './fixtures.mjs';
 const API = process.env.API || 'http://localhost:5000';
 const MONTH = '2099-09';
 
@@ -54,15 +54,18 @@ async function cleanup() {
   }
   // Last: an activity references its project, so the project goes after the
   // work that was hanging on it.
-  await removeProject('farming');
+  await removeAllProjects();
 }
 
 try {
   section('setup');
   const { token: adminToken } = await directorSession();
-  // The off-plan request further down hangs on a project. It used to be
-  // 'PRJ-GISUMA', which nothing seeds -- see tests/fixtures.mjs.
-  await createProject('farming');
+  // Every operation's month gets planned activities, and a planned activity
+  // hangs on a project of its own operation. Only Farming's was created, so the
+  // other three months passed only on a database that already had projects in
+  // those operations -- see tests/fixtures.mjs. The off-plan request further
+  // down uses the Farming one.
+  for (const operation of Object.keys(PROJECT_IDS)) await createProject(operation);
   const managers = {};
   for (const operation of BUSINESS_OPERATIONS) {
     const row = await pool.query(
