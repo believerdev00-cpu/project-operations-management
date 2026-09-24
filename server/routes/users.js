@@ -1,6 +1,6 @@
 import express from 'express';
-import { pool } from '../db/database.js';
-import { ALL_OPERATIONS, asyncRoute, isAdmin, parseId, requiredText, sectorIds, withinScope } from '../lib/http.js';
+import { pool, safeRollback } from '../db/database.js';
+import { ALL_OPERATIONS, asyncRoute, isAdmin, operationsSql, parseId, requiredText, sectorIds, withinScope } from '../lib/http.js';
 import { hashPassword, passwordProblem } from '../lib/passwords.js';
 
 const router = express.Router();
@@ -23,6 +23,7 @@ function mapAccount(row) {
     name: row.name,
     role: row.role,
     sector: row.sector,
+    operations: row.operations || (row.sector ? [row.sector] : []),
     coversAllSectors: Boolean(row.covers_all_sectors),
     managerId: row.manager_id ?? null,
     managerName: row.manager_name ?? null,
@@ -39,6 +40,7 @@ function mapAccount(row) {
 // Password hashes are never selected into any response built from this list.
 const ACCOUNT_SELECT = `
   SELECT u.id, u.username, u.name, u.role, u.sector, u.covers_all_sectors, u.manager_id, u.created_at, u.password_changed_at,
+         ${operationsSql('u')} AS operations,
          u.status, u.must_change_password,
          m.name AS manager_name, m.sector AS manager_sector,
          (SELECT COUNT(*) FROM projects p WHERE p.manager_id = u.id)::int AS assigned_projects,
@@ -82,6 +84,48 @@ function translateConstraintError(error) {
   return null;
 }
 
+// The operations an account form asks for. A manager may run several -- Mining
+// and Agriculture at once -- sent as `sectors`; the older single `sector` is
+// still read, so a client that predates the list keeps working. 'all' (alone)
+// is the all-operations manager. A team member always sits in exactly one
+// operation: their manager and their work are in it. An unknown id or an empty
+// list makes the request invalid rather than quietly saving less.
+function requestedOperations(body, role) {
+  const list = Array.isArray(body?.sectors) ? body.sectors : (body?.sector ? [body.sector] : []);
+  const unique = [...new Set(list)];
+  if (role === 'manager' && unique.length === 1 && unique[0] === ALL_OPERATIONS) {
+    return { coversAll: true, operations: [] };
+  }
+  if (!unique.length || !unique.every((id) => sectorIds.has(id))) {
+    return { error: 'Choose a project.' };
+  }
+  if (role !== 'manager' && unique.length > 1) {
+    return { error: 'A team member works in one project. Choose one.' };
+  }
+  return { coversAll: false, operations: unique };
+}
+
+// Replace a manager's operations with exactly this set, in the caller's
+// transaction. users.sector is written by the caller as the first of them, so
+// the row always names an operation the manager actually runs. An
+// all-operations manager holds no rows: the flag already says "every one".
+async function setManagerOperations(client, managerId, operations, grantedBy) {
+  await client.query('DELETE FROM manager_operations WHERE manager_id = $1 AND NOT (sector = ANY($2::text[]))', [managerId, operations]);
+  if (!operations.length) return;
+  await client.query(
+    `INSERT INTO manager_operations (manager_id, sector, granted_by)
+     SELECT $1, UNNEST($2::text[]), $3
+     ON CONFLICT DO NOTHING`,
+    [managerId, operations, grantedBy]
+  );
+}
+
+// May this manager hold somebody who works in these operations? Every one of
+// them, or the person would be on a team whose lead cannot open their work.
+function coversEvery(manager, operations) {
+  return operations.every((operation) => withinScope(manager, operation));
+}
+
 // The full account register, for the Director only: every user, their role, the
 // manager they report to, and the working area they cover.
 router.get('/', adminOnly('Only the Director can view the account register.'), asyncRoute(async (req, res) => {
@@ -103,7 +147,7 @@ router.get('/', adminOnly('Only the Director can view the account register.'), a
 }));
 
 router.post('/', adminOnly('Only the Director can create accounts.'), asyncRoute(async (req, res) => {
-  const { username, name, password, role, sector } = req.body || {};
+  const { username, name, password, role } = req.body || {};
 
   if (!requiredText(username) || !requiredText(name)) {
     return res.status(400).json({ message: 'A username and a full name are required.' });
@@ -113,43 +157,54 @@ router.post('/', adminOnly('Only the Director can create accounts.'), asyncRoute
   if (!assignableRoles.has(role)) {
     return res.status(400).json({ message: 'Choose a role: manager or team member.' });
   }
-  // Every non-Director account is scoped to one sector; without it their own
-  // sector-scoped queries would read back nothing. The one exception is a
-  // manager marked as covering all of them, which is scoped by the flag instead.
-  const coversAll = role === 'manager' && sector === ALL_OPERATIONS;
-  if (!coversAll && !sectorIds.has(sector)) {
-    return res.status(400).json({ message: 'Choose a business operation.' });
-  }
-  const storedSector = coversAll ? null : sector;
+  // Every non-Director account is scoped to at least one operation; without it
+  // their own scoped queries would read back nothing. A manager may run
+  // several; one marked as covering all of them is scoped by the flag instead.
+  const requested = requestedOperations(req.body, role);
+  if (requested.error) return res.status(400).json({ message: requested.error });
+  const { coversAll, operations } = requested;
+  const storedSector = coversAll ? null : operations[0];
 
   const managerId = req.body?.managerId ? parseId(req.body.managerId) : null;
   if (req.body?.managerId && !managerId) return res.status(400).json({ message: 'The selected manager is invalid.' });
   if (managerId) {
     const manager = await pool.query(
-      "SELECT id, sector, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager'",
+      `SELECT id, sector, role, covers_all_sectors AS "coversAllSectors", ${operationsSql('users')} AS operations FROM users WHERE id = $1 AND role = 'manager'`,
       [managerId]
     );
     if (!manager.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
     // A manager covering every operation may hold staff from any of them.
-    if (!coversAll && !withinScope(manager.rows[0], sector)) {
-      return res.status(400).json({ message: 'That manager works in a different business operation. Pick a manager from the same one.' });
+    if (!coversAll && !coversEvery(manager.rows[0], operations)) {
+      return res.status(400).json({ message: 'That manager works in a different project. Pick a manager from the same one.' });
     }
   }
 
+  const passwordHash = await hashPassword(password);
+  const client = await pool.connect();
+  let createdId;
   try {
-    const inserted = await pool.query(
+    await client.query('BEGIN');
+    const inserted = await client.query(
       // The password the Director typed is temporary: the new user chooses their
       // own at first sign-in, so the Director never knows it.
       `INSERT INTO users (username, password_hash, name, role, sector, manager_id, covers_all_sectors, must_change_password)
        VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE) RETURNING id`,
-      [username.trim(), await hashPassword(password), name.trim(), role, storedSector, managerId, coversAll]
+      [username.trim(), passwordHash, name.trim(), role, storedSector, managerId, coversAll]
     );
-    res.status(201).json(await loadAccount(inserted.rows[0].id));
+    createdId = inserted.rows[0].id;
+    // In the same transaction, so the three-managers limit on a second
+    // operation refuses the whole account rather than leaving half of it.
+    if (role === 'manager') await setManagerOperations(client, createdId, operations, req.user.id);
+    await client.query('COMMIT');
   } catch (error) {
+    await safeRollback(client);
     const message = translateConstraintError(error);
     if (!message) throw error;
-    res.status(400).json({ message });
+    return res.status(400).json({ message });
+  } finally {
+    client.release();
   }
+  res.status(201).json(await loadAccount(createdId));
 }));
 
 // Reset only. The stored value is a bcrypt hash and is never read back, so a
@@ -225,7 +280,10 @@ router.patch('/:id/status', adminOnly('Only the Director can suspend or reactiva
 // be listed on a team whose records they cannot see.
 router.patch('/:id/assignment', adminOnly('Only the Director can change an assignment.'), asyncRoute(async (req, res) => {
   const payload = req.body || {};
-  const existing = await pool.query('SELECT id, role, sector, manager_id, covers_all_sectors FROM users WHERE id = $1', [req.params.id]);
+  const existing = await pool.query(
+    `SELECT id, role, sector, manager_id, covers_all_sectors, ${operationsSql('users')} AS operations FROM users WHERE id = $1`,
+    [req.params.id]
+  );
   if (!existing.rowCount) return res.status(404).json({ message: 'Account not found.' });
 
   const target = existing.rows[0];
@@ -233,27 +291,27 @@ router.patch('/:id/assignment', adminOnly('Only the Director can change an assig
     return res.status(403).json({ message: 'The Director oversees every area and reports to nobody.' });
   }
   if (target.role === 'partner') {
-    return res.status(403).json({ message: 'Change an external partner\'s business operation from External Partners.' });
+    return res.status(403).json({ message: 'Change an external partner\'s project from External Partners.' });
   }
 
   // An absent key means "leave as is"; an explicit null means "clear it".
-  const sectorGiven = Object.prototype.hasOwnProperty.call(payload, 'sector');
+  const sectorGiven = Object.prototype.hasOwnProperty.call(payload, 'sector')
+    || Object.prototype.hasOwnProperty.call(payload, 'sectors');
   const managerGiven = Object.prototype.hasOwnProperty.call(payload, 'managerId');
   if (!sectorGiven && !managerGiven) {
-    return res.status(400).json({ message: 'Choose a business operation, a manager, or both.' });
+    return res.status(400).json({ message: 'Choose a project, a manager, or both.' });
   }
 
-  // 'all' is only meaningful for a manager. Left unspecified, an account that
-  // already covers everything keeps doing so rather than silently collapsing to
-  // a single area.
-  const requestedSector = sectorGiven
-    ? payload.sector
-    : (target.covers_all_sectors ? ALL_OPERATIONS : target.sector);
-  const coversAll = target.role === 'manager' && requestedSector === ALL_OPERATIONS;
-  if (!coversAll && !sectorIds.has(requestedSector)) {
-    return res.status(400).json({ message: 'Choose a business operation.' });
-  }
-  const sector = coversAll ? null : requestedSector;
+  // 'all' is only meaningful for a manager. Left unspecified, an account keeps
+  // exactly what it covers -- every operation, or each of its operations --
+  // rather than silently collapsing to the first one.
+  const currentOperations = target.covers_all_sectors ? [] : (target.operations || []);
+  const requested = sectorGiven
+    ? requestedOperations(payload, target.role)
+    : { coversAll: Boolean(target.covers_all_sectors), operations: currentOperations };
+  if (requested.error) return res.status(400).json({ message: requested.error });
+  const { coversAll, operations } = requested;
+  const sector = coversAll ? null : operations[0];
 
   let managerId = managerGiven
     ? (payload.managerId === null || payload.managerId === '' ? null : parseId(payload.managerId))
@@ -267,11 +325,12 @@ router.patch('/:id/assignment', adminOnly('Only the Director can change an assig
     if (managerId === target.id) return res.status(400).json({ message: 'An account cannot report to itself.' });
 
     const manager = await pool.query(
-      "SELECT id, sector, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager'",
+      `SELECT id, sector, role, covers_all_sectors AS "coversAllSectors", ${operationsSql('users')} AS operations
+       FROM users WHERE id = $1 AND role = 'manager'`,
       [managerId]
     );
     if (!manager.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
-    if (!coversAll && !withinScope(manager.rows[0], sector)) {
+    if (!coversAll && !coversEvery(manager.rows[0], operations)) {
       return res.status(400).json({
         message: 'That manager works in a different area. Move the user to the manager\'s area, or pick a manager from this one.'
       });
@@ -281,26 +340,28 @@ router.patch('/:id/assignment', adminOnly('Only the Director can change an assig
     }
   }
 
-  // A manager whose scope narrows -- moved to another area, or no longer
-  // covering every area -- loses sight of everything outside the new one, so
-  // work they still hold there would be stranded: expenses nobody can record, a
-  // month-end report nobody can file, approvals nobody else can give. The move
-  // waits until that work has been handed to somebody else. Widening to every
-  // area strands nothing.
+  // A manager whose scope narrows -- taken off one of their operations, or no
+  // longer covering every operation -- loses sight of everything outside the
+  // new set, so work they still hold there would be stranded: expenses nobody
+  // can record, a month-end report nobody can file, approvals nobody else can
+  // give. The change waits until that work has been handed to somebody else.
+  // Adding an operation, or widening to every one, strands nothing.
   const narrows = target.role === 'manager' && !coversAll
-    && (target.covers_all_sectors || sector !== target.sector);
+    && (target.covers_all_sectors || currentOperations.some((operation) => !operations.includes(operation)));
   if (narrows) {
+    // "Outside the new set" includes work with no operation at all, which the
+    // old IS DISTINCT FROM comparison counted too.
     const held = await pool.query(
       `SELECT
          (SELECT COUNT(*) FROM activities
-           WHERE sector IS DISTINCT FROM $2 AND assigned_to = $1
+           WHERE NOT (COALESCE(sector, '') = ANY($2::text[])) AND assigned_to = $1
              AND status NOT IN ('Completed', 'Rejected', 'Cancelled'))::int AS activities,
          (SELECT COUNT(*) FROM activities
-           WHERE sector IS DISTINCT FROM $2 AND approval_required_from = $1 AND approval_status = 'pending'
+           WHERE NOT (COALESCE(sector, '') = ANY($2::text[])) AND approval_required_from = $1 AND approval_status = 'pending'
              AND status NOT IN ('Draft', 'Cancelled', 'On Hold'))::int AS approvals,
          (SELECT COUNT(*) FROM monthly_plans
-           WHERE sector IS DISTINCT FROM $2 AND manager_id = $1 AND status <> 'Closed')::int AS plans`,
-      [target.id, sector]
+           WHERE NOT (COALESCE(sector, '') = ANY($2::text[])) AND manager_id = $1 AND status <> 'Closed')::int AS plans`,
+      [target.id, operations]
     );
     const { activities, approvals, plans } = held.rows[0];
     if (activities || approvals || plans) {
@@ -315,24 +376,36 @@ router.patch('/:id/assignment', adminOnly('Only the Director can change an assig
     }
   }
 
+  // The account row and its operations move together, so the three-managers
+  // limit on any one of them refuses the whole change rather than half of it.
+  const client = await pool.connect();
   try {
-    await pool.query(
+    await client.query('BEGIN');
+    await client.query(
       'UPDATE users SET sector = $2, manager_id = $3, covers_all_sectors = $4 WHERE id = $1',
       [target.id, sector, managerId, coversAll]
     );
+    if (target.role === 'manager') await setManagerOperations(client, target.id, operations, req.user.id);
+    await client.query('COMMIT');
   } catch (error) {
+    await safeRollback(client);
     const message = translateConstraintError(error);
     if (!message) throw error;
     return res.status(400).json({ message });
+  } finally {
+    client.release();
   }
 
-  // Moving a manager to another area strands the team that reported to them in
-  // the area they left, so the link is dropped rather than left inconsistent.
-  // A manager who now covers every area strands nobody: their team is in scope
-  // whichever area each member sits in.
+  // Taking a manager off an operation strands the team that reported to them
+  // there, so the link is dropped rather than left inconsistent. A manager who
+  // now covers every area strands nobody: their team is in scope whichever
+  // area each member sits in.
   let detached = 0;
-  if (target.role === 'manager' && !coversAll && sector !== target.sector) {
-    const cleared = await pool.query('UPDATE users SET manager_id = NULL WHERE manager_id = $1 AND sector <> $2 RETURNING id', [target.id, sector]);
+  if (narrows) {
+    const cleared = await pool.query(
+      'UPDATE users SET manager_id = NULL WHERE manager_id = $1 AND NOT (COALESCE(sector, \'\') = ANY($2::text[])) RETURNING id',
+      [target.id, operations]
+    );
     detached = cleared.rowCount;
   }
 

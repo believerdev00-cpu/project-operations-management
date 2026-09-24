@@ -137,7 +137,29 @@ export const TRIPS_OPERATION = SUPPORT_OPERATION;
 export function runsTrips(user) {
   if (!user) return false;
   if (user.coversAllSectors) return true;
-  return user.role === 'manager' && user.sector === TRIPS_OPERATION;
+  return user.role === 'manager' && operationsOf(user).includes(TRIPS_OPERATION);
+}
+
+// The operations an account works in. A manager may run several (Mining and
+// Agriculture at once), read from manager_operations into `operations`; a
+// partner's grants arrive the same way. Everybody else -- and any account
+// object built before the list existed -- has the one operation on the row.
+// Never compare user.sector against an operation by hand: for a manager with
+// two operations it names only the first, and the second silently disappears.
+export function operationsOf(user) {
+  if (!user) return [];
+  if (Array.isArray(user.operations) && user.operations.length) return user.operations;
+  return user.sector ? [user.sector] : [];
+}
+
+// "Does this account work in that operation?" An all-operations manager works
+// in every one. Visibility only: the Director's authority is a separate
+// question (isAdmin on the server), so the Director is deliberately not
+// answered for here.
+export function worksIn(user, operationId) {
+  if (!user || !operationId) return false;
+  if (user.coversAllSectors) return true;
+  return operationsOf(user).includes(operationId);
 }
 
 export function operationById(id) {

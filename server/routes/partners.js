@@ -221,7 +221,7 @@ router.patch('/:id/operations', asyncRoute(async (req, res) => {
 router.patch('/:id/operation', asyncRoute(async (req, res) => {
   const { operation } = req.body || {};
   if (!validOperation(operation)) {
-    return res.status(400).json({ message: 'Choose one business operation: Mining, Agriculture, Farming, or Movement & Facilitation.' });
+    return res.status(400).json({ message: 'Choose one project: Mining, Agriculture, Farming, or Movement & Facilitation.' });
   }
   if (!(await loadPartner(req.params.id))) return res.status(404).json({ message: 'External partner not found.' });
   await replaceGrants(req.params.id, [operation], req.user.id);

@@ -1,4 +1,7 @@
 import { sectors } from '../data/seedData.js';
+import { operationsOf } from '../../shared/businessOperations.js';
+
+export { operationsOf };
 
 export const sectorIds = new Set(sectors.map((sector) => sector.id));
 
@@ -94,11 +97,25 @@ export function hasFullScope(user) {
   return isAdmin(user) || coversAllSectors(user);
 }
 
+// A manager may run more than one operation, so the filter is a list, never
+// the single users.sector -- that names only the first of them.
 export function managerScope(user, column, values, filters) {
   if (!hasFullScope(user)) {
-    values.push(user.sector);
-    filters.push(`${column} = $${values.length}`);
+    values.push(operationsOf(user));
+    filters.push(`${column} = ANY($${values.length}::text[])`);
   }
+}
+
+// The operations an account row works in, as a text[] column, for queries that
+// load some OTHER account (the manager named on a project, a plan, a team
+// member's report line) and then ask withinScope about it. The signed-in
+// account gets the same list from authMiddleware. A manager's come from
+// manager_operations; anybody without rows there has the one on the row.
+// `alias` is the users table's alias (or name) in the query.
+export function operationsSql(alias) {
+  return `COALESCE((SELECT array_agg(mo.sector::text ORDER BY mo.sector = ${alias}.sector DESC, mo.sector)
+                      FROM manager_operations mo WHERE mo.manager_id = ${alias}.id),
+                   CASE WHEN ${alias}.sector IS NULL THEN ARRAY[]::text[] ELSE ARRAY[${alias}.sector::text] END)`;
 }
 
 // A manager who has been made responsible for particular projects sees those
@@ -139,5 +156,5 @@ export async function withinProjectScope(pool, user, projectId) {
 // "May this account touch a record in that operation?" -- the single-row form of
 // managerScope, for handlers that have already loaded the row.
 export function withinScope(user, sector) {
-  return hasFullScope(user) || (Boolean(user.sector) && user.sector === sector);
+  return hasFullScope(user) || (Boolean(sector) && operationsOf(user).includes(sector));
 }

@@ -7,7 +7,7 @@
 // recorded afterwards is what was spent, the evidence for it, and what is left.
 // There is no transaction, wallet, transfer or gateway anywhere in this module.
 
-import { hasFullScope, isAdmin } from './http.js';
+import { hasFullScope, isAdmin, withinScope } from './http.js';
 
 // 'YYYY-MM' as the browser sends it, to the first of that month as the column
 // stores it. Built from the parts rather than through Date, which would read a
@@ -65,8 +65,9 @@ export function canReadPlan(user, plan) {
   // A manager reads the plan for their own business operation. Being named on
   // it is not required -- a manager covering Farming can see Farming's month
   // even if the Director has since named somebody else on it -- but another
-  // operation's plan is never readable.
-  return Boolean(user.sector) && plan.sector === user.sector;
+  // operation's plan is never readable. A manager running two operations reads
+  // both operations' months.
+  return withinScope(user, plan.sector);
 }
 
 // The manager the plan names is the one who works it. A different manager in
@@ -103,8 +104,7 @@ export function canWorkPlan(user, plan) {
 // handed back but not spent against.
 export function canRecordExpense(user, activity) {
   if (isAdmin(user)) return true;
-  const inScope = hasFullScope(user) || (Boolean(user.sector) && activity.sector === user.sector);
-  if (!inScope) return false;
+  if (!withinScope(user, activity.sector)) return false;
   if (!activity.assigned_to) return user.role === 'manager';
   return Number(activity.assigned_to) === Number(user.id);
 }

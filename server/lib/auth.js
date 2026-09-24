@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import { pool } from '../db/database.js';
+import { operationsSql } from './http.js';
 
 export const jwtSecret = process.env.JWT_SECRET;
 
@@ -139,7 +140,9 @@ export async function authMiddleware(req, res, next) {
   // reassigned manager loses the old sector immediately, a deleted one loses access.
   try {
     const result = await pool.query(
-      'SELECT id, username, name, role, sector, email, status, access_level, covers_all_sectors, password_changed_at, must_change_password FROM users WHERE id = $1',
+      `SELECT id, username, name, role, sector, email, status, access_level, covers_all_sectors, password_changed_at, must_change_password,
+              ${operationsSql('users')} AS operations
+       FROM users WHERE id = $1`,
       [claims.id]
     );
     if (!result.rowCount) {
@@ -195,20 +198,20 @@ export async function authMiddleware(req, res, next) {
     // handler has to remember to do it and none can forget.
     if (user.role === 'partner' && !partnerMayReach(req.originalUrl)) {
       return res.status(403).json({
-        message: 'External partner access is limited to your assigned business operations.'
+        message: 'External partner access is limited to your assigned projects.'
       });
     }
     // An account with no operation cannot be scoped to one, so it would read
     // either nothing or everything depending on the query. Refuse instead.
     if (user.role === 'partner' && !user.sector) {
-      return res.status(403).json({ message: 'This partner account has no business operation assigned.' });
+      return res.status(403).json({ message: 'This partner account has no project assigned.' });
     }
     // Every operation the Director granted this partner, read on every request
     // like the role and the status, so a grant taken away bites at once.
     if (user.role === 'partner') {
       user.operations = await partnerOperations(user);
       if (!user.operations.length) {
-        return res.status(403).json({ message: 'This partner account has no business operation assigned.' });
+        return res.status(403).json({ message: 'This partner account has no project assigned.' });
       }
     }
 

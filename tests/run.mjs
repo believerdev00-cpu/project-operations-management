@@ -34,7 +34,8 @@ const SUITES = [
   ['monthly target', 'monthly-target.test.mjs', { needsApi: true }],
   ['assigned plan', 'assigned-plan.test.mjs', { needsApi: true }],
   ['reports', 'reports.test.mjs', { needsApi: true }],
-  ['feedback workflow', 'feedback-workflow.test.mjs', { needsApi: true }]
+  ['feedback workflow', 'feedback-workflow.test.mjs', { needsApi: true }],
+  ['manager operations', 'manager-operations.test.mjs', { needsApi: true }]
 ];
 
 const only = process.argv[2];

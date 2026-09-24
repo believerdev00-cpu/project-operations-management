@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BUSINESS_OPERATIONS, PRIMARY_OPERATIONS, isSupportOperation, operationName } from '../shared/businessOperations.js';
+import { BUSINESS_OPERATIONS, PRIMARY_OPERATIONS, isSupportOperation, operationName, worksIn } from '../shared/businessOperations.js';
 import { OTHER_CATEGORY, categoriesForOperation } from '../shared/categories.js';
 import { displayLanguage, fill, useI18n } from './i18n.js';
 import { EvidenceList, EvidenceUpload, categoryLabel, trailActionLabel } from './ActivityReview.jsx';
@@ -255,7 +255,7 @@ export default function MonthlyPlans({
     ? newPlan.operation
     : (unplanned[0]?.id || '');
   const managerOptions = useMemo(
-    () => managers.filter((manager) => manager.coversAllSectors || manager.sector === chosenOperation),
+    () => managers.filter((manager) => worksIn(manager, chosenOperation)),
     [managers, chosenOperation]
   );
 
@@ -1704,8 +1704,8 @@ function PlanDetail({
   // members. Somebody covering every operation belongs in every list. Falling
   // back to the managers list keeps the form usable if /api/people failed.
   const workPeople = (people.length ? people : managers)
-    .filter((person) => person.coversAllSectors || person.sector === plan.operation);
-  const operationManagers = managers.filter((manager) => manager.coversAllSectors || manager.sector === plan.operation || manager.id === plan.managerId);
+    .filter((person) => worksIn(person, plan.operation));
+  const operationManagers = managers.filter((manager) => worksIn(manager, plan.operation) || manager.id === plan.managerId);
   // The Director reviews the whole month. A manager is shown the activities that
   // were planned for THEM -- another manager's work in the same operation is
   // theirs to read on the register, not to record progress against here.

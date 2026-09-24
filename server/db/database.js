@@ -276,6 +276,9 @@ export async function initDatabase() {
     await pool.query('ALTER TABLE users DROP CONSTRAINT IF EXISTS users_covers_all_is_manager');
     await pool.query(`ALTER TABLE users ADD CONSTRAINT users_covers_all_is_manager
       CHECK (covers_all_sectors = FALSE OR (role = 'manager' AND sector IS NULL))`);
+    // The first-boot form of the limit. It is replaced further down, once
+    // manager_operations exists, by the version that counts a manager's every
+    // operation; it stays here because the trigger needs a function to exist.
     await pool.query(`
       CREATE OR REPLACE FUNCTION enforce_manager_sector_limit()
       RETURNS trigger AS $$
@@ -340,6 +343,65 @@ export async function initDatabase() {
       SELECT id, sector FROM users WHERE role = 'partner' AND sector IS NOT NULL
       ON CONFLICT DO NOTHING
     `);
+
+    // ---- the operations a manager runs ------------------------------------------
+    //
+    // One person can manage Mining and Agriculture at the same time. Before this
+    // a manager had exactly one operation (users.sector) or every one of them
+    // (covers_all_sectors), so the only way to give someone two was to give them
+    // all four. Each operation a manager runs is one row here, set by the
+    // Director; users.sector stays as the first of them, exactly as it does for
+    // a partner, so every query that still reads the single column keeps a real
+    // operation the manager holds. An all-operations manager has no rows: the
+    // flag already says "every one".
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS manager_operations (
+        manager_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        sector VARCHAR(50) NOT NULL REFERENCES sectors(id) ON DELETE CASCADE,
+        granted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (manager_id, sector)
+      )
+    `);
+    // Every manager that predates the table keeps exactly the operation it had.
+    await pool.query(`
+      INSERT INTO manager_operations (manager_id, sector)
+      SELECT id, sector FROM users WHERE role = 'manager' AND sector IS NOT NULL AND covers_all_sectors = FALSE
+      ON CONFLICT DO NOTHING
+    `);
+    // The three-managers-per-operation limit counted users.sector alone, so a
+    // fourth manager could join Mining as somebody's second operation. It now
+    // counts every manager holding the operation by either route, and the same
+    // function guards both tables.
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION enforce_manager_sector_limit()
+      RETURNS trigger AS $$
+      DECLARE
+        target_id INTEGER;
+        target_sector VARCHAR(50);
+      BEGIN
+        IF TG_TABLE_NAME = 'manager_operations' THEN
+          target_id := NEW.manager_id;
+          target_sector := NEW.sector;
+        ELSIF NEW.role = 'manager' THEN
+          target_id := COALESCE(NEW.id, 0);
+          target_sector := NEW.sector;
+        END IF;
+        IF target_sector IS NOT NULL AND
+          (SELECT COUNT(*) FROM users u
+            WHERE u.role = 'manager' AND u.id <> target_id
+              AND (u.sector = target_sector
+                   OR EXISTS (SELECT 1 FROM manager_operations mo
+                               WHERE mo.manager_id = u.id AND mo.sector = target_sector))) >= 3 THEN
+          RAISE EXCEPTION 'A sector cannot have more than three managers';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    await pool.query('DROP TRIGGER IF EXISTS manager_operations_limit ON manager_operations');
+    await pool.query(`CREATE TRIGGER manager_operations_limit BEFORE INSERT OR UPDATE ON manager_operations
+      FOR EACH ROW EXECUTE FUNCTION enforce_manager_sector_limit()`);
 
     // ---- a partner's comments to the Director ---------------------------------
     //

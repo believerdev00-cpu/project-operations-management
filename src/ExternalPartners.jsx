@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { BUSINESS_OPERATIONS, operationName } from '../shared/businessOperations.js';
+import { OperationChecks } from './ui.jsx';
 import { fill } from './i18n.js';
 
 // The Director's control over External Business Partner access.
@@ -12,23 +13,9 @@ import { fill } from './i18n.js';
 
 const emptyForm = { name: '', email: '', username: '', password: '', operations: [BUSINESS_OPERATIONS[0].id] };
 
-// The operations ticked, with one toggled. The last one cannot be unticked --
-// the API refuses a partner with none -- and the order stays the catalogue's.
-function toggled(operations, id) {
-  if (operations.includes(id)) return operations.length > 1 ? operations.filter((item) => item !== id) : operations;
-  return BUSINESS_OPERATIONS.map((operation) => operation.id).filter((item) => item === id || operations.includes(item));
-}
-
-function OperationChecks({ selected, language, disabled, label, onChange }) {
-  return <div className="operation-checks" role="group" aria-label={label}>
-    {BUSINESS_OPERATIONS.map((operation) => <label key={operation.id} className="check-field">
-      <input type="checkbox" checked={selected.includes(operation.id)}
-        disabled={disabled || (selected.length === 1 && selected.includes(operation.id))}
-        onChange={() => onChange(toggled(selected, operation.id))} />
-      <span>{operationName(operation.id, language)}</span>
-    </label>)}
-  </div>;
-}
+// The operation checkboxes live in ui.jsx (OperationChecks): a manager's
+// operations are ticked with the same control. The last one cannot be unticked
+// -- the API refuses a partner with none.
 
 const STATUS_TONE = { active: 'tone-done', suspended: 'tone-waiting', revoked: 'tone-stopped' };
 

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApprovalPanel, approverName, canApproveRecord, decisionIsOpen, formatTrailValue, labelForField, trailActionLabel } from './ActivityReview.jsx';
 import { displayLanguage, fill, translate, useT } from './i18n.js';
-import { BUSINESS_OPERATIONS, operationName, runsTrips } from '../shared/businessOperations.js';
+import { BUSINESS_OPERATIONS, operationName, operationsOf, runsTrips } from '../shared/businessOperations.js';
 import { DetailView, Fact, useBusy, useDialog } from './ui.jsx';
 import { FilePicker, Journey, MoneyBar, NextStep, Section, goToSection, journeyLabel, journeyTone, movementJourney } from './journey.jsx';
 
@@ -446,7 +446,7 @@ export default function MovementModule({ user, onOpenFile, fetchJson, upload, op
       <div>
         <span className="eyebrow">{t('movement.eyebrow')}</span>
         {/* The page's subject, not the reader's job title: the heading used to read "Director". */}
-        <h2>{isDirector || coversMovements ? operationName('movement', displayLanguage()) : `${areaLabel(user.sector)} — ${t('movement.linkedMovements')}`}</h2>
+        <h2>{isDirector || coversMovements ? operationName('movement', displayLanguage()) : `${operationsOf(user).map(areaLabel).join(' · ')} — ${t('movement.linkedMovements')}`}</h2>
         <p>{t('movement.blurb')}</p>
       </div>
       {canCreate && <button className="primary-btn" type="button" onClick={() => setFormState({ mode: 'create', values: emptyForm })}>

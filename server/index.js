@@ -10,7 +10,8 @@ import { initDatabase, pool } from './db/database.js';
 import { sectors } from './data/seedData.js';
 import { authMiddleware, jwtSecret, FILE_PATH, FILE_TOKEN_PURPOSE } from './lib/auth.js';
 import { hashPassword, passwordMatches, passwordProblem } from './lib/passwords.js';
-import { asyncRoute, hasFullScope, isAdmin, managerScope, parseId, projectScope, requiredText, validNumber, validateSector, withinScope } from './lib/http.js';
+import { asyncRoute, hasFullScope, isAdmin, managerScope, operationsOf, operationsSql, parseId, projectScope, requiredText, validNumber, validateSector, withinScope } from './lib/http.js';
+import { TRIPS_OPERATION, runsTrips } from '../shared/businessOperations.js';
 import { pendingForMeSql } from './lib/approvals.js';
 import { getCurrentRate } from './lib/rates.js';
 import { FINAL_CHECK_SQL, openWorkSql } from './lib/monthly.js';
@@ -176,6 +177,9 @@ const passwordChangeLimiter = rateLimit({
 function publicAccount(row) {
   return {
     id: row.id, username: row.username, name: row.name, role: row.role, sector: row.sector,
+    // Every operation the account works in -- a manager may run several, and
+    // the browser scopes its menus and filters by the list, not by `sector`.
+    operations: row.operations || (row.sector ? [row.sector] : []),
     email: row.email || null,
     status: row.status || 'active',
     accessLevel: row.access_level || 'internal',
@@ -211,14 +215,16 @@ app.get('/api/managers', authMiddleware, asyncRoute(async (req, res) => {
   const values = [];
   let scope = '';
   if (!hasFullScope(req.user)) {
-    values.push(req.user.sector);
+    values.push(operationsOf(req.user));
     // An all-operations manager belongs to every list, so a scoped caller sees
     // them alongside their own operation's managers rather than missing the one
-    // account that can actually take the work.
-    scope = ` AND (sector = $${values.length} OR covers_all_sectors)`;
+    // account that can actually take the work. A manager running several
+    // operations is listed in each of them: overlap with any of the caller's.
+    scope = ` AND (${operationsSql('users')} && $${values.length}::text[] OR covers_all_sectors)`;
   }
   const result = await pool.query(
-    `SELECT id, username, name, role, sector, covers_all_sectors AS "coversAllSectors"
+    `SELECT id, username, name, role, sector, covers_all_sectors AS "coversAllSectors",
+            ${operationsSql('users')} AS operations
      FROM users WHERE role = 'manager'${scope} ORDER BY name`,
     values
   );
@@ -237,11 +243,12 @@ app.get('/api/people', authMiddleware, asyncRoute(async (req, res) => {
   const values = [];
   let scope = '';
   if (!hasFullScope(req.user)) {
-    values.push(req.user.sector);
-    scope = ` AND (sector = $${values.length} OR covers_all_sectors)`;
+    values.push(operationsOf(req.user));
+    scope = ` AND (${operationsSql('users')} && $${values.length}::text[] OR covers_all_sectors)`;
   }
   const result = await pool.query(
-    `SELECT id, username, name, role, sector, covers_all_sectors AS "coversAllSectors"
+    `SELECT id, username, name, role, sector, covers_all_sectors AS "coversAllSectors",
+            ${operationsSql('users')} AS operations
      FROM users
      WHERE role IN ('manager', 'staff') AND status = 'active'${scope}
      ORDER BY CASE role WHEN 'manager' THEN 0 ELSE 1 END, name`,
@@ -255,7 +262,8 @@ app.get('/api/people', authMiddleware, asyncRoute(async (req, res) => {
 // leave the database, so a password is reset, never read back.
 app.use('/api/users', authMiddleware, userRouter);
 
-const ACCOUNT_COLUMNS = 'id, username, name, role, sector, email, status, access_level, covers_all_sectors, must_change_password';
+const ACCOUNT_COLUMNS = `id, username, name, role, sector, email, status, access_level, covers_all_sectors, must_change_password,
+  ${operationsSql('users')} AS operations`;
 
 app.post('/api/auth/login', addressLimiter, accountLimiter, asyncRoute(async (req, res) => {
   const { username, password } = req.body || {};
@@ -348,9 +356,10 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
   // Parameterized rather than interpolated: every other query in this file binds
   // its values, and the sector should be no different.
   const scoped = !hasFullScope(req.user);
-  const scopeValues = scoped ? [req.user.sector] : [];
-  const whereSector = scoped ? ' WHERE sector = $1' : '';
-  const andSector = scoped ? ' AND sector = $1' : '';
+  // $1 is the LIST of the caller's operations: a manager may run several.
+  const scopeValues = scoped ? [operationsOf(req.user)] : [];
+  const whereSector = scoped ? ' WHERE sector = ANY($1::text[])' : '';
+  const andSector = scoped ? ' AND sector = ANY($1::text[])' : '';
 
   // Movement spend is reported in RWF, so every movement is converted from its
   // own currency at the rate frozen onto it (the current reference rate when it
@@ -360,8 +369,8 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
   // sector is 'movement', so filtering on it showed other managers nothing.
   const rate = await getCurrentRate(pool);
   const movementValues = [rate.rwfPerUsd, rate.cdfPerUsd];
-  const movementScope = scoped && req.user.sector !== 'movement'
-    ? (movementValues.push(req.user.sector), ` WHERE m.related_area = $${movementValues.length}`)
+  const movementScope = scoped && !runsTrips(req.user)
+    ? (movementValues.push(operationsOf(req.user)), ` WHERE m.related_area = ANY($${movementValues.length}::text[])`)
     : '';
   const movementRwf = `CASE m.currency
       WHEN 'USD' THEN m.cost * COALESCE(NULLIF(m.fx_rwf_per_usd, 0), $1)
@@ -416,9 +425,9 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
   const homeCounts = await pool.query(
     `SELECT
        (SELECT COUNT(*) FROM activities a WHERE ${openWorkSql(workValues, 'a', req.user.id)})::int AS my_open_work,
-       (SELECT COUNT(*) FROM activities a WHERE ${FINAL_CHECK_SQL('a')}${scoped ? ' AND a.sector = $1' : ''})::int AS final_checks,
+       (SELECT COUNT(*) FROM activities a WHERE ${FINAL_CHECK_SQL('a')}${scoped ? ' AND a.sector = ANY($1::text[])' : ''})::int AS final_checks,
        (SELECT COUNT(*) FROM monthly_reports r JOIN monthly_plans p ON p.id = r.plan_id
-         WHERE r.status = 'Submitted' AND p.status <> 'Closed'${scoped ? ' AND p.sector = $1' : ''})::int AS month_end_reports`,
+         WHERE r.status = 'Submitted' AND p.status <> 'Closed'${scoped ? ' AND p.sector = ANY($1::text[])' : ''})::int AS month_end_reports`,
     workValues
   );
 
@@ -426,7 +435,7 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
   const budgetQueue = await pool.query(
     `SELECT COUNT(*)::int AS budget_changes_pending
      FROM activity_budget_requests b JOIN activities a ON a.id = b.activity_id
-     WHERE b.status = 'Pending'${scoped ? ' AND a.sector = $1' : ''}`,
+     WHERE b.status = 'Pending'${scoped ? ' AND a.sector = ANY($1::text[])' : ''}`,
     scopeValues
   );
 
@@ -447,7 +456,7 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
   const planCounts = await pool.query(
     `WITH open_plans AS (
        SELECT p.id, p.status, p.sector FROM monthly_plans p
-        WHERE p.status NOT IN ('Draft', 'Closed')${scoped ? ' AND p.sector = $1' : ''}
+        WHERE p.status NOT IN ('Draft', 'Closed')${scoped ? ' AND p.sector = ANY($1::text[])' : ''}
      ),
      objective_state AS (
        SELECT o.id, o.target_quantity, o.deadline,
@@ -459,7 +468,7 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
        (SELECT COUNT(*) FROM open_plans)::int AS active_plans,
        (SELECT COUNT(*) FROM open_plans WHERE status = 'In Progress')::int AS plans_in_progress,
        (SELECT COUNT(*) FROM open_plans WHERE status = 'Completed')::int AS plans_completed,
-       (SELECT COUNT(*) FROM monthly_plans p WHERE p.status = 'Closed'${scoped ? ' AND p.sector = $1' : ''})::int AS plans_closed,
+       (SELECT COUNT(*) FROM monthly_plans p WHERE p.status = 'Closed'${scoped ? ' AND p.sector = ANY($1::text[])' : ''})::int AS plans_closed,
        (SELECT COUNT(*) FROM objective_state)::int AS objectives,
        (SELECT COUNT(*) FROM objective_state WHERE days = 0)::int AS objectives_not_started,
        (SELECT COUNT(*) FROM objective_state
@@ -473,7 +482,7 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
        -- kind of late work a month can hold.
        (SELECT COUNT(*) FROM activities a
          WHERE a.deadline IS NOT NULL AND a.deadline < CURRENT_DATE
-           AND a.status NOT IN ('Completed', 'Rejected', 'Cancelled', 'Draft')${scoped ? ' AND a.sector = $1' : ''})::int
+           AND a.status NOT IN ('Completed', 'Rejected', 'Cancelled', 'Draft')${scoped ? ' AND a.sector = ANY($1::text[])' : ''})::int
          AS activities_overdue,
        -- The approved ceilings and recorded spend of the open months, so the
        -- dashboard's budget line comes from the plans and not from the legacy
@@ -520,7 +529,7 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
   // Built from the sector list, not from the rows, so a sector with no records
   // still shows up as a zero row rather than vanishing from the comparison.
   const sectorBreakdown = sectors
-    .filter((sector) => !scoped || sector.id === req.user.sector)
+    .filter((sector) => !scoped || operationsOf(req.user).includes(sector.id))
     .map((sector) => {
       const p = projectsFor.get(sector.id) || {};
       const a = activitiesFor.get(sector.id) || {};
@@ -709,14 +718,14 @@ function readProjectPayload(payload, current = null) {
     spent: pick('spent', current?.spent ?? 0),
     category: pick('category', current?.category || 'General')
   };
-  if (!project.sector) return { error: 'A valid business operation is required.' };
+  if (!project.sector) return { error: 'A valid project is required.' };
   if (!requiredText(project.name) || !requiredText(project.location) || !requiredText(project.owner)) {
-    return { error: 'Project name, business operation, location, and owner are required.' };
+    return { error: 'Work package name, project, location, and owner are required.' };
   }
   if (project.name.trim().length > 200 || project.location.trim().length > 200 || project.owner.trim().length > 200) {
-    return { error: 'Project name, location and owner can be at most 200 characters.' };
+    return { error: 'Work package name, location and owner can be at most 200 characters.' };
   }
-  if (!PROJECT_STATUSES.includes(project.status)) return { error: 'Project status is invalid.' };
+  if (!PROJECT_STATUSES.includes(project.status)) return { error: 'Work package status is invalid.' };
   const progress = Number(project.progress === '' ? 0 : project.progress);
   if (!Number.isInteger(progress) || progress < 0 || progress > 100) {
     return { error: 'Progress must be a whole number from 0 to 100.' };
@@ -746,17 +755,18 @@ async function checkProjectManager(rawManagerId, sector) {
   const managerId = parseId(rawManagerId);
   if (!managerId) return { error: 'Selected manager is invalid.' };
   const found = await pool.query(
-    "SELECT id, sector, role, covers_all_sectors AS \"coversAllSectors\" FROM users WHERE id = $1 AND role = 'manager' AND status = 'active'",
+    `SELECT id, sector, role, covers_all_sectors AS "coversAllSectors", ${operationsSql('users')} AS operations
+     FROM users WHERE id = $1 AND role = 'manager' AND status = 'active'`,
     [managerId]
   );
   if (!found.rowCount) return { error: 'Selected manager is invalid.' };
   // A manager covering every operation may manage a project in any of them.
-  if (!withinScope(found.rows[0], sector)) return { error: 'That manager works in a different business operation.' };
+  if (!withinScope(found.rows[0], sector)) return { error: 'That manager works in a different project.' };
   return { managerId };
 }
 
 app.post('/api/projects', authMiddleware, asyncRoute(async (req, res) => {
-  if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the Director can create projects.' });
+  if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the Director can create work packages.' });
   const payload = req.body || {};
   const { project, error } = readProjectPayload(payload);
   if (error) return res.status(400).json({ message: error });
@@ -776,20 +786,20 @@ app.post('/api/projects', authMiddleware, asyncRoute(async (req, res) => {
 app.put('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
   const payload = req.body || {};
   const existingProject = await pool.query('SELECT * FROM projects WHERE id = $1', [req.params.id]);
-  if (!existingProject.rowCount) return res.status(404).json({ message: 'Project not found.' });
+  if (!existingProject.rowCount) return res.status(404).json({ message: 'Work package not found.' });
   const current = existingProject.rows[0];
 
   // Authorize against the sector the project is in now, not the one the caller
   // sent, and refuse to let a manager move a project out of their own sector.
   if (!isAdmin(req.user) && (req.user.role !== 'manager' || !withinScope(req.user, current.sector))) {
-    return res.status(403).json({ message: 'Managers can only update projects in their own business operation.' });
+    return res.status(403).json({ message: 'Managers can only update work packages in their own project.' });
   }
   // Anything left out of the body keeps its current value. Defaulting a missing
   // sector to 'agriculture' silently moved projects the Director edited.
   const { project, error } = readProjectPayload(payload, current);
   if (error) return res.status(400).json({ message: error });
   if (!withinScope(req.user, project.sector)) {
-    return res.status(403).json({ message: 'Managers cannot move a project to another business operation.' });
+    return res.status(403).json({ message: 'Managers cannot move a work package to another project.' });
   }
 
   // Who manages a project is the Director's call, exactly as on PATCH /manager.
@@ -798,7 +808,7 @@ app.put('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
     const manager = await checkProjectManager(payload.managerId, project.sector);
     if (manager.error) return res.status(400).json({ message: manager.error });
     if (manager.managerId !== current.manager_id && !isAdmin(req.user)) {
-      return res.status(403).json({ message: 'Only the Director can assign a project manager.' });
+      return res.status(403).json({ message: 'Only the Director can assign a work package manager.' });
     }
     managerId = manager.managerId;
   } else if (project.sector !== current.sector) {
@@ -819,7 +829,7 @@ app.put('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
 app.patch('/api/projects/:id/manager', authMiddleware, asyncRoute(async (req, res) => {
   if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the Director can assign managers.' });
   const existing = await pool.query('SELECT sector FROM projects WHERE id = $1', [req.params.id]);
-  if (!existing.rowCount) return res.status(404).json({ message: 'Project not found.' });
+  if (!existing.rowCount) return res.status(404).json({ message: 'Work package not found.' });
   const manager = await checkProjectManager(req.body?.managerId, existing.rows[0].sector);
   if (manager.error) return res.status(400).json({ message: manager.error });
 
@@ -828,12 +838,12 @@ app.patch('/api/projects/:id/manager', authMiddleware, asyncRoute(async (req, re
      RETURNING *, (SELECT name FROM users WHERE id = manager_id) AS manager_name`,
     [req.params.id, manager.managerId]
   );
-  if (!result.rowCount) return res.status(404).json({ message: 'Project not found.' });
+  if (!result.rowCount) return res.status(404).json({ message: 'Work package not found.' });
   res.json(mapProject(result.rows[0]));
 }));
 
 app.delete('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
-  if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the Director can delete projects.' });
+  if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the Director can delete work packages.' });
   // Deleting a project cascades to its activities and their evidence rows. The
   // stored files are read first so they are removed too, instead of being left
   // in storage with nothing pointing at them.
@@ -842,9 +852,9 @@ app.delete('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
     [req.params.id]
   );
   const result = await pool.query('DELETE FROM projects WHERE id = $1 RETURNING *', [req.params.id]);
-  if (!result.rowCount) return res.status(404).json({ message: 'Project not found.' });
+  if (!result.rowCount) return res.status(404).json({ message: 'Work package not found.' });
   await Promise.all(files.rows.map((file) => deleteFile('activities', file.stored_name)));
-  res.json({ message: 'Project deleted successfully.', deletedProject: mapProject(result.rows[0]) });
+  res.json({ message: 'Work package deleted successfully.', deletedProject: mapProject(result.rows[0]) });
 }));
 
 app.get('/api/approvals', authMiddleware, asyncRoute(async (req, res) => {
@@ -886,9 +896,9 @@ app.post('/api/approvals', authMiddleware, asyncRoute(async (req, res) => {
     return res.status(403).json({ message: 'Only a manager can make a request for approval.' });
   }
   const sector = validateSector(payload.sector, req.user.sector);
-  if (sector && !withinScope(req.user, sector)) return res.status(403).json({ message: 'Managers can only make requests in their own business operation.' });
+  if (sector && !withinScope(req.user, sector)) return res.status(403).json({ message: 'Managers can only make requests in their own project.' });
   if (!sector || !requiredText(payload.title) || !requiredText(payload.owner)) {
-    return res.status(400).json({ message: 'What is needed, the business operation and the owner are required.' });
+    return res.status(400).json({ message: 'What is needed, the project and the owner are required.' });
   }
   if (!validNumber(payload.amount)) return res.status(400).json({ message: 'Approval amount must be a valid non-negative number.' });
   if (!['Low', 'Medium', 'High'].includes(payload.priority || 'Medium')) return res.status(400).json({ message: 'Approval priority is invalid.' });
@@ -907,7 +917,7 @@ app.post('/api/approvals', authMiddleware, asyncRoute(async (req, res) => {
 
 app.patch('/api/approvals/:id', authMiddleware, asyncRoute(async (req, res) => {
   const payload = req.body || {};
-  const existing = await pool.query(`SELECT * FROM approvals WHERE id = $1${hasFullScope(req.user) ? '' : ' AND sector = $2'}`, hasFullScope(req.user) ? [req.params.id] : [req.params.id, req.user.sector]);
+  const existing = await pool.query(`SELECT * FROM approvals WHERE id = $1${hasFullScope(req.user) ? '' : ' AND sector = ANY($2::text[])'}`, hasFullScope(req.user) ? [req.params.id] : [req.params.id, operationsOf(req.user)]);
   if (!existing.rowCount) return res.status(404).json({ message: 'Approval not found.' });
 
   const current = existing.rows[0];
@@ -955,7 +965,7 @@ app.patch('/api/approvals/:id', authMiddleware, asyncRoute(async (req, res) => {
     return res.status(403).json({ message: 'You cannot approve or reject an approval you requested yourself.' });
   }
   if (!withinScope(req.user, sector)) {
-    return res.status(403).json({ message: 'Managers cannot move a request to another business operation.' });
+    return res.status(403).json({ message: 'Managers cannot move a request to another project.' });
   }
 
   // Reopening a request to Pending clears the previous decision, so a stale

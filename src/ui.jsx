@@ -1,5 +1,6 @@
 import { Component, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { fill, storedLanguage, translate, useT } from './i18n.js';
+import { BUSINESS_OPERATIONS, operationName } from '../shared/businessOperations.js';
 
 // Shared interface pieces every screen uses: the error boundary, the page
 // address, the dialog that replaces the browser's prompt/confirm, the detail
@@ -197,6 +198,45 @@ export function useDialog() {
   const api = useContext(DialogContext);
   if (!api) throw new Error('useDialog must be used inside DialogProvider.');
   return api;
+}
+
+// What an account form sends for a manager who carries every business
+// operation. The API translates it into covers_all_sectors (server/lib/http.js).
+export const ALL_OPERATIONS = 'all';
+
+// The operations ticked, with one toggled, in the catalogue's order.
+// [ALL_OPERATIONS] stands for every operation and is exclusive: ticking it
+// clears the others, ticking an operation clears it. With `keepOne` the last
+// tick cannot be taken away -- for a saved account, which the API refuses to
+// leave with no operation.
+export function toggledOperations(selected, id, keepOne) {
+  if (id === ALL_OPERATIONS) {
+    if (!selected.includes(ALL_OPERATIONS)) return [ALL_OPERATIONS];
+    return keepOne ? selected : [];
+  }
+  const current = selected.filter((item) => item !== ALL_OPERATIONS);
+  if (current.includes(id)) return keepOne && current.length === 1 ? selected : current.filter((item) => item !== id);
+  return BUSINESS_OPERATIONS.map((operation) => operation.id).filter((item) => item === id || current.includes(item));
+}
+
+// One checkbox per business operation, plus "All operations" when `allLabel`
+// is given (managers only). Used for a partner's grants and for the operations
+// a manager runs -- one person can manage Mining and Agriculture at once.
+export function OperationChecks({ selected, language, disabled, label, onChange, allLabel, keepOne = true }) {
+  const locked = (id) => keepOne && selected.length === 1 && selected.includes(id);
+  return <div className="operation-checks" role="group" aria-label={label}>
+    {allLabel && <label className="check-field">
+      <input type="checkbox" checked={selected.includes(ALL_OPERATIONS)} disabled={disabled || locked(ALL_OPERATIONS)}
+        onChange={() => onChange(toggledOperations(selected, ALL_OPERATIONS, keepOne))} />
+      <span>{allLabel}</span>
+    </label>}
+    {BUSINESS_OPERATIONS.map((operation) => <label key={operation.id} className="check-field">
+      <input type="checkbox" checked={selected.includes(operation.id)}
+        disabled={disabled || locked(operation.id)}
+        onChange={() => onChange(toggledOperations(selected, operation.id, keepOne))} />
+      <span>{operationName(operation.id, language)}</span>
+    </label>)}
+  </div>;
 }
 
 // The same minimum the API enforces (server/lib/passwords.js), checked here too

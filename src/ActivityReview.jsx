@@ -3,6 +3,7 @@ import { displayLanguage, fill, translate, useI18n, useT } from './i18n.js';
 import { ExpensePanel } from './ExpensePanel.jsx';
 import { FilePicker, Journey, MoneyBar, NextStep, Section, activityJourney, goToSection } from './journey.jsx';
 import { Fact } from './ui.jsx';
+import { worksIn } from '../shared/businessOperations.js';
 import { formatUsd } from './format.js';
 
 // The Director's review screen for one activity, and the same record as the
@@ -61,7 +62,7 @@ export const MIN_CORRECTION_NOTE = 10;
 const MANAGER_EDITABLE_STATUSES = ['Draft', 'Needs Correction', 'Rejected'];
 export function canManagerEdit(user, activity) {
   if (user.role === 'super-admin' || !MANAGER_EDITABLE_STATUSES.includes(activity.status)) return false;
-  const inArea = Boolean(user.coversAllSectors) || user.sector === activity.sector;
+  const inArea = worksIn(user, activity.sector);
   return inArea && (Number(activity.createdBy) === Number(user.id)
     || (activity.status === 'Needs Correction' && Number(activity.assignedTo) === Number(user.id)));
 }
@@ -257,7 +258,7 @@ export function ActivityReview({
   // already on the record stays listed even if their area has since changed, so
   // the cell is never blank.
   const managerOptions = useMemo(() => {
-    const sameArea = managers.filter((manager) => manager.coversAllSectors || manager.sector === activity.sector);
+    const sameArea = managers.filter((manager) => worksIn(manager, activity.sector));
     if (activity.assignedTo && !sameArea.some((manager) => manager.id === activity.assignedTo)) {
       return [{ id: activity.assignedTo, name: activity.assignedToName || `User #${activity.assignedTo}` }, ...sameArea];
     }
@@ -280,7 +281,7 @@ export function ActivityReview({
   // Mirrors withinScope in server/lib/http.js: a manager marked as covering every
   // business operation is inside every area, and so has no single `sector` to
   // compare against.
-  const inMyArea = Boolean(user.coversAllSectors) || user.sector === activity.sector;
+  const inMyArea = worksIn(user, activity.sector);
   const carriesIt = inMyArea
     && (activity.assignedTo === null ? user.role === 'manager' : activity.assignedTo === user.id);
   const canAttach = monthOpen && (isDirector
@@ -803,7 +804,7 @@ function BudgetRequestPanel({ activity, requests, user, isDirector, monthOpen, b
   const [form, setForm] = useState({ amount: '', reason: '' });
   const pending = requests.find((request) => request.status === 'Pending');
   const mayAsk = Boolean(onRequest) && monthOpen && !isDirector && user.role === 'manager'
-    && (Boolean(user.coversAllSectors) || user.sector === activity.sector)
+    && worksIn(user, activity.sector)
     && BUDGET_CHANGEABLE_STATUSES.includes(activity.status) && !pending;
   const typed = Number(form.amount);
   const valid = form.amount !== '' && Number.isFinite(typed) && typed >= 0

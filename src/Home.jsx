@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { BUSINESS_OPERATIONS, operationName } from '../shared/businessOperations.js';
+import { BUSINESS_OPERATIONS, operationName, operationsOf, worksIn } from '../shared/businessOperations.js';
 import { fill, useI18n } from './i18n.js';
 import { MoneyBar, activityJourney, journeyLabel, journeyTone, nextAction } from './journey.jsx';
 import { todayLocal } from './format.js';
@@ -193,16 +193,20 @@ export default function Home({
     : [];
 
   // The operations this account covers: all four for the Director or an
-  // all-operations manager, otherwise the one they work in.
-  const operations = BUSINESS_OPERATIONS.filter((operation) => isDirector || user.coversAllSectors || operation.id === user.sector);
+  // all-operations manager, otherwise each one they work in -- a manager may
+  // run Mining and Agriculture at once.
+  const operations = BUSINESS_OPERATIONS.filter((operation) => isDirector || worksIn(user, operation.id));
   const rowFor = (id) => (sectorRows || []).find((row) => row.id === id) || {};
   const planFor = (id) => (plans || []).find((plan) => plan.operation === id);
-  // The manager's own month, taken from the review payload that is already
+  // The manager's own months, taken from the review payload that is already
   // loaded -- it carries each plan's objectives and overall figure, so the
-  // manager's dashboard costs no extra request.
-  const myMonth = isManager
-    ? (plans || []).find((plan) => plan.operation === user.sector || user.coversAllSectors)
-    : null;
+  // manager's dashboard costs no extra request. One per operation they run,
+  // and only the months they may work (canWorkPlan: nobody named on it, or
+  // them), so a second operation's month is not hidden behind the first.
+  const myMonths = isManager
+    ? (plans || []).filter((plan) => worksIn(user, plan.operation)
+      && (plan.managerId === null || plan.managerId === undefined || Number(plan.managerId) === Number(user.id)))
+    : [];
 
   // A team member's page: their name for it, how much there is, and the list.
   if (isWorker) {
@@ -211,7 +215,7 @@ export default function Home({
       <section className="home-hello">
         <div>
           <h2>{t('nav.myWork')}</h2>
-          <p>{operationName(user.sector, language)} · {todayLabel(language)}</p>
+          <p>{operationsOf(user).map((id) => operationName(id, language)).join(' · ')} · {todayLabel(language)}</p>
         </div>
       </section>
 
@@ -239,7 +243,7 @@ export default function Home({
   return <div className="home">
     <section className="home-hello">
       <div>
-        <h2>{isDirector || user.coversAllSectors ? t('user.allOperations') : operationName(user.sector, language)}</h2>
+        <h2>{isDirector || user.coversAllSectors ? t('user.allOperations') : operationsOf(user).map((id) => operationName(id, language)).join(' · ')}</h2>
         <p>{todayLabel(language)}</p>
       </div>
       {/* The Director's five doors (section 1 of the brief), in the words of
@@ -284,7 +288,7 @@ export default function Home({
 
         The Director does not get this block: they monitor the four operations
         further down the page and do not record work at all. */}
-    {isManager && myMonth && myMonth.objectives?.length > 0 && (() => {
+    {isManager && myMonths.filter((myMonth) => myMonth.objectives?.length > 0).map((myMonth) => {
       const states = myMonth.objectives.map((objective) => objectiveState(objective));
       const done = states.filter((state) => state === 'done').length;
       const active = states.filter((state) => state === 'inProgress' || state === 'overdue').length;
@@ -293,9 +297,11 @@ export default function Home({
       const allDone = done === states.length;
       const submitted = myMonth.report?.status === 'Submitted';
       const closed = myMonth.status === 'Closed';
-      return <section className="my-month">
+      return <section className="my-month" key={myMonth.id}>
         <div className="my-month-head">
           <div>
+            {/* Which operation, once there is more than one card to tell apart. */}
+            {myMonths.length > 1 && <span className="eyebrow">{operationName(myMonth.operation, language)}</span>}
             <h3>{fill(t('home.myPlanTitle'), { month: monthLabel(month, language) })}</h3>
             <small>{fill(t('home.objectiveCounts'), { total: states.length, done, active, left })}</small>
           </div>
@@ -342,7 +348,7 @@ export default function Home({
             {allDone || myMonth.status === 'Completed' ? t('home.actionSubmit') : t('home.recordTodaysWork')}
           </button>)}
       </section>;
-    })()}
+    })}
 
     {/* The Director's "needs your attention" (section 11): every line a link. */}
     {isDirector && <>

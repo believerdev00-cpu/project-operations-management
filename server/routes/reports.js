@@ -22,7 +22,7 @@ import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 import { pool } from '../db/database.js';
 import { sectors } from '../data/seedData.js';
-import { asyncRoute, hasFullScope, isAdmin, managerScope, projectScope, sectorIds, withinScope } from '../lib/http.js';
+import { asyncRoute, hasFullScope, isAdmin, managerScope, operationsOf, projectScope, sectorIds, withinScope } from '../lib/http.js';
 import { getCurrentRate, round2 } from '../lib/rates.js';
 // Progress and the month's budget are read through the monthly module's own
 // definitions rather than worked out again here: objectiveProgress and
@@ -76,6 +76,14 @@ function logoPath() {
 }
 
 const SECTOR_NAMES = new Map(sectors.map((sector) => [sector.id, sector.name]));
+
+// What a file is a report ON: the one operation, every operation the reader
+// covers when that is several, or all of them.
+function scopeHeading(scope, operation, t) {
+  if (scope.sector) return operation(scope.sector);
+  if (scope.sectors?.length) return scope.sectors.map(operation).join(' · ');
+  return t('report.allOperations');
+}
 
 export function sectorName(id) {
   return SECTOR_NAMES.get(id) || id || 'Unassigned area';
@@ -472,9 +480,13 @@ export async function buildReport(user, period, choice = null) {
       // the spreadsheet and the PDF all read this one field, so a file for
       // Mining alone cannot be headed "All operations" -- which is the whole
       // point of being able to ask for one operation.
-      sector: choice?.operation ?? (hasFullScope(user) ? null : user.sector),
+      sector: choice?.operation ?? (hasFullScope(user) || operationsOf(user).length !== 1 ? null : operationsOf(user)[0]),
+      // A manager running several operations is covered by all of them, not by
+      // the first: `sector` stays null (one heading cannot name two) and this
+      // list is what the heading reads instead of "All operations".
+      sectors: choice?.operation ? [choice.operation] : (hasFullScope(user) ? [] : operationsOf(user)),
       sectorName: choice?.operationName
-        ?? (hasFullScope(user) ? 'All operations' : sectorName(user.sector)),
+        ?? (hasFullScope(user) ? 'All operations' : operationsOf(user).map(sectorName).join(', ')),
       projectId: choice?.projectId ?? null,
       projectName: choice?.projectName ?? null,
       // Whether the reader narrowed it themselves, so the screen can say "all
@@ -947,7 +959,7 @@ async function buildWorkbook(report, language = 'en') {
   // number: adding the logo first pushes everything down by one, and
   // getRow(1).font then bolded an empty row and left the title plain -- which
   // is exactly what the old workbook did.
-  const heading = report.scope.sector ? operation(report.scope.sector) : t('report.allOperations');
+  const heading = scopeHeading(report.scope, operation, t);
   const titleRow = summary.addRow([`${heading} — ${periodInWords(report.period, language)}`]);
   titleRow.font = { bold: true, size: 14 };
   summary.addRow([t('export.datesCovered'),
@@ -1306,7 +1318,7 @@ function writePdf(report, stream, language = 'en') {
   // The title says what this is a report ON, not the word "Activity report"
   // over a page with no activities in it.
   doc.fillColor(INK).fontSize(16).font('Helvetica-Bold')
-    .text(report.scope.sector ? operation(report.scope.sector) : t('report.allOperations'),
+    .text(scopeHeading(report.scope, operation, t),
       headerX, headerTop, { width: width - (headerX - left) });
   doc.fontSize(10.5).font('Helvetica').fillColor(QUIET)
     .text(periodInWords(report.period, language), { width: width - (headerX - left) });

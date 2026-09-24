@@ -9,7 +9,7 @@ import {
   validNumber, sectorIds
 } from '../lib/http.js';
 import { MOVEMENT_STATUSES } from '../db/movementSchema.js';
-import { TRIPS_OPERATION } from '../../shared/businessOperations.js';
+import { TRIPS_OPERATION, operationsOf, runsTrips, worksIn } from '../../shared/businessOperations.js';
 import { canApprove, decisionOpen, pendingForMeSql, resolveDirector, APPROVER_ROLE_LABELS } from '../lib/approvals.js';
 import { CURRENCIES, convertAmount, getCurrentRate, round2 } from '../lib/rates.js';
 
@@ -88,7 +88,7 @@ function canCreate(user) {
   // all-operations manager covers it like any other. A team member in the
   // operation follows its trips but does not raise one: that would put a
   // funding request in the Director's queue, which only managers do.
-  return hasFullScope(user) || (user.role === 'manager' && user.sector === TRIPS_OPERATION);
+  return hasFullScope(user) || runsTrips(user);
 }
 
 // Section 7 keeps approval, funds and final expenditure with the Director.
@@ -255,9 +255,10 @@ function visibilityScope(user, values) {
   // Whoever carries the work still sees their own records through the
   // assigned/created checks on each route; this is only the broad listing.
   if (hasFullScope(user)) return '';
-  if (user.sector === TRIPS_OPERATION && user.role === 'manager') return '';
-  values.push(user.sector);
-  return `m.related_area = $${values.length}`;
+  if (runsTrips(user)) return '';
+  // Every operation the account works in: a manager may run several.
+  values.push(operationsOf(user));
+  return `m.related_area = ANY($${values.length}::text[])`;
 }
 
 // Accepts a plain calendar date, and tolerates a full ISO timestamp so a record
@@ -404,7 +405,7 @@ function canEdit(user, row) {
   if (isAdmin(user)) return true;
   // A movement officer may correct their own request only while it is still
   // theirs to change; once it is with its approver it is read-only to them.
-  return (hasFullScope(user) || user.sector === TRIPS_OPERATION)
+  return (hasFullScope(user) || worksIn(user, TRIPS_OPERATION))
     && row.created_by === user.id
     && ['Draft', 'Pending Approval'].includes(row.status);
 }
@@ -1187,7 +1188,7 @@ router.get('/:id/evidence', asyncRoute(async (req, res) => {
 // memory, so a refused caller never gets the server to buffer 100 MB first.
 const authorizeEvidenceUpload = asyncRoute(async (req, res, next) => {
   const existing = await loadMovement(req.params.id, req.user);
-  if (!isAdmin(req.user) && !((hasFullScope(req.user) || req.user.sector === TRIPS_OPERATION) && existing.created_by === req.user.id)) {
+  if (!isAdmin(req.user) && !((hasFullScope(req.user) || worksIn(req.user, TRIPS_OPERATION)) && existing.created_by === req.user.id)) {
     return res.status(403).json({ message: 'You cannot attach evidence to this movement.' });
   }
   req.movement = existing;
