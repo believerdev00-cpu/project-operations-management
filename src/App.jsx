@@ -845,6 +845,10 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const [reportQueryUsed, setReportQueryUsed] = useState('');
   const [reportMode, setReportMode] = useState('weekly');
   const [reportRange, setReportRange] = useState(defaultReportRange);
+  // Which slice of the register the report covers. 'All' is everything the
+  // reader may see, which is what a report always used to be.
+  const [reportOperation, setReportOperation] = useState('All');
+  const [reportProject, setReportProject] = useState('All');
   const [reportBusy, setReportBusy] = useState(false);
 
   // ---- navigation -------------------------------------------------------------
@@ -1754,10 +1758,15 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // ---- reports -------------------------------------------------------------
 
   const reportQuery = (mode = reportMode, range = reportRange) => {
-    if (mode === 'monthly') return `period=monthly&month=${encodeURIComponent(range.month)}`;
-    if (mode === 'custom') return `period=custom&start=${encodeURIComponent(range.start)}&end=${encodeURIComponent(range.end)}`;
-    // Any day inside the week; the API widens it to Monday-Sunday.
-    return `period=weekly&start=${encodeURIComponent(range.week)}`;
+    const period = mode === 'monthly' ? `period=monthly&month=${encodeURIComponent(range.month)}`
+      : mode === 'custom' ? `period=custom&start=${encodeURIComponent(range.start)}&end=${encodeURIComponent(range.end)}`
+        // Any day inside the week; the API widens it to Monday-Sunday.
+        : `period=weekly&start=${encodeURIComponent(range.week)}`;
+    // Left out entirely when nothing was narrowed, so the request is the one
+    // the API has always answered.
+    const operation = reportOperation !== 'All' ? `&operation=${encodeURIComponent(reportOperation)}` : '';
+    const project = reportProject !== 'All' ? `&project=${encodeURIComponent(reportProject)}` : '';
+    return `${period}${operation}${project}`;
   };
 
   const requestReport = async () => {
@@ -1783,9 +1792,15 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     setError('');
     setReportBusy(true);
     try {
+      // Named after what is in it, matching the name the server sets, so three
+      // operations' reports do not land in the downloads folder as three files
+      // that differ only by the moment they were saved.
+      const slug = (text) => String(text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+      const subject = report.scope?.projectName ? `${slug(report.scope.projectName)}-`
+        : report.scope?.sector ? `${slug(report.scope.sector)}-` : '';
       await download(
         `/api/reports/activities/export?format=${format}&${reportQueryUsed}`,
-        `activity-report-${report.period.start}-to-${report.period.end}.${format}`
+        `activity-report-${subject}${report.period.start}-to-${report.period.end}.${format}`
       );
       notify(fill(t('msg.reportDownloaded'), { format: format === 'xlsx' ? 'Excel' : 'PDF' }));
     } catch (exportError) {
@@ -2060,6 +2075,19 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         report={report}
         busy={reportBusy}
         sectorLabel={sectorName}
+        operation={reportOperation}
+        project={reportProject}
+        operationOptions={sectorOptions}
+        // Only the chosen operation's projects, so the two pickers cannot be
+        // set to a combination the server would refuse.
+        projectOptions={projects.filter((item) => reportOperation === 'All' || item.sector === reportOperation)}
+        onOperationChange={(next) => {
+          setReportOperation(next);
+          // A project of the operation being left is no longer a valid choice.
+          setReportProject('All');
+          setReport(null);
+        }}
+        onProjectChange={(next) => { setReportProject(next); setReport(null); }}
         onModeChange={(next) => { setReportMode(next); setReport(null); }}
         // A report is a reading of one period. Once the range moves it no
         // longer describes what the pickers show, so it is cleared.
@@ -2604,9 +2632,15 @@ function ApprovalForm({ form, setForm, sectorOptions, busy, onSubmit }) {
 // Every number below is computed on the server from the activity register, and
 // the PDF and Excel exports run the very same scoped query, so what a manager
 // downloads is exactly what a manager can see.
-function ReportsSection({ mode, range, report, busy, sectorLabel, onModeChange, onRangeChange, onGenerate, onExport, onPrint, onClose }) {
+function ReportsSection({
+  mode, range, report, busy, sectorLabel, operation, project, operationOptions, projectOptions,
+  onOperationChange, onProjectChange, onModeChange, onRangeChange, onGenerate, onExport, onPrint, onClose
+}) {
   const t = useT();
   const ready = mode !== 'custom' || (range.start && range.end && range.start <= range.end);
+  // One operation to choose from is not a choice: a manager covers one area and
+  // the picker would only ever show them their own.
+  const canChooseOperation = (operationOptions || []).length > 1;
 
   return <section className="report-area report-print-area">
     <div className="panel-header">
@@ -2626,6 +2660,21 @@ function ReportsSection({ mode, range, report, busy, sectorLabel, onModeChange, 
     </div>
 
     <div className="report-picker report-controls">
+      {/* WHAT the report covers, before WHEN. A report used to be every
+          operation at once, so reading one business operation on its own meant
+          exporting the lot and deleting rows in a spreadsheet. */}
+      {canChooseOperation && <Field label={t('report.operation')}>
+        <select value={operation} onChange={(event) => onOperationChange(event.target.value)}>
+          <option value="All">{t('report.allOperations')}</option>
+          {operationOptions.map((item) => <option key={item.id} value={item.id}>{sectorLabel(item.id)}</option>)}
+        </select>
+      </Field>}
+      {(projectOptions || []).length > 0 && <Field label={t('report.project')}>
+        <select value={project} onChange={(event) => onProjectChange(event.target.value)}>
+          <option value="All">{t('report.allProjects')}</option>
+          {projectOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+        </select>
+      </Field>}
       {mode === 'weekly' && <Field label={t('report.anyDayInWeek')}>
         <input type="date" value={range.week} onChange={(event) => onRangeChange({ week: event.target.value })} />
       </Field>}
@@ -2668,6 +2717,7 @@ function ReportBody({ report, busy, sectorLabel, onExport, onPrint, onClose }) {
         <strong>{report.period.label}</strong>
         <span>
           {formatDate(report.period.start)} {t('report.to')} {formatDate(report.period.end)} &middot; {sectorName(report.scope.sector) || report.scope.sectorName}
+          {report.scope.projectName && <> &middot; {report.scope.projectName}</>}
           {' '}&middot; {t('report.generated')} {new Date(report.generatedAt).toLocaleString(displayLanguage())}
         </span>
       </div>

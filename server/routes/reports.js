@@ -22,7 +22,7 @@ import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 import { pool } from '../db/database.js';
 import { sectors } from '../data/seedData.js';
-import { asyncRoute, hasFullScope, isAdmin, managerScope, projectScope } from '../lib/http.js';
+import { asyncRoute, hasFullScope, isAdmin, managerScope, projectScope, sectorIds, withinScope } from '../lib/http.js';
 import { getCurrentRate, round2 } from '../lib/rates.js';
 
 const router = express.Router();
@@ -185,6 +185,69 @@ export function resolvePeriod(query = {}) {
   throw new ReportError(400, 'The period must be weekly, monthly or custom.');
 }
 
+// WHICH SLICE OF THE REGISTER THE REPORT COVERS.
+//
+// The period used to be the only question a report could ask, so the Director
+// could read all four operations together and nothing else: "how did Mining do
+// in August" meant exporting everything and deleting rows in Excel. An
+// operation and a project narrow it. Both are optional, and leaving them out
+// gives exactly the report that was produced before.
+//
+// Validated here rather than simply ANDed onto the query, because a manager who
+// asked for somebody else's operation would otherwise get an empty report --
+// which reads as a quiet month rather than as a refusal, and that is the kind
+// of silence somebody eventually makes a decision on.
+export async function resolveFilters(user, query = {}) {
+  const wanted = String(query.operation || '').trim();
+  const wantedProject = String(query.project || '').trim();
+  const choice = { operation: null, operationName: null, projectId: null, projectName: null };
+
+  if (wanted && wanted !== 'All') {
+    if (!sectorIds.has(wanted)) throw new ReportError(400, 'That business operation does not exist.');
+    if (!withinScope(user, wanted)) {
+      throw new ReportError(403, 'That business operation is not yours to report on.');
+    }
+    choice.operation = wanted;
+    choice.operationName = sectorName(wanted);
+  }
+
+  if (wantedProject && wantedProject !== 'All') {
+    const found = await pool.query('SELECT id, name, sector FROM projects WHERE id = $1', [wantedProject]);
+    if (!found.rowCount) throw new ReportError(400, 'That project does not exist.');
+    const project = found.rows[0];
+    // Authorised against the operation the project is in NOW, not the one the
+    // caller named, exactly as everywhere else that takes an id from a query.
+    if (!withinScope(user, project.sector)) {
+      throw new ReportError(403, 'That project is not yours to report on.');
+    }
+    if (choice.operation && project.sector !== choice.operation) {
+      throw new ReportError(400, 'That project belongs to a different business operation.');
+    }
+    choice.projectId = project.id;
+    choice.projectName = project.name;
+    // A project names its own operation, so a report asked for by project alone
+    // still says which operation it covers.
+    choice.operation = project.sector;
+    choice.operationName = sectorName(project.sector);
+  }
+
+  return choice;
+}
+
+// The filters as SQL, appended to whatever scoping the caller has already
+// applied. They narrow; they never widen -- managerScope and projectScope have
+// already been pushed, so a manager cannot reach past their own area by asking.
+function applyChoice(choice, columns, values, filters) {
+  if (choice?.operation && columns.sector) {
+    values.push(choice.operation);
+    filters.push(`${columns.sector} = $${values.length}`);
+  }
+  if (choice?.projectId && columns.project) {
+    values.push(choice.projectId);
+    filters.push(`${columns.project} = $${values.length}`);
+  }
+}
+
 // ---- gathering ------------------------------------------------------------
 
 // An activity belongs to the period in which the work was put on somebody's
@@ -237,7 +300,7 @@ function isOverdue(row, today) {
   return Boolean(deadline) && deadline < today && !CLOSED_STATUSES.includes(row.status);
 }
 
-export async function buildReport(user, period) {
+export async function buildReport(user, period, choice = null) {
   const values = [period.start, period.end];
   const filters = [`${PERIOD_DAY} BETWEEN $1::date AND $2::date`];
   // A manager reads their own working area and nothing else, exactly as
@@ -246,6 +309,8 @@ export async function buildReport(user, period) {
   // A report covers what the reader is responsible for, which for a project
   // manager is their project.
   projectScope(user, 'a.project_id', values, filters);
+  // And then whatever the reader asked for on top of that.
+  applyChoice(choice, { sector: 'a.sector', project: 'a.project_id' }, values, filters);
 
   const rows = (await pool.query(
     `${SELECT_ROWS} WHERE ${filters.join(' AND ')} ORDER BY ${PERIOD_DAY} DESC, a.id`,
@@ -411,8 +476,19 @@ export async function buildReport(user, period) {
       // header claims about who produced it. The sector labels below describe
       // coverage, so an all-operations manager reads as all working areas.
       isDirector: isAdmin(user),
-      sector: hasFullScope(user) ? null : user.sector,
-      sectorName: hasFullScope(user) ? 'All working areas' : sectorName(user.sector),
+      // What the report actually covers, which is the asked-for operation when
+      // one was asked for and the reader's own coverage otherwise. The header,
+      // the spreadsheet and the PDF all read this one field, so a file for
+      // Mining alone cannot be headed "All working areas" -- which is the whole
+      // point of being able to ask for one operation.
+      sector: choice?.operation ?? (hasFullScope(user) ? null : user.sector),
+      sectorName: choice?.operationName
+        ?? (hasFullScope(user) ? 'All working areas' : sectorName(user.sector)),
+      projectId: choice?.projectId ?? null,
+      projectName: choice?.projectName ?? null,
+      // Whether the reader narrowed it themselves, so the screen can say "all
+      // operations" without claiming the reader chose that.
+      filtered: Boolean(choice?.operation || choice?.projectId),
       viewer: user.name
     },
     basis: 'Activities are counted in the period they were assigned or raised.',
@@ -428,7 +504,7 @@ export async function buildReport(user, period) {
     // watched their manager record five days against them exported a report
     // that said "No activities fall in this period" -- true of the register,
     // and completely wrong about the month.
-    monthlyWork: await buildMonthlyWork(user, period)
+    monthlyWork: await buildMonthlyWork(user, period, choice)
   };
 }
 
@@ -440,10 +516,13 @@ export async function buildReport(user, period) {
 // deliberately its lifetime figure, not the period's -- "40 of 500 tonnes" is
 // the number anybody reading a weekly report actually wants, and a percentage
 // of one week against a monthly target would be meaningless.
-async function buildMonthlyWork(user, period) {
+async function buildMonthlyWork(user, period, choice = null) {
   const values = [period.start, period.end];
   const filters = ['r.report_date BETWEEN $1::date AND $2::date'];
   managerScope(user, 'p.sector', values, filters);
+  // Narrowed the same way as the activity half, or a report asked for Mining
+  // would list Mining's activities above every operation's recorded days.
+  applyChoice(choice, { sector: 'p.sector', project: 'p.project_id' }, values, filters);
 
   const days = (await pool.query(
     `SELECT r.id, r.report_date, r.quantity_done, r.cost, r.notes, r.submitted_by_name,
@@ -545,7 +624,8 @@ router.use((req, res, next) => {
 // the filter is the same managerScope the register itself uses.
 router.get('/activities', asyncRoute(async (req, res) => {
   const period = resolvePeriod(req.query);
-  res.json(await buildReport(req.user, period));
+  const choice = await resolveFilters(req.user, req.query);
+  res.json(await buildReport(req.user, period, choice));
 }));
 
 // The same report, same scope, same query -- only the container differs. The
@@ -557,8 +637,15 @@ router.get('/activities/export', asyncRoute(async (req, res) => {
     return res.status(400).json({ message: 'The export format must be xlsx or pdf.' });
   }
   const period = resolvePeriod(req.query);
-  const report = await buildReport(req.user, period);
-  const stem = `activity-report-${period.start}-to-${period.end}`;
+  const choice = await resolveFilters(req.user, req.query);
+  const report = await buildReport(req.user, period, choice);
+  // The file says what is in it. Three downloads of "activity-report-<dates>"
+  // for three different operations are indistinguishable in a downloads folder,
+  // which is where these files are read from.
+  const slug = (text) => String(text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+  const subject = choice.projectName ? slug(choice.projectName)
+    : choice.operation ? slug(choice.operation) : null;
+  const stem = `activity-report-${subject ? `${subject}-` : ''}${period.start}-to-${period.end}`;
 
   if (format === 'xlsx') {
     const workbook = await buildWorkbook(report);
@@ -616,6 +703,7 @@ async function buildWorkbook(report) {
   summary.addRow(['Activity report', report.period.label]);
   summary.addRow(['Period', `${report.period.start} to ${report.period.end}`]);
   summary.addRow(['Working area', report.scope.sectorName]);
+  if (report.scope.projectName) summary.addRow(['Project', report.scope.projectName]);
   summary.addRow(['Generated', new Date(report.generatedAt).toLocaleString()]);
   summary.addRow([]);
   summary.addRow(['ACTIVITY SUMMARY']);
@@ -830,7 +918,8 @@ function writePdf(report, stream) {
   doc.moveDown(0.2);
   doc.fontSize(10).font('Helvetica')
     .text(`${report.period.label}  (${report.period.start} to ${report.period.end})`)
-    .text(`Working area: ${report.scope.sectorName}    Generated: ${new Date(report.generatedAt).toLocaleString()}`)
+    .text(`Working area: ${report.scope.sectorName}${report.scope.projectName ? `    Project: ${report.scope.projectName}` : ''}`
+      + `    Generated: ${new Date(report.generatedAt).toLocaleString()}`)
     .text(report.basis);
   // Clear the logo even when the text block is shorter than it, so the first
   // section never overlaps the mark.
