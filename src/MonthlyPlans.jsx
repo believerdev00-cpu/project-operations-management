@@ -3,8 +3,11 @@ import { BUSINESS_OPERATIONS, PRIMARY_OPERATIONS, isSupportOperation, operationN
 import { OTHER_CATEGORY, categoriesForOperation } from '../shared/categories.js';
 import { displayLanguage, fill, useI18n } from './i18n.js';
 import { EvidenceList, EvidenceUpload, categoryLabel, trailActionLabel } from './ActivityReview.jsx';
-import { DetailView, useBusy, useDialog } from './ui.jsx';
+import { DetailView, Fact, useBusy, useDialog } from './ui.jsx';
+import { formatDate, formatUsd, todayLocal } from './format.js';
+import { ExpensePanel } from './ExpensePanel.jsx';
 import { FilePicker, activityJourney, formatLocal, journeyLabel, journeyTone, nextAction } from './journey.jsx';
+import { objectiveState, objectiveStateTone } from './Home.jsx';
 
 // Monthly planning, allocation and month-end review.
 //
@@ -17,7 +20,7 @@ import { FilePicker, activityJourney, formatLocal, journeyLabel, journeyTone, ne
 // approved; the cash is handed over outside the platform. There is no transfer,
 // wallet, transaction or gateway in this file, and the screen says so.
 
-const PAYMENT_METHODS = ['Cash', 'Bank Transfer', 'Mobile Money', 'Cheque', 'Credit', 'Other'];
+
 const PRIORITIES = ['High', 'Medium', 'Low'];
 const UNIT_SUGGESTIONS = [
   'hectares', 'acres', 'square metres', 'kilograms', 'tonnes', 'bags', 'litres',
@@ -27,7 +30,7 @@ const UNIT_SUGGESTIONS = [
 // A month starts empty: the Director names the operation and the manager, states
 // the budget they are approving, and says what the month is for.
 // A blank commitment line in the Director's plan form.
-const emptyObjective = { title: '', targetQuantity: '', targetUnit: '', supportsOperation: '' };
+const emptyObjective = { title: '', targetQuantity: '', targetUnit: '', supportsOperation: '', deadline: '' };
 
 // The month as the Director types it.
 //
@@ -48,12 +51,6 @@ const emptyWork = {
   evidenceRequired: true, notes: ''
 };
 
-export function formatUsd(value) {
-  const amount = Number(value || 0);
-  const digits = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Math.abs(amount));
-  return `${amount < 0 ? '-' : ''}$${digits}`;
-}
-
 function monthEnd(month) {
   const [year, index] = String(month || '').split('-').map(Number);
   if (!year || !index) return undefined;
@@ -61,13 +58,6 @@ function monthEnd(month) {
   // 12 to the constructor rolls into January correctly.
   const last = new Date(year, index, 0).getDate();
   return `${month}-${String(last).padStart(2, '0')}`;
-}
-
-function formatDate(value, language) {
-  if (!value) return '—';
-  const [year, month, day] = String(value).slice(0, 10).split('-').map(Number);
-  if (!year || !month || !day) return '—';
-  return new Date(year, month - 1, day).toLocaleDateString(language);
 }
 
 // The day a person has to turn up and do the work, written so it cannot be read
@@ -88,11 +78,6 @@ function thisMonth() {
 
 // Today as the calendar sees it here. toISOString() converts to UTC first, so
 // between midnight and 02:00 in Kigali it handed back yesterday's date.
-function todayLocal() {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-}
-
 function monthLabel(month, language) {
   const [year, index] = String(month).split('-').map(Number);
   if (!year || !index) return month;
@@ -293,7 +278,9 @@ export default function MonthlyPlans({
                 targetQuantity: row.targetQuantity === '' || row.targetQuantity === null
                   || row.targetQuantity === undefined ? null : Number(row.targetQuantity),
                 targetUnit: String(row.targetUnit ?? '').trim(),
-                supportsOperation: row.supportsOperation || null
+                supportsOperation: row.supportsOperation || null,
+                // When it is due. Blank means the end of the month.
+                deadline: row.deadline || null
               })),
             // The budget the Director approves for the month. Everything the
             // manager does afterwards has to fit inside it.
@@ -489,6 +476,26 @@ export default function MonthlyPlans({
     } catch (reopenError) { onError(reopenError.message); }
   });
 
+  // The manager cannot edit the Director's targets, but can say on the record
+  // that one needs changing. The request lands in the plan's history and the
+  // Director is told; nothing on the plan changes until the Director changes it.
+  const requestChange = (plan) => run(async () => {
+    const message = await dialog.prompt({
+      title: t('plan.requestChange'),
+      message: t('plan.requestChangePrompt'),
+      label: t('plan.requestChangeLabel'),
+      required: true,
+      multiline: true,
+      confirmLabel: t('plan.requestChange')
+    });
+    if (message === null) return;
+    try {
+      await fetchJson(`/api/monthly-plans/${plan.id}/change-request`, { method: 'POST', body: JSON.stringify({ message }) });
+      onMessage(t('msg.changeRequested'));
+      await refresh();
+    } catch (requestError) { onError(requestError.message); }
+  });
+
   const decideReport = (plan, status) => run(async () => {
     const returning = status === 'Returned';
     const note = await dialog.prompt({
@@ -563,8 +570,8 @@ export default function MonthlyPlans({
     <section className="context-strip">
       <div>
         <span className="eyebrow">{t('monthly.eyebrow')}</span>
-        <h2>{isDirector ? t('monthly.title') : t('monthly.myActivities')}</h2>
-        <p>{t('monthly.blurb')}</p>
+        <h2>{isDirector ? t('monthly.title') : t('monthly.myPlan')}</h2>
+        <p>{isDirector ? t('monthly.blurb') : t('monthly.myPlanBlurb')}</p>
       </div>
       <label className="form-field month-picker"><span>{t('monthly.month')}</span>
         <input type="month" value={month} onChange={(event) => changeMonth(event.target.value)} />
@@ -666,6 +673,7 @@ export default function MonthlyPlans({
         <ObjectiveEditor
           operation={chosenOperation}
           language={language}
+          month={month}
           objectives={newPlan.objectives}
           onChange={(objectives) => setNewPlan({ ...newPlan, objectives })}
           t={t}
@@ -764,6 +772,7 @@ export default function MonthlyPlans({
         onUpdatePlan={updatePlan}
         offPlanActivities={offPlan}
         onDecideReport={decideReport}
+        onRequestChange={requestChange}
         onClose={() => onClosePlan?.()}
       />
     </DetailView>}
@@ -785,7 +794,7 @@ export default function MonthlyPlans({
 // monthly page down behind the error boundary rather than degrading. That is
 // exactly what happened when the operation picker replaced the form state and
 // dropped `objectives`.
-function ObjectiveEditor({ objectives, onChange, t, operation, language }) {
+function ObjectiveEditor({ objectives, onChange, t, operation, language, month }) {
   const rows = Array.isArray(objectives) && objectives.length ? objectives : [{ ...emptyObjective }];
   // Whether a line carries anything yet. Written once so the "is it filled?"
   // test cannot drift between the numbering and the grow-a-new-line rule.
@@ -829,6 +838,15 @@ function ObjectiveEditor({ objectives, onChange, t, operation, language }) {
           value={row.targetUnit ?? ''}
           onChange={(event) => update(index, { targetUnit: event.target.value })} />
         <datalist id="plan-units">{UNIT_SUGGESTIONS.map((unit) => <option key={unit} value={unit} />)}</datalist>
+      </label>
+      {/* When it is due. Optional: blank means the end of the month, which is
+          what every objective meant before this field existed. Held inside the
+          month so a deadline cannot fall outside the plan it belongs to. */}
+      <label className="form-field objective-deadline"><span>{t('plan.deadline')}</span>
+        <input type="date" value={row.deadline ?? ''}
+          min={month ? `${month}-01` : undefined} max={month ? monthEnd(month) : undefined}
+          onChange={(event) => update(index, { deadline: event.target.value })} />
+        <small className="field-hint">{t('plan.deadlineHint')}</small>
       </label>
       {/* Movement & Facilitation coordinates FOR the three primary operations,
           so each of its objectives says which one it serves: "50 transport
@@ -932,7 +950,8 @@ function planTrailValue(field, value, t) {
 }
 
 function planTone(status) {
-  if (status === 'Confirmed') return 'tone-done';
+  if (status === 'Confirmed' || status === 'In Progress') return 'tone-active';
+  if (status === 'Completed') return 'tone-done';
   if (status === 'Closed') return 'tone-stopped';
   return 'tone-waiting';
 }
@@ -1014,6 +1033,14 @@ function MonthWorkspace({ plan, objectives = [], reports, t, language, busy, can
           {objective.percent === null
             ? <span className="objective-percent muted-cell">{t('plan.notCounted')}</span>
             : <span className={`objective-percent${objective.complete ? ' is-done' : ''}`}>{objective.percent}%</span>}
+        </div>
+        {/* Where it stands and when it is due, in the manager's words. The
+            state is derived from the figures, never typed (objectiveState). */}
+        <div className="objective-meta">
+          <span className={`status-badge ${objectiveStateTone(objectiveState(objective))}`}>
+            {t(`plan.objectiveState.${objectiveState(objective)}`)}
+          </span>
+          <small className="muted-cell">{t('plan.deadline')}: {objective.deadline ? formatDate(objective.deadline, language) : t('plan.deadlineMonthEnd')}</small>
         </div>
         {/* Support work always says who it is for, so a coordination month never
             reads as a set of unattached numbers. */}
@@ -1633,7 +1660,8 @@ function PlanDetail({
   workForms = {}, setWorkForms, onAddWork, onStartWork, onOpenActivity,
   onStartMonth, onReportDay, onRemoveDay, onUploadDayProof,
   fetchJson, upload, onOpenFile, onReload, onError, onMessage,
-  onAddActivity, onConfirm, onReopen, onSubmitReport, onDecideReport, onClose, onAttach, onUpdatePlan, offPlanActivities = []
+  onAddActivity, onConfirm, onReopen, onSubmitReport, onDecideReport, onRequestChange, onClose, onAttach, onUpdatePlan,
+  offPlanActivities = []
 }) {
   const { plan, activities, history, report } = detail;
   const [explanations, setExplanations] = useState({
@@ -1707,23 +1735,45 @@ function PlanDetail({
         <h2>{monthLabel(plan.month, language)}</h2>
         <span>
           {t('monthly.responsibleManager')}: {plan.managerName || '—'}
-          {plan.confirmedByName ? ` · ${t('monthly.planStatus.Confirmed')}: ${plan.confirmedByName}` : ''}
+          {/* Who handed the month over, and when: the manager's "assigned by". */}
+          {plan.assignedByName && plan.assignedAt
+            ? ` · ${fill(t('plan.assignedBy'), { name: plan.assignedByName, date: new Date(plan.assignedAt).toLocaleDateString(language) })}`
+            : plan.confirmedByName ? ` · ${t('monthly.planStatus.Confirmed')}: ${plan.confirmedByName}` : ''}
         </span>
       </div>
       <button className="text-btn hide-on-sheet" type="button" onClick={onClose}>{t('action.close')}</button>
     </div>
+
+    {/* What the month is, before any figure about it: the objective the Director
+        wrote, which is the work itself and not a heading over a list of tasks. */}
+    {plan.objectiveText && <p className="plan-objective">{plan.objectiveText}</p>}
+    {plan.expectedOutput && <p className="detail-notes"><strong>{t('plan.expectedOutput')}:</strong> {plan.expectedOutput}</p>}
+
+    {/* THE MANAGER'S VIEW OF THE MONTH (section 4 of the brief): status, the
+        dates, the budget they were given, who gave it -- and nothing the
+        Director uses to run the organisation. The twelve-figure grid below is
+        the Director's: committed, free to plan, work done, expenses without
+        evidence are the review, not the job. */}
+    {!isDirector && <div className="detail-facts manager-facts">
+      <Fact label={t('table.status')} value={<span className={`status-badge ${planTone(plan.status)}`}>{t(`monthly.planStatus.${plan.status}`)}</span>} />
+      <Fact label={t('monthly.month')} value={fill(t('plan.period'), {
+        start: formatDate(`${plan.month}-01`, language), end: formatDate(monthEnd(plan.month), language)
+      })} />
+      <Fact label={t('monthly.approvedAllocation')}
+        value={plan.approvedBudget > 0 ? formatUsd(plan.approvedBudget) : <span className="muted-cell">{t('plan.budgetNoCeiling')}</span>} />
+      <Fact label={t('monthly.totalSpent')} value={formatUsd(plan.totalSpent)} />
+      {plan.approvedBudget > 0 && <Fact label={t('monthly.remainingBalance')}
+        value={<span className={plan.remainingBalance < 0 ? 'over-budget' : undefined}>{formatUsd(plan.remainingBalance)}</span>} />}
+      {plan.overallProgress !== null && plan.overallProgress !== undefined
+        && <Fact label={t('plan.overallProgress')} value={`${plan.overallProgress}%`} />}
+    </div>}
 
     {/* The four figures the month is read by. Approved is the Director's ceiling;
         committed is what has been given out to activities; spent is what has
         actually gone; and what is left of each is the number somebody is about to
         act on. Showing only three of them was why nobody could tell whether there
         was room for more work. */}
-    {/* What the month is, before any figure about it: the objective the Director
-        wrote, which is the work itself and not a heading over a list of tasks. */}
-    {plan.objectiveText && <p className="plan-objective">{plan.objectiveText}</p>}
-    {plan.expectedOutput && <p className="detail-notes"><strong>{t('plan.expectedOutput')}:</strong> {plan.expectedOutput}</p>}
-
-    <div className="detail-facts">
+    {isDirector && <div className="detail-facts">
       <Fact label={t('table.status')} value={<span className={`status-badge ${planTone(plan.status)}`}>{t(`monthly.planStatus.${plan.status}`)}</span>} />
       {plan.targetQuantity !== null && <>
         <Fact label={t('plan.target')} value={`${plan.targetQuantity} ${plan.targetUnit}`} />
@@ -1744,7 +1794,22 @@ function PlanDetail({
       <Fact label={t('monthly.workDone')}
         value={plan.workCount ? `${plan.workCompletedCount}/${plan.workCount}` : '—'} />
       <Fact label={t('review.expensesWithoutEvidence')} value={plan.expensesWithoutEvidence} />
-    </div>
+    </div>}
+
+    {/* The Director's words to the manager, under one heading, where the manager
+        looks first. The same two fields the Director types as "notes" and
+        "objectives" on the create and settings forms. */}
+    {!isDirector && (plan.notes || plan.objective) && <div className="plan-instructions">
+      <strong>{t('plan.instructions')}</strong>
+      {plan.objective && <p>{plan.objective}</p>}
+      {plan.notes && <p>{plan.notes}</p>}
+    </div>}
+
+    {/* The manager cannot edit the targets. What they can do is ask, on the
+        record, and the Director is told. */}
+    {canWorkMonth && open && onRequestChange && <div className="button-row plan-request-change">
+      <button type="button" className="secondary-btn" disabled={busy} onClick={() => onRequestChange(plan)}>{t('plan.requestChange')}</button>
+    </div>}
     {/* A month with no activities on it is a heading and a budget: the manager
         opening it has nothing to do and no way to know why. Said here, where the
         Director is looking, instead of leaving them to find the form below. */}
@@ -1763,8 +1828,8 @@ function PlanDetail({
       })}</small>
     </div>}
     {plan.category && <p className="detail-notes"><strong>{t('monthly.businessCategory')}:</strong> {categoryLabel(plan.category, t)}</p>}
-    {plan.objective && <p className="detail-notes"><strong>{t('monthly.objectives')}:</strong> {plan.objective}</p>}
-    {plan.notes && <p className="detail-notes">{plan.notes}</p>}
+    {isDirector && plan.objective && <p className="detail-notes"><strong>{t('monthly.objectives')}:</strong> {plan.objective}</p>}
+    {isDirector && plan.notes && <p className="detail-notes">{plan.notes}</p>}
 
     {/* The month, opened for work. This is the main thing on the page now: the
         manager starts it here and reports each day here, without leaving. */}
@@ -1854,7 +1919,11 @@ function PlanDetail({
       <button className="primary-btn" type="button" disabled={busy || !activities.length || !plan.managerId}
         onClick={() => onConfirm(plan)}>{t('monthly.confirmPlan')}</button>
     </div>}
-    {isDirector && plan.status !== 'Draft' && <div className="button-row">
+    {/* Reopening is for a CLOSED month. On a live one the same route sent the
+        plan back to Draft, which locked the manager out of their own month
+        with nothing on screen to say why -- a dead end, so the button is not
+        offered there. */}
+    {isDirector && plan.status === 'Closed' && <div className="button-row">
       <button className="secondary-btn" type="button" disabled={busy} onClick={() => onReopen(plan)}>{t('monthly.reopen')}</button>
     </div>}
 
@@ -1972,6 +2041,21 @@ function PlanDetail({
 
     {/* Section 11: the manager's account of the month. */}
     <h3 className="form-section-title">{t('monthend.title')}</h3>
+    {/* Where the submission stands, said first and plainly: waiting, approved,
+        or returned with the reason the manager has to act on. */}
+    {report?.status === 'Submitted' && <p className="next-step next-step-waiting month-state">
+      <strong>{t('monthend.waitingReview')}</strong>
+    </p>}
+    {report?.status === 'Accepted' && <p className="next-step next-step-done month-state">
+      <strong>{t('monthend.acceptedTitle')}</strong>
+    </p>}
+    {report?.status === 'Returned' && <div className="next-step next-step-stopped month-state">
+      <div className="next-step-text">
+        <strong>{t('monthend.returnedTitle')}</strong>
+        <p className="admin-note">&ldquo;{report.reviewNote}&rdquo;</p>
+        {canWorkMonth && <p>{t('monthend.returnedHint')}</p>}
+      </div>
+    </div>}
     {report ? <>
       <div className="detail-facts">
         <Fact label={t('table.status')} value={<span className={`status-badge ${report.status === 'Accepted' ? 'tone-done' : report.status === 'Returned' ? 'tone-stopped' : 'tone-waiting'}`}>
@@ -1991,15 +2075,29 @@ function PlanDetail({
       {report.budgetDifferenceExplanation && <p className="detail-notes">
         <strong>{t('monthend.budgetDifference')}:</strong> {report.budgetDifferenceExplanation}
       </p>}
-      {report.reviewNote && <p className="detail-notes admin-note">&ldquo;{report.reviewNote}&rdquo;</p>}
-      {isDirector && report.status === 'Submitted' && plan.status !== 'Closed' && <div className="button-row">
-        <button className="primary-btn" type="button" disabled={busy} onClick={() => onDecideReport(plan, 'Accepted')}>{t('monthend.accept')}</button>
-        <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onDecideReport(plan, 'Returned')}>{t('monthend.return')}</button>
+      {report.reviewNote && report.status !== 'Returned' && <p className="detail-notes admin-note">&ldquo;{report.reviewNote}&rdquo;</p>}
+      {/* The Director's decision (section 8): approve, or return with a reason
+          -- the reason is asked for in the dialog and is required. */}
+      {isDirector && report.status === 'Submitted' && plan.status !== 'Closed' && <div className="next-step next-step-action">
+        <div className="next-step-text">
+          <strong>{t('monthend.reviewTitle')}</strong>
+          <p>{t('monthend.reviewHint')}</p>
+        </div>
+        <div className="next-step-actions">
+          <button className="primary-btn" type="button" disabled={busy} onClick={() => onDecideReport(plan, 'Accepted')}>{t('approval.approve')}</button>
+          <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onDecideReport(plan, 'Returned')}>{t('monthend.returnForCorrection')}</button>
+        </div>
       </div>}
     </> : <p className="detail-notes muted-cell">{t('monthend.notSubmitted')}</p>}
 
-    {isPlanManager && plan.status === 'Confirmed' && (!report || report.status === 'Returned') && <form
-      className="decision-form"
+    {/* SUBMIT FOR REVIEW (section 7). Shown to whoever may work the month, on a
+        month that is live -- Active, In progress or Completed -- and whose
+        report is not already with the Director or accepted. It used to appear
+        only while the plan was still 'Confirmed', and pressing Start work or
+        saving one day moved the plan on, so a manager who had done the month
+        could never hand it in. */}
+    {canWorkMonth && ['Confirmed', 'In Progress', 'Completed'].includes(plan.status) && (!report || report.status === 'Returned') && <form
+      className="decision-form month-submit"
       onSubmit={(event) => {
         event.preventDefault();
         Promise.resolve(onSubmitReport(plan, explanations)).then((filed) => {
@@ -2007,6 +2105,8 @@ function PlanDetail({
         });
       }}
     >
+      <h4 className="form-section-title">{t('monthend.submitTitle')}</h4>
+      <p className="field-hint">{t('monthend.submitHint')}</p>
       <div className="form-grid">
         <label className="form-field form-field-wide"><span>{t('monthend.unusedBalance')}</span>
           <textarea rows="2" value={explanations.unusedBalanceExplanation}
@@ -2032,105 +2132,4 @@ function PlanDetail({
 
 function Metric({ label, value }) {
   return <div className="metric-card"><span>{label}</span><strong>{value}</strong></div>;
-}
-
-function Fact({ label, value }) {
-  return <div className="fact"><span>{label}</span><strong>{value}</strong></div>;
-}
-
-// ---- recording an expense --------------------------------------------------
-
-// Section 5, 6 and 8, as it appears on the activity review screen. The remaining
-// balance is shown before the manager types, and the block is explained in the
-// same words the API uses when it refuses.
-//
-// The receipt is taken with the expense, in the same form: a photo from the
-// camera or a file. Recording the spend and then scrolling to a separate upload
-// form, and linking the two by hand, took two screens and most receipts were
-// left unlinked.
-export function ExpensePanel({ expenses, summary, canRecord, onRecord, onRemoveExpense, canRemove, busy = false, showSummary = true }) {
-  const { language, t } = useI18n();
-  const [form, setForm] = useState({
-    amount: '', spentOn: todayLocal(),
-    paymentMethod: 'Cash', description: ''
-  });
-  const [receipts, setReceipts] = useState([]);
-
-  // A failed summary is not a zero balance: without one nothing is presumed
-  // over budget, and the API remains the judge of the spend.
-  const known = summary !== null && summary !== undefined;
-  const remaining = summary?.remaining ?? 0;
-  const typed = Number(form.amount || 0);
-  // Warned before submitting, refused by the API regardless.
-  const overBudget = known && typed > 0 && Math.round(typed * 100) > Math.round(remaining * 100);
-
-  return <>
-    {showSummary && <>
-      <h3 className="form-section-title">{t('expense.title')}</h3>
-      <div className="detail-facts">
-        <Fact label={t('monthly.approvedAllocation')} value={known ? formatUsd(summary.approvedBudget) : '—'} />
-        <Fact label={t('monthly.totalSpent')} value={known ? formatUsd(summary.totalSpent) : '—'} />
-        <Fact label={t('expense.remainingOnActivity')}
-          value={known ? <span className={remaining < 0 ? 'over-budget' : undefined}>{formatUsd(remaining)}</span> : '—'} />
-      </div>
-    </>}
-
-    {expenses.length ? <div className="table-wrap"><table className="card-table">
-      <thead><tr>
-        <th>{t('field.description')}</th><th>{t('expense.dateSpent')}</th>
-        <th>{t('expense.paymentMethod')}</th><th>{t('expense.amountSpent')}</th>
-        <th>{t('evidence.payment')}</th><th>{t('expense.recordedBy')}</th>
-        {canRemove && <th>{t('table.actions')}</th>}
-      </tr></thead>
-      <tbody>{expenses.map((expense) => <tr key={expense.id}>
-        <td className="card-title-cell"><strong>{expense.description}</strong></td>
-        <td data-label={t('expense.dateSpent')}>{formatDate(expense.spentOn, language)}</td>
-        <td data-label={t('expense.paymentMethod')}>{t(`pmethod.${expense.paymentMethod}`)}</td>
-        <td data-label={t('expense.amountSpent')}>{formatUsd(expense.amount)}</td>
-        <td data-label={t('evidence.payment')} className={expense.evidenceCount ? undefined : 'over-budget'}>
-          {expense.evidenceCount || t('expense.noEvidence')}
-        </td>
-        <td data-label={t('expense.recordedBy')}>{expense.recordedByName || '—'}</td>
-        {canRemove && <td className="card-actions">
-          <button className="danger-btn" type="button" disabled={busy} onClick={() => onRemoveExpense(expense)}>{t('action.remove')}</button>
-        </td>}
-      </tr>)}</tbody>
-    </table></div> : <div className="empty-state">
-      <strong>{t('expense.none')}</strong><span>{t('expense.noneHint')}</span>
-    </div>}
-
-    {canRecord && <form className="decision-form" onSubmit={(event) => {
-      event.preventDefault();
-      onRecord({ ...form, amount: Number(form.amount || 0) }, () => {
-        setForm((current) => ({ ...current, amount: '', description: '' }));
-        setReceipts([]);
-      }, receipts);
-    }}>
-      <h3 className="form-section-title">{t('expense.record')}</h3>
-      {known && <p className="field-hint">{fill(t('expense.leftToSpend'), { amount: formatUsd(remaining) })}</p>}
-      <div className="form-grid">
-        <label className="form-field"><span>{t('expense.amountSpent')} (USD)</span>
-          <input required type="number" inputMode="decimal" min="0.01" step="0.01" value={form.amount}
-            onChange={(event) => setForm({ ...form, amount: event.target.value })} />
-        </label>
-        <label className="form-field"><span>{t('field.description')}</span>
-          <input required value={form.description} placeholder={t('expense.descriptionPlaceholder')} onChange={(event) => setForm({ ...form, description: event.target.value })} />
-        </label>
-        <label className="form-field"><span>{t('expense.dateSpent')}</span>
-          <input required type="date" max={todayLocal()} value={form.spentOn} onChange={(event) => setForm({ ...form, spentOn: event.target.value })} />
-        </label>
-        <label className="form-field"><span>{t('expense.paymentMethod')}</span>
-          <select value={form.paymentMethod} onChange={(event) => setForm({ ...form, paymentMethod: event.target.value })}>
-            {PAYMENT_METHODS.map((method) => <option key={method} value={method}>{t(`pmethod.${method}`)}</option>)}
-          </select>
-        </label>
-      </div>
-      <div className="receipt-field">
-        <span className="receipt-label">{t('expense.receipt')} ({t('field.optional')})</span>
-        <FilePicker files={receipts} onChange={setReceipts} disabled={busy} />
-      </div>
-      {overBudget && <p className="decision-hint over-budget">{t('expense.overBudget')} <a href="#budget-requests" onClick={(event) => { event.preventDefault(); document.getElementById('budget-requests')?.scrollIntoView({ behavior: 'smooth' }); }}>{t('budget.request')}</a></p>}
-      <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy || overBudget}>{t('expense.record')}</button></div>
-    </form>}
-  </>;
 }

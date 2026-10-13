@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApprovalPanel, approverName, canApproveRecord, decisionIsOpen, formatTrailValue, labelForField, trailActionLabel } from './ActivityReview.jsx';
 import { displayLanguage, fill, translate, useT } from './i18n.js';
 import { BUSINESS_OPERATIONS, operationName, runsTrips } from '../shared/businessOperations.js';
-import { DetailView, useBusy, useDialog } from './ui.jsx';
+import { DetailView, Fact, useBusy, useDialog } from './ui.jsx';
 import { FilePicker, Journey, MoneyBar, NextStep, Section, goToSection, journeyLabel, journeyTone, movementJourney } from './journey.jsx';
 
 // Logistics & Facilitation module.
@@ -1081,10 +1081,6 @@ function MovementDetail({ detail, user, onOpenFile, isDirector, busy = false, on
         : <div className="empty-state"><strong>{t('empty.noHistory')}</strong><span>{t('empty.historyBlurb')}</span></div>}
     </Section>
   </section>;
-}
-
-function Fact({ label, value }) {
-  return <div className="fact"><span>{label}</span><strong>{value}</strong></div>;
 }
 
 // Receipts and photographs for a trip, taken with the camera or picked from

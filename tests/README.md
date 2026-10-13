@@ -19,6 +19,8 @@ running is left alone.
 | `workflow-fixes.test.mjs` | the dead ends and lost-money cases from the usability audit stay fixed |
 | `partner-access.test.mjs` | an external partner sees one business operation and nothing else |
 | `monthly-workflow.test.mjs` | planning, the approved allocation, expenses, the budget block, evidence, month-end |
+| `monthly-target.test.mjs` | a month as one objective with a target, started and reported day by day by the operation's manager |
+| `assigned-plan.test.mjs` | the whole cycle: the Director assigns a month, the named manager is told and works it, another manager cannot see it, evidence, submission, return with a reason, resubmission, approval, notifications, change requests, the dashboard counts; the same cycle on a planned activity |
 
 ## They run against the real database
 

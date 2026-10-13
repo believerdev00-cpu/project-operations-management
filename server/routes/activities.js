@@ -32,6 +32,7 @@ import {
   fitsRemaining, fromCents
 } from '../lib/monthly.js';
 import { round2 } from '../lib/rates.js';
+import { notify, notifyDirectors } from '../lib/notifications.js';
 import { MAX_EVIDENCE_BYTES, MAX_EVIDENCE_FILES, MAX_EVIDENCE_LABEL, deleteFile, readFile, saveFile, storedFileName } from '../lib/storage.js';
 
 const router = express.Router();
@@ -1221,6 +1222,20 @@ router.patch('/:id/decision', asyncRoute(async (req, res) => {
       return res.status(409).json({ message: 'This activity changed while you were reviewing it. Refresh and try again.' });
     }
     await logHistory(client, existing.id, req.user, entries);
+    // The person carrying the work hears the Director's verdict on it: marked
+    // done, or sent back with what needs correcting. Only those two moves are
+    // announced -- a budget note or a hold is Director bookkeeping, and telling
+    // the manager about every one of them would bury the two that matter.
+    if (status !== existing.status && existing.assigned_to
+      && Number(existing.assigned_to) !== Number(req.user.id)
+      && (status === 'Completed' || status === 'Needs Correction')) {
+      await notify(client, {
+        userId: existing.assigned_to,
+        kind: status === 'Completed' ? 'work_approved' : 'work_returned',
+        params: { activity: existing.activity, operation: existing.sector, reason: adminNote || '' },
+        link: `#/activities/${existing.id}`, activityId: existing.id, actor: req.user
+      });
+    }
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -1459,12 +1474,17 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
              ELSE rejection_reason END,
            -- Reopening finished work clears its hand-back. Left set, the record
            -- read "completion submitted" for ever and the manager could never
-           -- hand it back again.
+           -- hand it back again. Sending work back for correction is the same
+           -- move from the manager's side -- it is theirs again to finish and
+           -- resubmit -- and used to keep the timestamp when it came through
+           -- here rather than through /decision, which left the record stuck
+           -- in the final-check list with a /completion that answered 409.
            completion_submitted_at = CASE WHEN $7 THEN NULL ELSE completion_submitted_at END,
            evidence_status = CASE WHEN $7 AND evidence_status = 'Complete' THEN 'Partial' ELSE evidence_status END,
            updated_at = NOW()
        WHERE id = $1 AND status = $6::text`,
-      [existing.id, status, APPROVED_STATUSES, req.user.id, note, existing.status, existing.status === 'Completed']
+      [existing.id, status, APPROVED_STATUSES, req.user.id, note, existing.status,
+        existing.status === 'Completed' || status === 'Needs Correction']
     );
     if (!written.rowCount) {
       await safeRollback(client);
@@ -1532,6 +1552,13 @@ router.post('/:id/completion', asyncRoute(async (req, res) => {
     await logHistory(client, existing.id, req.user, [
       { action: 'Completion submitted', field: 'completionSubmittedAt', oldValue: existing.completion_submitted_at, newValue: 'submitted for review', note }
     ]);
+    // Finished work is waiting for the Director's final check, and the Director
+    // is told so rather than left to find it in a list.
+    await notifyDirectors(client, {
+      kind: 'work_submitted',
+      params: { activity: existing.activity, operation: existing.sector, managerName: req.user.name },
+      link: `#/activities/${existing.id}`, activityId: existing.id, actor: req.user
+    });
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);

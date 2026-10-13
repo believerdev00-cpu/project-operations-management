@@ -23,7 +23,7 @@ const check = (label, ok, detail = '') => {
 
 // ui.jsx holds the shared error boundary and dialogs; left off this list, every
 // key only they use was reported as unused, and their JSX went unchecked.
-const FILES = ['App.jsx', 'ui.jsx', 'journey.jsx', 'Home.jsx', 'MovementModule.jsx', 'ActivityReview.jsx', 'PartnerPortal.jsx', 'ExternalPartners.jsx', 'MonthlyPlans.jsx']
+const FILES = ['App.jsx', 'ui.jsx', 'journey.jsx', 'Home.jsx', 'MovementModule.jsx', 'ActivityReview.jsx', 'PartnerPortal.jsx', 'ExternalPartners.jsx', 'MonthlyPlans.jsx', 'ExpensePanel.jsx']
   .map((name) => path.join(root, 'src', name));
 
 const sources = Object.fromEntries(FILES.map((file) => [path.basename(file), fs.readFileSync(file, 'utf8')]));
@@ -62,8 +62,13 @@ const FAMILIES = {
   'estatus.': ['Pending', 'Partial', 'Complete'],
   'cost.': ['transport', 'fuel', 'accommodation', 'meals', 'handling', 'other'],
   'pmethod.': ['Cash', 'Bank Transfer', 'Mobile Money', 'Cheque', 'Credit', 'Other'],
-  'monthly.planStatus.': ['Draft', 'Confirmed', 'Closed'],
-  'monthend.status.': ['Submitted', 'Accepted', 'Returned']
+  'monthly.planStatus.': ['Draft', 'Confirmed', 'In Progress', 'Completed', 'Closed'],
+  'monthend.status.': ['Submitted', 'Accepted', 'Returned'],
+  // Every event the server can write a notification for (NOTIFICATION_KINDS in
+  // server/db/monthlySchema.js) needs a sentence in every language.
+  'notice.kind.': ['plan_assigned', 'plan_changed', 'change_requested', 'report_submitted', 'report_accepted',
+    'report_returned', 'work_submitted', 'work_approved', 'work_returned'],
+  'plan.objectiveState.': ['notStarted', 'inProgress', 'done', 'overdue']
 };
 for (const [prefix, values] of Object.entries(FAMILIES)) {
   const missing = values.filter((value) => !defined.has(`${prefix}${value}`));

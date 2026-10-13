@@ -51,6 +51,7 @@ import { PLAN_PRIORITIES, REPORT_STATUSES } from '../db/monthlySchema.js';
 import { isPrimaryOperation, isSupportOperation, operationName } from '../../shared/businessOperations.js';
 import { aiConfigured, derive as deriveForm, improve as improveForm } from '../lib/objectiveForm.js';
 import { getCurrentRate, round2 } from '../lib/rates.js';
+import { notify, notifyDirectors } from '../lib/notifications.js';
 import {
   COMPLETED_STATUS, OVER_BUDGET_MESSAGE, canReadPlan, canWorkPlan, cents, currentMonth, fitsBudget,
   fitsRemaining, formatUsd, fromCents, isPlanManager, isPlanOpen, monthKey, monthStart,
@@ -124,6 +125,9 @@ function mapObjective(row) {
     targetUnit: row.target_unit || '',
     weight: row.weight === null || row.weight === undefined ? null : Number(row.weight),
     sortOrder: Number(row.sort_order || 0),
+    // When this commitment is due. Null means by the end of the month, which is
+    // what every objective meant before a deadline could be stated.
+    deadline: row.deadline ? toDateOnly(row.deadline) : null,
     // Which primary operation this supports. Null on a primary operation's own
     // objectives, and on support work that serves all three at once.
     supportsOperation: row.supports_operation ?? null,
@@ -274,12 +278,24 @@ function readObjectives(payload, operation) {
       supportsOperation = supports;
     }
 
+    // When it is due. Optional; a blank means the end of the month. Checked as
+    // a real calendar date, so 2026-02-30 is refused here rather than by the
+    // database as a bare server error.
+    let deadline = null;
+    if (entry?.deadline !== '' && entry?.deadline !== null && entry?.deadline !== undefined) {
+      if (!isValidDate(entry.deadline)) {
+        return { error: `"${title}": the deadline must be a real date in YYYY-MM-DD form, or left empty.` };
+      }
+      deadline = entry.deadline;
+    }
+
     objectives.push({
       title,
       targetQuantity: hasQuantity ? round2(entry.targetQuantity) : null,
       targetUnit: hasQuantity ? unit : unit || '',
       weight,
-      supportsOperation
+      supportsOperation,
+      deadline
     });
   }
   return { objectives };
@@ -338,8 +354,8 @@ async function insertObjectives(client, planId, objectives, startOrder = 0) {
     const inserted = await client.query(
       `INSERT INTO plan_objectives
          (plan_id, title, target_quantity, target_unit, weight, sort_order, supports_operation,
-          form_spec, form_source, form_generated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'derived', NOW())
+          form_spec, form_source, form_generated_at, deadline)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'derived', NOW(), $9::date)
        RETURNING id, title, supports_operation`,
       [
         planId, objective.title, objective.targetQuantity, objective.targetUnit, objective.weight,
@@ -351,7 +367,8 @@ async function insertObjectives(client, planId, objectives, startOrder = 0) {
           title: objective.title,
           targetQuantity: objective.targetQuantity,
           targetUnit: objective.targetUnit
-        }))
+        })),
+        objective.deadline ?? null
       ]
     );
     created.push(inserted.rows[0]);
@@ -509,14 +526,25 @@ const PLAN_TOTALS = `
 const SELECT_PLAN = `
   SELECT p.*, m.name AS manager_name, m.username AS manager_username,
          c.name AS created_by_name, cf.name AS confirmed_by_name, cl.name AS closed_by_name,
+         ab.name AS assigned_by_name,
          pr.name AS project_name,
          totals.*,
-         r.id AS report_id, r.status AS report_status, r.submitted_at AS report_submitted_at
+         r.id AS report_id, r.status AS report_status, r.submitted_at AS report_submitted_at,
+         r.review_note AS report_review_note,
+         -- Commitments past their own deadline and not yet met: what the
+         -- dashboards call overdue. A deadline is per objective; an objective
+         -- without one is due at month end and is never "overdue" mid-month.
+         (SELECT COUNT(*) FROM plan_objectives o
+           WHERE o.plan_id = p.id AND o.deadline IS NOT NULL AND o.deadline < CURRENT_DATE
+             AND (o.target_quantity IS NULL
+                  OR COALESCE((SELECT SUM(d.quantity_done) FROM plan_daily_reports d
+                                WHERE d.objective_id = o.id), 0) < o.target_quantity))::int AS overdue_objectives
   FROM monthly_plans p
   LEFT JOIN users m ON m.id = p.manager_id
   LEFT JOIN users c ON c.id = p.created_by
   LEFT JOIN users cf ON cf.id = p.confirmed_by
   LEFT JOIN users cl ON cl.id = p.closed_by
+  LEFT JOIN users ab ON ab.id = p.assigned_by
   LEFT JOIN projects pr ON pr.id = p.project_id
   LEFT JOIN monthly_reports r ON r.plan_id = p.id
   LEFT JOIN LATERAL (${PLAN_TOTALS}) totals ON TRUE
@@ -602,6 +630,12 @@ function mapPlan(row) {
 
     createdBy: row.created_by ?? null,
     createdByName: row.created_by_name ?? null,
+    // Who handed the month to its manager, and when. What the manager's screen
+    // shows as "Assigned by".
+    assignedBy: row.assigned_by ?? null,
+    assignedByName: row.assigned_by_name ?? null,
+    assignedAt: row.assigned_at ?? null,
+    overdueObjectives: row.overdue_objectives ?? 0,
     confirmedBy: row.confirmed_by ?? null,
     confirmedByName: row.confirmed_by_name ?? null,
     confirmedAt: row.confirmed_at ?? null,
@@ -609,7 +643,10 @@ function mapPlan(row) {
     closedByName: row.closed_by_name ?? null,
     closedAt: row.closed_at ?? null,
     report: row.report_id
-      ? { id: row.report_id, status: row.report_status, submittedAt: row.report_submitted_at }
+      ? {
+        id: row.report_id, status: row.report_status, submittedAt: row.report_submitted_at,
+        reviewNote: row.report_review_note || ''
+      }
       : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -1168,7 +1205,16 @@ router.post('/', asyncRoute(async (req, res) => {
     // as confirmed by the Director who wrote it, because it is: the agreement
     // happened in the meeting and this is the record of it.
     await client.query(
-      'UPDATE monthly_plans SET confirmed_by = $2, confirmed_at = NOW() WHERE id = $1',
+      `UPDATE monthly_plans
+          SET confirmed_by = $2::int, confirmed_at = NOW(),
+              -- Naming a manager at creation IS the assignment: who did it and when
+              -- is what the manager's screen reads back as "Assigned by".
+              -- ($2 is cast on every use: one bare and one inside a CASE left
+              -- Postgres unable to settle its type -- "inconsistent types
+              -- deduced for parameter $2".)
+              assigned_by = CASE WHEN manager_id IS NULL THEN NULL ELSE $2::int END,
+              assigned_at = CASE WHEN manager_id IS NULL THEN NULL ELSE NOW() END
+        WHERE id = $1`,
       [inserted.rows[0].id, req.user.id]
     );
     // A month written the old way -- one target and a sentence, no objectives
@@ -1199,6 +1245,17 @@ router.post('/', asyncRoute(async (req, res) => {
         note: 'Budget approved for the month by the Director.'
       }] : [])
     ]);
+    // The manager is told the month is theirs, in the same transaction as the
+    // plan: a notification pointing at a plan that failed to save would be a
+    // lie, and a saved plan the manager was never told about is the problem
+    // this exists to fix.
+    if (manager) {
+      await notify(client, {
+        userId: manager.id, kind: 'plan_assigned',
+        params: { operation, month: monthKey(month), objectives: savedObjectives.length },
+        link: `#/monthly/${inserted.rows[0].id}`, planId: inserted.rows[0].id, actor: req.user
+      });
+    }
     await client.query('COMMIT');
     planId = inserted.rows[0].id;
   } catch (error) {
@@ -1367,14 +1424,39 @@ router.patch('/:id', asyncRoute(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const managerChanged = managerId !== existing.manager_id;
     await client.query(
       `UPDATE monthly_plans
        SET manager_id = $2, notes = $3, approved_budget = $4, category = $5, objective = $6,
-           project_id = $7, target_quantity = $8, target_unit = $9, expected_output = $10, updated_at = NOW()
+           project_id = $7, target_quantity = $8, target_unit = $9, expected_output = $10,
+           -- Handing the month to a different manager is a new assignment, and
+           -- is stamped as one. Clearing the manager clears the stamp with it.
+           assigned_by = CASE WHEN $11 THEN (CASE WHEN $2::int IS NULL THEN NULL ELSE $12::int END) ELSE assigned_by END,
+           assigned_at = CASE WHEN $11 THEN (CASE WHEN $2::int IS NULL THEN NULL ELSE NOW() END) ELSE assigned_at END,
+           updated_at = NOW()
        WHERE id = $1`,
       [existing.id, managerId, notes, approvedBudget, category, objective, projectId,
-        target.quantity, target.unit, target.output]
+        target.quantity, target.unit, target.output, managerChanged, req.user.id]
     );
+    // Who is told what. A newly named manager hears the month is theirs; a
+    // manager already on it hears that the Director changed it -- budget, notes,
+    // target -- so nothing about their month changes behind their back.
+    if (managerChanged && managerId) {
+      await notify(client, {
+        userId: managerId, kind: 'plan_assigned',
+        params: { operation: existing.sector, month: monthKey(existing.month) },
+        link: `#/monthly/${existing.id}`, planId: existing.id, actor: req.user
+      });
+    } else if (!managerChanged && existing.manager_id) {
+      await notify(client, {
+        userId: existing.manager_id, kind: 'plan_changed',
+        params: {
+          operation: existing.sector, month: monthKey(existing.month),
+          changes: entries.map((entry) => entry.action), reason: optionalText(payload.reason, 1000)
+        },
+        link: `#/monthly/${existing.id}`, planId: existing.id, actor: req.user
+      });
+    }
     // A new manager takes over the month's live work with it. Left on the old
     // manager, the activities could not have expenses recorded by the new one
     // (canRecordExpense checks assigned_to), and anything still waiting on a
@@ -1558,6 +1640,18 @@ router.post('/:id/reopen', asyncRoute(async (req, res) => {
   res.json(mapPlan(await loadPlan(existing.id, req.user)));
 }));
 
+// The manager works to the list the Director typed, so any change to it is
+// theirs to know about the moment it lands. Written inside the same transaction
+// as the change. The Director's own edits are never announced to the Director.
+async function tellManagerPlanChanged(client, plan, actor, change, detail) {
+  if (!plan.manager_id || Number(plan.manager_id) === Number(actor.id)) return;
+  await notify(client, {
+    userId: plan.manager_id, kind: 'plan_changed',
+    params: { operation: plan.sector, month: monthKey(plan.month), changes: [change], detail: detail || '' },
+    link: `#/monthly/${plan.id}`, planId: plan.id, actor
+  });
+}
+
 // ---- correcting the agreed list ---------------------------------------------
 //
 // The Director types the agreed objectives once and is finished. These routes
@@ -1591,6 +1685,7 @@ router.post('/:id/objectives', asyncRoute(async (req, res) => {
     await logPlanHistory(client, plan.id, req.user, [
       { action: 'Objective set', field: 'objective', oldValue: null, newValue: created.title }
     ]);
+    await tellManagerPlanChanged(client, plan, req.user, 'Objective set', created.title);
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -1617,7 +1712,23 @@ router.patch('/:id/objectives/:objectiveId', asyncRoute(async (req, res) => {
     [objectiveId, plan.id]
   );
   if (!existing.rowCount) return res.status(404).json({ message: 'That objective is not on this month.' });
-  const parsed = readObjectives({ objectives: [{ ...existing.rows[0], supportsOperation: existing.rows[0].supports_operation, ...(req.body || {}) }] }, plan.sector);
+  // The stored row, in the shape the reader takes, under the fields the caller
+  // sent. The row used to be spread in raw -- target_unit, supports_operation,
+  // a Date for the deadline -- over a reader that looks for targetUnit, so an
+  // edit that changed only the quantity lost the unit and was refused with
+  // "say what the target is counted in".
+  const current = existing.rows[0];
+  const parsed = readObjectives({
+    objectives: [{
+      title: current.title,
+      targetQuantity: current.target_quantity === null ? '' : Number(current.target_quantity),
+      targetUnit: current.target_unit || '',
+      weight: current.weight === null ? '' : Number(current.weight),
+      supportsOperation: current.supports_operation || '',
+      deadline: current.deadline ? toDateOnly(current.deadline) : '',
+      ...(req.body || {})
+    }]
+  }, plan.sector);
   if (parsed.error) return res.status(400).json({ message: parsed.error });
   const [next] = parsed.objectives;
 
@@ -1636,17 +1747,20 @@ router.patch('/:id/objectives/:objectiveId', asyncRoute(async (req, res) => {
     await client.query('BEGIN');
     await client.query(
       `UPDATE plan_objectives SET title = $2, target_quantity = $3, target_unit = $4, weight = $5,
-              supports_operation = $6, updated_at = NOW()
+              supports_operation = $6, deadline = $7::date, updated_at = NOW()
        WHERE id = $1`,
-      [objectiveId, next.title, next.targetQuantity, next.targetUnit, next.weight, next.supportsOperation ?? null]
+      [objectiveId, next.title, next.targetQuantity, next.targetUnit, next.weight, next.supportsOperation ?? null,
+        next.deadline ?? null]
     );
     await logPlanHistory(client, plan.id, req.user, [
       {
         action: 'Objective changed', field: 'objective',
         oldValue: existing.rows[0].title, newValue: next.title,
         note: `Target ${next.targetQuantity ?? '--'} ${next.targetUnit || ''}`.trim()
+          + (next.deadline ? ` · due ${next.deadline}` : '')
       }
     ]);
+    await tellManagerPlanChanged(client, plan, req.user, 'Objective changed', next.title);
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -1689,6 +1803,7 @@ router.delete('/:id/objectives/:objectiveId', asyncRoute(async (req, res) => {
     await logPlanHistory(client, plan.id, req.user, [
       { action: 'Objective removed', field: 'objective', oldValue: existing.rows[0].title, newValue: null }
     ]);
+    await tellManagerPlanChanged(client, plan, req.user, 'Objective removed', existing.rows[0].title);
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -2079,6 +2194,33 @@ router.delete('/:id/reports/:reportId', asyncRoute(async (req, res) => {
       oldValue: round2(Number(gone.quantity_done)), newValue: null,
       note: toDateOnly(gone.report_date) + ' · ' + optionalText(req.body?.reason, 500)
     }]);
+    // A month is Completed because every countable objective was met. Taking a
+    // day away can unmake that, and the status used to stay Completed over a
+    // target no longer reached. Same test as the report route, read after the
+    // delete so it sees the month as it now stands.
+    if (plan.status === 'Completed') {
+      const totals = await client.query(
+        `SELECT COUNT(*) FILTER (WHERE o.target_quantity IS NOT NULL)::int AS countable,
+                COUNT(*) FILTER (
+                  WHERE o.target_quantity IS NOT NULL
+                    AND COALESCE((SELECT SUM(r.quantity_done) FROM plan_daily_reports r
+                                   WHERE r.objective_id = o.id), 0) >= o.target_quantity
+                )::int AS met
+           FROM plan_objectives o WHERE o.plan_id = $1`,
+        [plan.id]
+      );
+      const counts = totals.rows[0];
+      if (!(Number(counts.countable) > 0 && Number(counts.met) === Number(counts.countable))) {
+        await client.query(
+          `UPDATE monthly_plans SET status = 'In Progress', completed_at = NULL, updated_at = NOW()
+            WHERE id = $1 AND status = 'Completed'`,
+          [plan.id]
+        );
+        await logPlanHistory(client, plan.id, req.user, [
+          { action: 'Status changed', field: 'status', oldValue: 'Completed', newValue: 'In Progress' }
+        ]);
+      }
+    }
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -2593,10 +2735,14 @@ router.post('/:id/report', asyncRoute(async (req, res) => {
   if (!canReadPlan(req.user, plan)) {
     return res.status(403).json({ message: 'This plan belongs to another business operation.' });
   }
-  // The manager the plan names writes the report; the Director may file one on
-  // their behalf. Another manager in the same operation may not.
-  if (!isAdmin(req.user) && Number(plan.manager_id) !== Number(req.user.id)) {
-    return res.status(403).json({ message: 'Only the manager this plan names can submit its report.' });
+  // The report is filed by whoever may work the month: the manager the plan
+  // names, or -- on a month with nobody named -- a manager of that operation.
+  // The Director may file one on their behalf. Another named operation's
+  // manager, and a team member, may not. This is canWorkPlan, the same rule
+  // that decides who records the days; it used to demand a named manager here
+  // and nowhere else, so an unnamed month could be worked but never reported.
+  if (!canWorkPlan(req.user, plan)) {
+    return res.status(403).json({ message: 'Only the manager responsible for this month can submit its report.' });
   }
   if (plan.status === 'Draft') {
     return res.status(400).json({ message: 'This plan has not been confirmed yet.' });
@@ -2672,6 +2818,14 @@ router.post('/:id/report', asyncRoute(async (req, res) => {
     await logPlanHistory(client, plan.id, req.user, [
       { action: 'Month-end report submitted', field: 'totalSpent', oldValue: approvedBudget, newValue: totalSpent }
     ]);
+    // The Director's office is told a month is waiting for them. The report
+    // being filed again after a return is a new submission, and is announced
+    // again -- it is waiting again.
+    await notifyDirectors(client, {
+      kind: 'report_submitted',
+      params: { operation: plan.sector, month: monthKey(plan.month), managerName: req.user.name },
+      link: `#/monthly/${plan.id}`, planId: plan.id, actor: req.user
+    });
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -2736,6 +2890,20 @@ router.patch('/:id/report', asyncRoute(async (req, res) => {
     await logPlanHistory(client, plan.id, req.user, [
       { action: status === 'Accepted' ? 'Month closed' : 'Report returned', field: 'status', oldValue: plan.status, newValue: status === 'Accepted' ? 'Closed' : plan.status, note }
     ]);
+    // The decision goes to whoever filed the report, and to the plan's manager
+    // when that is somebody else (the Director may have filed on their behalf).
+    // A return carries the reason: "returned" with nothing to act on is the
+    // dead end this replaces.
+    const filedBy = await client.query('SELECT submitted_by FROM monthly_reports WHERE plan_id = $1', [plan.id]);
+    const recipients = new Set([filedBy.rows[0]?.submitted_by, plan.manager_id].filter(Boolean).map(Number));
+    recipients.delete(Number(req.user.id));
+    for (const userId of recipients) {
+      await notify(client, {
+        userId, kind: status === 'Accepted' ? 'report_accepted' : 'report_returned',
+        params: { operation: plan.sector, month: monthKey(plan.month), reason: note },
+        link: `#/monthly/${plan.id}`, planId: plan.id, actor: req.user
+      });
+    }
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -2745,6 +2913,52 @@ router.patch('/:id/report', asyncRoute(async (req, res) => {
   }
 
   res.json(mapPlan(await loadPlan(plan.id, req.user)));
+}));
+
+// ---- asking the Director for a change ---------------------------------------
+//
+// The targets on a month are the Director's words, agreed in the meeting, and
+// the manager cannot edit them. What the manager CAN do is say, on the record,
+// that something needs changing -- a target that turned out impossible, a
+// deadline the rain moved, a budget that will not stretch. That request goes
+// into the month's own history, where the Director reads it beside the plan,
+// and the Director is told it is there. Nothing on the plan changes until the
+// Director changes it, through the routes above, which the trail then shows.
+router.post('/:id/change-request', asyncRoute(async (req, res) => {
+  const plan = await loadPlan(req.params.id, req.user);
+  if (isAdmin(req.user)) {
+    return res.status(400).json({ message: 'The Director changes the plan directly rather than asking for a change.' });
+  }
+  if (!canWorkPlan(req.user, plan)) {
+    return res.status(403).json({ message: 'Only the manager responsible for this month can ask for a change to it.' });
+  }
+  if (!isPlanOpen(plan)) {
+    return res.status(400).json({ message: 'This month has been closed.' });
+  }
+  const message = optionalText(req.body?.message, 2000);
+  if (!message) {
+    return res.status(400).json({ message: 'Say what needs changing and why.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await logPlanHistory(client, plan.id, req.user, [
+      { action: 'Change requested', field: 'plan', oldValue: null, newValue: null, note: message }
+    ]);
+    await notifyDirectors(client, {
+      kind: 'change_requested',
+      params: { operation: plan.sector, month: monthKey(plan.month), managerName: req.user.name, reason: message },
+      link: `#/monthly/${plan.id}`, planId: plan.id, actor: req.user
+    });
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+  res.status(201).json(await planDetail(plan.id, req.user));
 }));
 
 // Anything else goes on to the application's error handler, which turns bad

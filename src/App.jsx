@@ -1,21 +1,36 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import MovementModule from './MovementModule.jsx';
-import PartnerPortal from './PartnerPortal.jsx';
-import ExternalPartners from './ExternalPartners.jsx';
-import MonthlyPlans from './MonthlyPlans.jsx';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+// The four whole-page modules, fetched the first time somebody opens them.
+//
+// Together they are the larger half of the interface, and no session needs
+// more than a couple of them: a partner only ever sees PartnerPortal, a team
+// member sees neither it nor ExternalPartners, and most managers never open
+// the trips register. Importing them normally put all four in the one file
+// every visitor downloads before the login form could be drawn -- slowest
+// for exactly the field managers on a phone and a mobile connection.
+//
+// Each is a default export used at one place in this file, so there is no
+// named import to break. What they share -- ExpensePanel, Fact, the money
+// and date formatting -- now lives in its own module, which is what lets a
+// bundler put them in separate files at all.
+const MovementModule = lazy(() => import('./MovementModule.jsx'));
+const PartnerPortal = lazy(() => import('./PartnerPortal.jsx'));
+const ExternalPartners = lazy(() => import('./ExternalPartners.jsx'));
+const MonthlyPlans = lazy(() => import('./MonthlyPlans.jsx'));
 import { LANGUAGES, LanguageContext, displayLanguage, fill, setDisplayLanguage, useI18n, useLanguage, useT } from './i18n.js';
 import { BUSINESS_OPERATIONS, operationName, runsTrips } from '../shared/businessOperations.js';
 import { OPERATIONS_WITH_CATEGORIES, OTHER_CATEGORY } from '../shared/categories.js';
 import ActivityReview, {
   ACTIVITY_STATUSES, approvalTone, approverName, categoryLabel,
-  deadlineNote, formatDate, formatUsd, statusTone
+  deadlineNote, formatDate, statusTone
 } from './ActivityReview.jsx';
+import { formatUsd } from './format.js';
 import {
   DetailView, DialogProvider, ErrorBoundary, MINIMUM_PASSWORD_LENGTH, PHONE_QUERY, buildHash, trapFocus, useBusy, useDialog,
   useHashRoute, useMediaQuery, useScrollLock
 } from './ui.jsx';
 import { activityJourney, formatLocal, journeyLabel, journeyTone } from './journey.jsx';
-import Home, { DecisionList } from './Home.jsx';
+import Home, { DecisionList, ReviewQueue, noticeSentence } from './Home.jsx';
 
 // The category presets offered per business operation. Keep in step with
 // The operations with their categories, and the categories themselves, come from
@@ -478,9 +493,67 @@ function NavIcon({ id }) {
   </span>;
 }
 
+// The bell: what the system has told this person, and how many of those they
+// have not opened yet. One list for every role -- a manager's "your plan was
+// assigned" and the Director's "a report is waiting" are the same mechanism
+// seen from either end. Each line is one sentence built from the event's kind
+// and params in the reader's language (the server stores no sentence), and
+// opening a line marks it read and goes where the event happened.
+//
+// It is shown only when there is somewhere to put the events, i.e. for the
+// internal workspace; the partner portal has no notifications.
+function NotificationBell({ notices, onOpen, onMarkAll, compact = false }) {
+  const { language, t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const panel = useRef(null);
+  const items = notices?.items || [];
+  const unread = notices?.unread || 0;
+
+  // Closes on a click anywhere else, or on Escape: a dropdown that only closes
+  // through its own button is a dropdown somebody leaves open by accident.
+  useEffect(() => {
+    if (!open) return undefined;
+    const away = (event) => { if (panel.current && !panel.current.contains(event.target)) setOpen(false); };
+    const escape = (event) => { if (event.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', away);
+    document.addEventListener('keydown', escape);
+    return () => { document.removeEventListener('mousedown', away); document.removeEventListener('keydown', escape); };
+  }, [open]);
+
+  if (!notices) return null;
+  return <div className={compact ? 'notice-bell notice-bell-compact' : 'notice-bell'} ref={panel}>
+    <button type="button" className="icon-btn notice-btn" aria-expanded={open} aria-haspopup="true"
+      aria-label={unread ? `${t('notice.title')}: ${fill(t('notice.unread'), { count: unread })}` : t('notice.title')}
+      onClick={() => setOpen((current) => !current)}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0" />
+      </svg>
+      {unread > 0 && <span className="notice-count" aria-hidden="true">{unread > 99 ? '99+' : unread}</span>}
+    </button>
+    {open && <div className="notice-panel" role="dialog" aria-label={t('notice.title')}>
+      <div className="notice-head">
+        <strong>{t('notice.title')}</strong>
+        {unread > 0 && <button type="button" className="text-btn" onClick={onMarkAll}>{t('notice.markAll')}</button>}
+        <button type="button" className="icon-btn notice-close" aria-label={t('notice.close')} onClick={() => setOpen(false)}>&times;</button>
+      </div>
+      {items.length ? <ul className="notice-list">
+        {items.map((notice) => <li key={notice.id}>
+          <button type="button" className={notice.read ? 'notice-item' : 'notice-item unread'}
+            onClick={() => { setOpen(false); onOpen(notice); }}>
+            <span className="notice-text">{noticeSentence(notice, t, language)}</span>
+            <small>{new Date(notice.createdAt).toLocaleString(language, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</small>
+          </button>
+        </li>)}
+      </ul> : <p className="notice-empty">{t('notice.none')}</p>}
+      <p className="notice-foot">{t('notice.inAppOnly')}</p>
+    </div>}
+  </div>;
+}
+
 function AppShell({
   user, subtitle, navLabel, nav = [], bottomNav = null, activeId, onNavigate, sidebarContent, eyebrow, title,
-  badge = 0, onBadge, online, refreshing, onRefresh, onLogout, onChangePassword, accountLines = [], children
+  badge = 0, onBadge, online, refreshing, onRefresh, onLogout, onChangePassword, accountLines = [], children,
+  notices = null, onOpenNotice, onMarkAllNotices
 }) {
   const { language, setLanguage, t } = useI18n();
   const phone = useMediaQuery(PHONE_QUERY);
@@ -525,6 +598,7 @@ function AppShell({
       <span className="mobile-title">{title}</span>
       {!bottomNav && badge > 0 && <button className="mobile-badge" type="button" onClick={onBadge}
         aria-label={fill(t('app.waitingOnYou'), { count: badge })}>{badge}</button>}
+      {notices && <NotificationBell notices={notices} onOpen={onOpenNotice} onMarkAll={onMarkAllNotices} compact />}
       {onRefresh && <button className="icon-btn" type="button" onClick={onRefresh} disabled={refreshing} aria-label={t('action.refresh')}>
         <span className={refreshing ? 'refresh-glyph spinning' : 'refresh-glyph'} aria-hidden="true">&#8635;</span>
       </button>}
@@ -584,6 +658,7 @@ function AppShell({
           <span className={online ? 'connection-dot' : 'connection-dot offline'} aria-hidden="true" title={online ? t('app.online') : t('app.offlineShort')} />
           <span role="status" className={online && !refreshing ? 'sr-only' : undefined}>{online ? (refreshing ? t('app.refreshing') : t('app.online')) : t('app.offlineShort')}</span>
           {onRefresh && <button className="text-btn" type="button" onClick={onRefresh} disabled={refreshing}>{t('action.refresh')}</button>}
+          {notices && <NotificationBell notices={notices} onOpen={onOpenNotice} onMarkAll={onMarkAllNotices} />}
         </div>
       </header>
       <main id="main-content" className={bottomNav ? 'main-content with-bottom-nav' : 'main-content'}>{children}</main>
@@ -678,16 +753,18 @@ function PartnerWorkspace({ token, user, onLogout, onExpired, onSessionRenewed, 
   >
     <Banners message={message} error={error} onDismissError={clearError} onDismissMessage={() => setMessage('')} />
     <ErrorBoundary resetKey={tab}>
-      <PartnerPortal
-        key={reloadKey}
-        user={user}
-        fetchJson={fetchJson}
-        language={language}
-        t={t}
-        tab={tab}
-        onTab={(id) => navigate(buildHash(id))}
-        onError={setError}
-      />
+      <Suspense fallback={<ViewLoading />}>
+        <PartnerPortal
+          key={reloadKey}
+          user={user}
+          fetchJson={fetchJson}
+          language={language}
+          t={t}
+          tab={tab}
+          onTab={(id) => navigate(buildHash(id))}
+          onError={setError}
+        />
+      </Suspense>
     </ErrorBoundary>
   </AppShell>;
 }
@@ -713,6 +790,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const [loadState, setLoadState] = useState('loading');
   const [refreshing, setRefreshing] = useState(false);
   const [summary, setSummary] = useState({ summary: {}, sectors });
+  // What the system has told this account, with the unread count. Loaded with
+  // everything else and after every action, so the bell moves with the work.
+  const [notices, setNotices] = useState({ items: [], unread: 0 });
   const [projects, setProjects] = useState([]);
   const [activities, setActivities] = useState([]);
   const [approvals, setApprovals] = useState([]);
@@ -809,11 +889,16 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     // then what needs their approval, then the wider register. Projects is gone
     // -- every control on it is the Director's, so it was a read-only page that
     // repeated what the plan and the register already say.
+    //
+    // "My plan" is what the Director expects of them; "My work" is the register
+    // of what they are actually doing. The two used to be "My month" and "All
+    // work", which named the software's objects rather than the manager's two
+    // questions.
     navItems = [
       ['dashboard', t('nav.home'), 0, 'main', t('nav.home')],
-      ['monthly', t('nav.myMonth'), 0, 'main', t('nav.shortMonth')],
+      ['monthly', t('nav.myPlan'), 0, 'main', t('nav.shortMyPlan')],
       ['approval-queue', t('nav.approvalQueue'), approvalCount, 'main', t('nav.shortApprovals')],
-      ['activities', t('nav.allWork'), 0, 'main', t('nav.activities')],
+      ['activities', t('nav.myWork'), 0, 'main', t('nav.myWork')],
       ...(coversTrips ? [['movements', t('nav.trips'), 0, 'main', t('nav.shortTrips')]] : []),
       ...(coversTrips ? [] : [['movements', t('nav.trips'), 0, 'more']]),
       ['reports', t('nav.reports'), 0, 'more'],
@@ -866,12 +951,14 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       // for them, rather than being refused and the refusal ignored.
       isDirector ? fetchJson('/api/users') : Promise.resolve(emptyRegister),
       isDirector ? fetchJson('/api/partners') : Promise.resolve(emptyPartnerRegister),
-      fetchJson('/api/rates')
+      fetchJson('/api/rates'),
+      fetchJson('/api/notifications?limit=40')
     ]);
     if (requestNumber !== latestLoad.current) return;
     setRefreshing(false);
 
-    const [summaryResult, projectResult, activityResult, approvalResult, managerResult, queueResult, peopleResult, userResult, partnerResult, rateResult] = results;
+    const [summaryResult, projectResult, activityResult, approvalResult, managerResult, queueResult, peopleResult, userResult, partnerResult, rateResult, noticeResult] = results;
+    if (noticeResult.status === 'fulfilled') setNotices(noticeResult.value);
     const criticalFailure = [summaryResult, projectResult, activityResult, approvalResult].find((result) => result.status === 'rejected');
     if (criticalFailure) {
       setLoadState((current) => (current === 'ready' ? 'ready' : 'failed'));
@@ -1774,6 +1861,24 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const openQueueItem = (item) => (item.ref ? navigate(buildHash('movements', item.id)) : openActivity(item.id));
   const onModuleChanged = useCallback(() => { loadData(); }, [loadData]);
 
+  // Opening a notification marks it read and goes where the event happened.
+  // The read mark is written first and reflected locally, so the count drops
+  // at once; the server's answer is what the next load shows.
+  const openNotice = useCallback(async (notice) => {
+    if (!notice.read) {
+      setNotices((current) => ({
+        items: current.items.map((item) => (item.id === notice.id ? { ...item, read: true } : item)),
+        unread: Math.max(0, current.unread - 1)
+      }));
+      fetchJson(`/api/notifications/${notice.id}/read`, { method: 'PATCH' }).catch(() => {});
+    }
+    if (notice.link) navigate(notice.link);
+  }, [fetchJson, navigate]);
+  const markAllNotices = useCallback(async () => {
+    setNotices((current) => ({ items: current.items.map((item) => ({ ...item, read: true })), unread: 0 }));
+    try { await fetchJson('/api/notifications/read-all', { method: 'POST' }); } catch (markError) { fail(markError.message); }
+  }, [fetchJson, fail]);
+
   // ---- the page ------------------------------------------------------------------
 
   let content;
@@ -1805,6 +1910,8 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       onOpenQueueItem={openQueueItem}
       onDecide={decideFromQueue}
       onOpenPlan={openPlanRoute}
+      notices={notices}
+      onOpenNotice={openNotice}
     />;
   } else if (view === 'approval-queue') {
     content = <>
@@ -1824,6 +1931,13 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
           busy={actionBusy}
           empty={t('approval.queueEmpty')}
         />}
+      {/* The Director's REVIEW WORK: everything the managers have handed in --
+          finished activities waiting for the final check, and month-end
+          reports waiting to be accepted or returned. Each opens the record
+          where the approve / return buttons are, so this page and the record
+          cannot offer different decisions. */}
+      {isDirector && <ReviewQueue fetchJson={fetchJson} reloadKey={summary} user={user}
+        onOpenActivity={openActivity} onOpenPlan={openPlanRoute} />}
     </>;
   } else if (view === 'projects') {
     content = <>
@@ -2062,6 +2176,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     refreshing={refreshing}
     onRefresh={loadData}
     onLogout={onLogout}
+    notices={notices}
+    onOpenNotice={openNotice}
+    onMarkAllNotices={markAllNotices}
     onChangePassword={() => changeOwnPassword().catch((changeError) => fail(changeError.message))}
     accountLines={[
       roleName(user.role, t),
@@ -2072,7 +2189,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   >
     <Banners message={message} error={error} onDismissMessage={clearMessage} onDismissError={clearError} />
     {issues.managers && loadState === 'ready' && <p className="notice-banner" role="status">{t('msg.managersUnavailable')}</p>}
-    <ErrorBoundary resetKey={view}>{content}</ErrorBoundary>
+    <ErrorBoundary resetKey={view}>
+      <Suspense fallback={<ViewLoading />}>{content}</Suspense>
+    </ErrorBoundary>
   </AppShell>;
 }
 
@@ -2085,6 +2204,15 @@ function LanguagePicker({ language, setLanguage, label }) {
       {LANGUAGES.map((option) => <option key={option.code} value={option.code}>{option.nativeName}</option>)}
     </select>
   </label>;
+}
+
+// What fills the page while a lazily-loaded module is on its way. It reuses
+// `app.loading` -- "Getting your work…" -- so no new string is needed in any
+// of the four languages, and `role="status"` means a screen reader is told
+// the page is working rather than left on a page that has gone blank.
+function ViewLoading() {
+  const t = useT();
+  return <div className="view-loading" role="status">{t('app.loading')}</div>;
 }
 
 function LoadIssue({ onRetry }) {

@@ -46,9 +46,10 @@ export const PLAN_WORKABLE_STATUSES = ['Confirmed', 'In Progress'];
 export const PLAN_PRIORITIES = ['Low', 'Medium', 'High'];
 export const REPORT_STATUSES = ['Submitted', 'Accepted', 'Returned'];
 
-// How the money left the Director's hands. Recorded for the audit trail; the
-// platform neither performs nor settles any of them.
-export const PAYMENT_METHODS = ['Cash', 'Bank Transfer', 'Mobile Money', 'Cheque', 'Credit', 'Other'];
+// How the money left the Director's hands. One list, shared with the expense
+// form, so the dropdown can never offer what this CHECK constraint refuses.
+import { PAYMENT_METHODS } from '../../shared/paymentMethods.js';
+export { PAYMENT_METHODS };
 
 // Payment evidence proves money was spent. Activity evidence proves the work
 // was done. They are different things and are counted separately (section 7).
@@ -416,7 +417,75 @@ const statements = [
    )`,
   `ALTER TABLE monthly_reports DROP CONSTRAINT IF EXISTS monthly_reports_status_check`,
   `ALTER TABLE monthly_reports ADD CONSTRAINT monthly_reports_status_check
-     CHECK (status IN (${REPORT_STATUSES.map((status) => `'${status}'`).join(', ')}))`
+     CHECK (status IN (${REPORT_STATUSES.map((status) => `'${status}'`).join(', ')}))`,
+
+  // ---- when each commitment is due ------------------------------------------
+  //
+  // The Director's plan says "10 site visits by 31 October". The month end was
+  // the only deadline before, so every objective was due on the same day and
+  // nothing could be called late until the month was over. A deadline per
+  // objective is optional: NULL means "by the end of the month", which is what
+  // every objective written before this column meant.
+  `ALTER TABLE plan_objectives ADD COLUMN IF NOT EXISTS deadline DATE`,
+
+  // ---- who handed the month to its manager, and when -------------------------
+  //
+  // created_by says who typed the plan; manager_id says who works it. The act of
+  // handing it over -- naming the manager, at creation or later -- was only
+  // recoverable from the history table. The manager's screen says "Assigned by
+  // X on <date>", and that is a column, not a search of the trail. Backfilled
+  // from the confirmation stamp for months written before this, because that is
+  // who assigned them: a plan is confirmed by the Director who wrote it.
+  `ALTER TABLE monthly_plans ADD COLUMN IF NOT EXISTS assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL`,
+  `ALTER TABLE monthly_plans ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ`,
+  `UPDATE monthly_plans
+      SET assigned_by = COALESCE(confirmed_by, created_by), assigned_at = COALESCE(confirmed_at, created_at)
+    WHERE manager_id IS NOT NULL AND assigned_at IS NULL`,
+
+  // ---- in-app notifications ---------------------------------------------------
+  //
+  // One row per person per event: "your October plan has been assigned", "your
+  // report was returned: <reason>", "Mining's report is waiting for you". This
+  // is the only delivery channel there is -- nothing sends email or SMS, and
+  // nothing pretends to. A row exists once it is written and is read once the
+  // person opens it; there is no "delivered" state to fake.
+  //
+  // The text is NOT stored in English. `kind` names the event and `params` holds
+  // what the sentence needs (operation, month, reason, record name), and the
+  // browser builds the sentence in the reader's language. A stored sentence
+  // would freeze the language it was written in.
+  //
+  // Rows follow the record they are about: deleting a plan or an activity takes
+  // its notifications with it, so nothing can point at a record that is gone.
+  `CREATE TABLE IF NOT EXISTS notifications (
+     id SERIAL PRIMARY KEY,
+     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     kind VARCHAR(40) NOT NULL,
+     params JSONB NOT NULL DEFAULT '{}'::jsonb,
+     link TEXT NOT NULL DEFAULT '',
+     plan_id INTEGER REFERENCES monthly_plans(id) ON DELETE CASCADE,
+     activity_id VARCHAR(50) REFERENCES activities(id) ON DELETE CASCADE,
+     actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+     actor_name VARCHAR(150) NOT NULL DEFAULT '',
+     read_at TIMESTAMPTZ,
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   )`,
+  `CREATE INDEX IF NOT EXISTS notifications_user_idx ON notifications(user_id, created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS notifications_unread_idx ON notifications(user_id) WHERE read_at IS NULL`
+];
+
+// The events a person can be told about. The browser owns one sentence per
+// kind, in every language; the server only ever writes the kind and its params.
+export const NOTIFICATION_KINDS = [
+  'plan_assigned',      // to the manager: a month has been handed to you
+  'plan_changed',       // to the manager: the Director changed your month
+  'change_requested',   // to the Director: a manager asks for a change to the plan
+  'report_submitted',   // to the Director: a month-end report is waiting
+  'report_accepted',    // to the manager: the month was accepted and closed
+  'report_returned',    // to the manager: the report came back, with the reason
+  'work_submitted',     // to the Director: finished work waits for the final check
+  'work_approved',      // to the person carrying the work: it was marked done
+  'work_returned'       // to the person carrying the work: it came back, with the reason
 ];
 
 export async function migrateMonthlyModule(pool) {

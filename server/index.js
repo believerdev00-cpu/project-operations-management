@@ -23,6 +23,7 @@ import reportRouter from './routes/reports.js';
 import partnerRouter from './routes/partner.js';
 import partnersRouter from './routes/partners.js';
 import monthlyPlanRouter from './routes/monthlyPlans.js';
+import notificationRouter from './routes/notifications.js';
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -428,6 +429,69 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
     scopeValues
   );
 
+  // The month at a glance, for the Director's dashboard and the manager's.
+  //
+  // A plan is ACTIVE from the moment the Director types it (it is created
+  // Confirmed) until it is Closed. The work inside it is read from the
+  // objectives, because that is where the month is actually recorded: an
+  // objective is NOT STARTED until a day is reported against it, IN PROGRESS
+  // while the days fall short of its target, COMPLETED once they reach it, and
+  // OVERDUE when its own deadline has passed with the target unmet. Objectives
+  // with no countable target are counted as not started or in progress by
+  // whether anything was recorded, and never as completed -- arithmetic cannot
+  // finish them, the Director closes the month.
+  //
+  // These are counts across OPEN months, not only the current calendar month:
+  // a September plan still waiting on its report in October is still work.
+  const planCounts = await pool.query(
+    `WITH open_plans AS (
+       SELECT p.id, p.status, p.sector FROM monthly_plans p
+        WHERE p.status NOT IN ('Draft', 'Closed')${scoped ? ' AND p.sector = $1' : ''}
+     ),
+     objective_state AS (
+       SELECT o.id, o.target_quantity, o.deadline,
+              COALESCE((SELECT SUM(r.quantity_done) FROM plan_daily_reports r WHERE r.objective_id = o.id), 0) AS done,
+              (SELECT COUNT(*) FROM plan_daily_reports r WHERE r.objective_id = o.id)::int AS days
+         FROM plan_objectives o JOIN open_plans p ON p.id = o.plan_id
+     )
+     SELECT
+       (SELECT COUNT(*) FROM open_plans)::int AS active_plans,
+       (SELECT COUNT(*) FROM open_plans WHERE status = 'In Progress')::int AS plans_in_progress,
+       (SELECT COUNT(*) FROM open_plans WHERE status = 'Completed')::int AS plans_completed,
+       (SELECT COUNT(*) FROM monthly_plans p WHERE p.status = 'Closed'${scoped ? ' AND p.sector = $1' : ''})::int AS plans_closed,
+       (SELECT COUNT(*) FROM objective_state)::int AS objectives,
+       (SELECT COUNT(*) FROM objective_state WHERE days = 0)::int AS objectives_not_started,
+       (SELECT COUNT(*) FROM objective_state
+         WHERE days > 0 AND (target_quantity IS NULL OR done < target_quantity))::int AS objectives_in_progress,
+       (SELECT COUNT(*) FROM objective_state
+         WHERE target_quantity IS NOT NULL AND done >= target_quantity)::int AS objectives_completed,
+       (SELECT COUNT(*) FROM objective_state
+         WHERE deadline IS NOT NULL AND deadline < CURRENT_DATE
+           AND (target_quantity IS NULL OR done < target_quantity))::int AS objectives_overdue,
+       -- Planned activities past their deadline and not finished: the other
+       -- kind of late work a month can hold.
+       (SELECT COUNT(*) FROM activities a
+         WHERE a.deadline IS NOT NULL AND a.deadline < CURRENT_DATE
+           AND a.status NOT IN ('Completed', 'Rejected', 'Cancelled', 'Draft')${scoped ? ' AND a.sector = $1' : ''})::int
+         AS activities_overdue,
+       -- The approved ceilings and recorded spend of the open months, so the
+       -- dashboard's budget line comes from the plans and not from the legacy
+       -- project figures.
+       (SELECT COALESCE(SUM(p.approved_budget), 0) FROM monthly_plans p JOIN open_plans o ON o.id = p.id) AS plans_budget,
+       (SELECT COALESCE(SUM(r.cost), 0) FROM plan_daily_reports r JOIN open_plans o ON o.id = r.plan_id)
+         + (SELECT COALESCE(SUM(e.amount), 0) FROM activity_expenses e
+              JOIN activities a ON a.id = e.activity_id JOIN open_plans o ON o.id = a.monthly_plan_id) AS plans_spent`,
+    scopeValues
+  );
+  const planRow = planCounts.rows[0];
+
+  // What this account has not yet opened under the bell. Per person, never
+  // per role: the Director's unread count is theirs alone.
+  const unread = await pool.query(
+    'SELECT COUNT(*)::int AS unread FROM notifications WHERE user_id = $1 AND read_at IS NULL',
+    [req.user.id]
+  );
+
   // Same figures again, split per sector, so the director can compare farming,
   // mining, agriculture and logistics side by side. A sector manager is scoped
   // as everywhere else and simply gets a single row back.
@@ -504,6 +568,21 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
       myOpenWork: homeCounts.rows[0].my_open_work,
       finalChecksWaiting: homeCounts.rows[0].final_checks,
       monthEndReportsWaiting: homeCounts.rows[0].month_end_reports,
+      // The month at a glance (see planCounts above).
+      activePlans: planRow.active_plans,
+      plansInProgress: planRow.plans_in_progress,
+      plansCompleted: planRow.plans_completed,
+      plansClosed: planRow.plans_closed,
+      objectives: planRow.objectives,
+      objectivesNotStarted: planRow.objectives_not_started,
+      objectivesInProgress: planRow.objectives_in_progress,
+      objectivesCompleted: planRow.objectives_completed,
+      objectivesOverdue: planRow.objectives_overdue,
+      activitiesOverdue: planRow.activities_overdue,
+      overdueWork: planRow.objectives_overdue + planRow.activities_overdue,
+      plansBudget: Math.round(Number(planRow.plans_budget || 0) * 100) / 100,
+      plansSpent: Math.round(Number(planRow.plans_spent || 0) * 100) / 100,
+      unreadNotifications: unread.rows[0].unread,
       totalProjects: project.total_projects,
       activeOperations: operationsStats.rows[0].active_operations,
       approvalsPending: approval.pending_approvals,
@@ -953,6 +1032,12 @@ app.use('/api/partners', authMiddleware, partnersRouter);
 // confirmed allocation is handed over outside it, and these records exist for
 // accountability.
 app.use('/api/monthly-plans', authMiddleware, monthlyPlanRouter);
+
+// What the system has told this account: a plan handed to them, a report
+// returned with its reason, work waiting for a check. In-app only -- there is
+// no email or SMS behind it and the rows never claim otherwise. Each account
+// reads and marks only its own.
+app.use('/api/notifications', authMiddleware, notificationRouter);
 
 // An /api path nothing matched is answered in JSON, not by the SPA fallback
 // below. Handing back index.html would give the client an HTML page where it

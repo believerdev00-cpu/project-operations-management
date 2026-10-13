@@ -24,13 +24,15 @@ const API = process.env.API || 'http://localhost:5000';
 // Order matters only in that the cheapest and most self-contained runs first:
 // a broken dictionary fails in a second, without touching the database.
 const SUITES = [
+  ['pure logic', 'pure-logic.test.mjs', { needsApi: false }],
   ['translations', 'translations.test.mjs', { needsApi: false }],
   ['account security', 'account-security.test.mjs', { needsApi: true }],
   ['approval workflow', 'approval-workflow.test.mjs', { needsApi: true }],
   ['workflow fixes', 'workflow-fixes.test.mjs', { needsApi: true }],
   ['partner access', 'partner-access.test.mjs', { needsApi: true }],
   ['monthly workflow', 'monthly-workflow.test.mjs', { needsApi: true }],
-  ['monthly target', 'monthly-target.test.mjs', { needsApi: true }]
+  ['monthly target', 'monthly-target.test.mjs', { needsApi: true }],
+  ['assigned plan', 'assigned-plan.test.mjs', { needsApi: true }]
 ];
 
 const only = process.argv[2];

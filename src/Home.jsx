@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { BUSINESS_OPERATIONS, operationName } from '../shared/businessOperations.js';
 import { fill, useI18n } from './i18n.js';
 import { MoneyBar, activityJourney, journeyLabel, journeyTone, nextAction } from './journey.jsx';
+import { todayLocal } from './format.js';
 
 // The home screen: "what do I need to do?", before anything else.
 //
@@ -43,10 +44,33 @@ function todayLabel(language) {
   return new Date().toLocaleDateString(language, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 }
 
+// Where one objective stands, in the four words a manager uses: not started,
+// in progress, done, overdue. Derived from the figures the server calculates
+// (nothing is typed) so the plan screen, the dashboard and the Director's
+// review all call the same objective the same thing.
+//
+// Overdue beats in-progress: an objective past its own deadline with work still
+// to do is late whatever else is true of it. An objective with no deadline is
+// due at month end and is never called overdue mid-month.
+export function objectiveState(objective, today = todayLocal()) {
+  if (objective.complete) return 'done';
+  if (objective.deadline && objective.deadline < today) return 'overdue';
+  if (Number(objective.quantityDone) > 0 || Number(objective.updateCount) > 0) return 'inProgress';
+  return 'notStarted';
+}
+
+export function objectiveStateTone(state) {
+  if (state === 'done') return 'tone-done';
+  if (state === 'overdue') return 'tone-stopped';
+  if (state === 'inProgress') return 'tone-active';
+  return 'tone-waiting';
+}
+
 export default function Home({
   user, summary, sectorRows, approvalItems, approvalCount, fetchJson, reloadKey,
   canAddActivity, canAddMovement, busy, rate,
-  onGo, onAddActivity, onAddMovement, onOpenActivity, onOpenQueueItem, onDecide, onOpenPlan, onStartWork
+  onGo, onAddActivity, onAddMovement, onOpenActivity, onOpenQueueItem, onDecide, onOpenPlan, onStartWork,
+  notices = null, onOpenNotice
 }) {
   const { language, t } = useI18n();
   const isDirector = user.role === 'super-admin';
@@ -112,9 +136,52 @@ export default function Home({
     isDirector && {
       id: 'reports', count: counts.monthEndReportsWaiting || 0, tone: counts.monthEndReportsWaiting ? 'active' : 'calm',
       title: t('home.tileMonthEnd'),
+      onClick: () => onGo('approval-queue')
+    },
+    // The organisation at a glance (section 1 and 11 of the brief): how many
+    // months are live, how much of their work is moving, finished, or late.
+    // The counts are the objectives on every open month, from /api/summary.
+    isDirector && {
+      id: 'plans', count: counts.activePlans || 0, tone: 'calm',
+      title: t('home.tileActivePlans'),
+      onClick: () => onGo('monthly')
+    },
+    isDirector && {
+      id: 'progress', count: counts.objectivesInProgress || 0, tone: counts.objectivesInProgress ? 'active' : 'calm',
+      title: t('home.tileInProgress'),
+      onClick: () => onGo('monthly')
+    },
+    isDirector && {
+      id: 'done', count: counts.objectivesCompleted || 0, tone: 'calm',
+      title: t('home.tileCompleted'),
+      onClick: () => onGo('monthly')
+    },
+    isDirector && {
+      id: 'overdue', count: counts.overdueWork || 0, tone: counts.overdueWork ? 'urgent' : 'calm',
+      title: t('home.tileOverdue'),
       onClick: () => onGo('monthly')
     }
   ].filter(Boolean);
+
+  // "Needs your attention": the same counts as sentences, each one a link. A
+  // Director who reads one line and presses it has done the whole dashboard.
+  const attention = isDirector ? [
+    counts.monthEndReportsWaiting > 0 && { id: 'reports', text: fill(t('home.attentionReports'), { count: counts.monthEndReportsWaiting }), go: () => onGo('approval-queue') },
+    counts.finalChecksWaiting > 0 && { id: 'checks', text: fill(t('home.attentionChecks'), { count: counts.finalChecksWaiting }), go: () => onGo('activities', 'final-check') },
+    approvalCount > 0 && { id: 'approvals', text: fill(t('home.attentionApprovals'), { count: approvalCount }), go: () => onGo('approval-queue') },
+    counts.overdueWork > 0 && { id: 'overdue', text: fill(t('home.attentionOverdue'), { count: counts.overdueWork }), go: () => onGo('monthly') },
+    counts.budgetChangesPending > 0 && { id: 'budget', text: fill(t('home.attentionBudget'), { count: counts.budgetChangesPending }), go: () => onGo('activities') },
+    counts.activePlans > 0 && { id: 'active', text: fill(t('home.attentionActive'), { count: counts.activePlans }), go: () => onGo('monthly') }
+  ].filter(Boolean) : [];
+
+  // What the system told this manager and they have not opened yet, shown as
+  // cards at the top of their home: a new plan, work returned, a report
+  // returned. These are the events that change what they should do next, so
+  // they are not left under the bell alone. Opening one marks it read.
+  const alerts = isManager
+    ? (notices?.items || []).filter((notice) => !notice.read
+      && ['plan_assigned', 'report_returned', 'work_returned', 'report_accepted', 'work_approved', 'plan_changed'].includes(notice.kind)).slice(0, 4)
+    : [];
 
   // The operations this account covers: all four for the Director or an
   // all-operations manager, otherwise the one they work in.
@@ -166,58 +233,119 @@ export default function Home({
         <h2>{isDirector || user.coversAllSectors ? t('user.allOperations') : operationName(user.sector, language)}</h2>
         <p>{todayLabel(language)}</p>
       </div>
-      {(canAddActivity || canAddMovement) && <div className="home-quick">
-        {canAddActivity && <button className="primary-btn" type="button" onClick={onAddActivity}>
-          {isDirector ? t('action.assignActivity') : t('action.raiseActivity')}
-        </button>}
-        {canAddMovement && <button className="secondary-btn" type="button" onClick={onAddMovement}>
-          {t('home.newTrip')}
-        </button>}
-      </div>}
+      {/* The Director's five doors (section 1 of the brief), in the words of
+          the job: create a plan, review what came in, the managers, the
+          reports, the budgets. Assigning a one-off activity and logging a trip
+          are still here, but behind the five, because they are not the daily
+          workflow. A manager keeps their own two. */}
+      {isDirector
+        ? <div className="home-quick home-quick-director">
+          <button className="primary-btn" type="button" onClick={() => onGo('monthly')}>{t('home.createPlan')}</button>
+          <button className="secondary-btn" type="button" onClick={() => onGo('approval-queue')}>{t('home.reviewWork')}</button>
+          <button className="secondary-btn" type="button" onClick={() => onGo('users')}>{t('home.viewManagers')}</button>
+          <button className="secondary-btn" type="button" onClick={() => onGo('reports')}>{t('home.viewReports')}</button>
+          <button className="secondary-btn" type="button" onClick={() => onGo('monthly')}>{t('home.viewBudgets')}</button>
+          {canAddActivity && <button className="text-btn" type="button" onClick={onAddActivity}>{t('action.assignActivity')}</button>}
+          {canAddMovement && <button className="text-btn" type="button" onClick={onAddMovement}>{t('home.newTrip')}</button>}
+        </div>
+        : (canAddActivity || canAddMovement) && <div className="home-quick">
+          {canAddActivity && <button className="primary-btn" type="button" onClick={onAddActivity}>{t('action.raiseActivity')}</button>}
+          {canAddMovement && <button className="secondary-btn" type="button" onClick={onAddMovement}>{t('home.newTrip')}</button>}
+        </div>}
     </section>
 
-    {/* THE MANAGER'S DASHBOARD (section 12): what must be completed this month,
-        what is already done, and one button to record today's work. It comes
-        before the queues and the tiles because leading the operation and writing
-        down what happened IS the manager's job -- the rest is secondary.
+    {/* What the system has told this manager since they last looked: a new
+        plan, work or a report returned with its reason, work approved. Each
+        card is one sentence and one button. */}
+    {alerts.length > 0 && <ul className="home-alerts">
+      {alerts.map((notice) => <li key={notice.id} className={`home-alert home-alert-${notice.kind}`}>
+        <span>{noticeSentence(notice, t, language)}</span>
+        <button type="button" className="primary-btn compact" onClick={() => onOpenNotice?.(notice)}>
+          {notice.kind === 'plan_assigned' || notice.kind === 'plan_changed' ? t('home.viewPlan') : t('home.openRecord')}
+        </button>
+      </li>)}
+    </ul>}
+
+    {/* THE MANAGER'S DASHBOARD (section 10 of the brief): the month in one
+        line -- how many objectives, how many done, in progress, not started --
+        then each objective with the one thing to do on it, then the one button
+        that records today's work. It comes before the queues and the tiles
+        because leading the operation and writing down what happened IS the
+        manager's job; the rest is secondary.
 
         The Director does not get this block: they monitor the four operations
         further down the page and do not record work at all. */}
-    {isManager && myMonth && myMonth.objectives?.length > 0 && <section className="my-month">
-      <div className="my-month-head">
-        <div>
-          <h3>{t('plan.objectivesTitle')}</h3>
-          <small>{fill(t('home.thisMonth'), { month: monthLabel(month, language) })}</small>
-        </div>
-        {myMonth.overallProgress !== null && myMonth.overallProgress !== undefined
-          && <span className="my-month-overall">{myMonth.overallProgress}%</span>}
-      </div>
-      <div className="my-month-objectives">
-        {myMonth.objectives.map((objective) => <div className="my-month-objective" key={objective.id}>
-          <div className="my-month-objective-head">
-            <strong>{objective.title}</strong>
-            {objective.percent === null
-              ? <small className="muted-cell">{t('plan.notCounted')}</small>
-              : <small className={objective.complete ? 'is-done' : ''}>{objective.percent}%</small>}
+    {isManager && myMonth && myMonth.objectives?.length > 0 && (() => {
+      const states = myMonth.objectives.map((objective) => objectiveState(objective));
+      const done = states.filter((state) => state === 'done').length;
+      const active = states.filter((state) => state === 'inProgress' || state === 'overdue').length;
+      const left = states.length - done - active;
+      const notStarted = myMonth.status === 'Confirmed';
+      const allDone = done === states.length;
+      const submitted = myMonth.report?.status === 'Submitted';
+      const closed = myMonth.status === 'Closed';
+      return <section className="my-month">
+        <div className="my-month-head">
+          <div>
+            <h3>{fill(t('home.myPlanTitle'), { month: monthLabel(month, language) })}</h3>
+            <small>{fill(t('home.objectiveCounts'), { total: states.length, done, active, left })}</small>
           </div>
-          {objective.percent !== null && <>
-            <div className="objective-bar"><span style={{ width: `${objective.percent}%` }} /></div>
-            <div className="objective-figures">
-              <span>{fill(t('plan.doneOfTarget'), {
-                done: objective.quantityDone, target: objective.targetQuantity, unit: objective.targetUnit
-              })}</span>
-              {!objective.complete && <span className="muted-cell">{fill(t('plan.leftToDo'), {
-                amount: objective.quantityRemaining, unit: objective.targetUnit
-              })}</span>}
-            </div>
-          </>}
-        </div>)}
-      </div>
-      {/* The main action on the manager's whole screen. */}
-      <button className="primary-btn my-month-record" type="button" onClick={() => onOpenPlan(myMonth.id)}>
-        {t('home.recordTodaysWork')}
-      </button>
-    </section>}
+          {myMonth.overallProgress !== null && myMonth.overallProgress !== undefined
+            && <span className="my-month-overall">{myMonth.overallProgress}%</span>}
+        </div>
+        <h4 className="my-month-sub">{t('home.todaysWork')}</h4>
+        <div className="my-month-objectives">
+          {myMonth.objectives.map((objective, index) => {
+            const state = states[index];
+            return <div className="my-month-objective" key={objective.id}>
+              <div className="my-month-objective-head">
+                <strong>{objective.title}</strong>
+                <span className={`status-badge ${objectiveStateTone(state)}`}>{t(`plan.objectiveState.${state}`)}</span>
+              </div>
+              {objective.percent !== null && <>
+                <div className="objective-bar"><span style={{ width: `${objective.percent}%` }} /></div>
+                <div className="objective-figures">
+                  <span>{fill(t('plan.doneOfTarget'), {
+                    done: objective.quantityDone, target: objective.targetQuantity, unit: objective.targetUnit
+                  })}</span>
+                  {objective.deadline && !objective.complete && <span className="muted-cell">
+                    {fill(t('plan.dueOn'), { date: formatDay(objective.deadline, language) })}
+                  </span>}
+                </div>
+              </>}
+              {/* One obvious action per objective: Start on a month nobody has
+                  begun, Update once it is moving, nothing once it is done. All
+                  of them open the plan, where the form is. */}
+              {!closed && state !== 'done' && <div className="my-month-do">
+                <button type="button" className={notStarted ? 'primary-btn compact' : 'secondary-btn compact'}
+                  onClick={() => onOpenPlan(myMonth.id)}>
+                  {notStarted ? t('home.actionStart') : t('home.actionUpdate')}
+                </button>
+              </div>}
+            </div>;
+          })}
+        </div>
+        {/* The main action on the manager's whole screen: record today, or --
+            once the month is done -- hand it in. */}
+        {!closed && (submitted
+          ? <p className="my-month-note">{t('monthend.waitingReview')}</p>
+          : <button className="primary-btn my-month-record" type="button" onClick={() => onOpenPlan(myMonth.id)}>
+            {allDone || myMonth.status === 'Completed' ? t('home.actionSubmit') : t('home.recordTodaysWork')}
+          </button>)}
+      </section>;
+    })()}
+
+    {/* The Director's "needs your attention" (section 11): every line a link. */}
+    {isDirector && <>
+      <h3 className="home-heading">{t('home.needsAttention')}</h3>
+      {attention.length
+        ? <ul className="attention-list">
+          {attention.map((item) => <li key={item.id}>
+            <button type="button" className="attention-item" onClick={item.go}>{item.text} &rarr;</button>
+          </li>)}
+        </ul>
+        : <p className="home-lead">{t('home.allClear')}</p>}
+    </>}
 
     <h3 className="home-heading">{t('home.todo')}</h3>
     <div className="home-tiles">
@@ -273,7 +401,18 @@ export default function Home({
       </ul>
     </>}
 
-    <h3 className="home-heading">{fill(t('home.thisMonth'), { month: monthLabel(month, language) })}</h3>
+    {/* The money, across the open months (section 1: "budget overview"): the
+        ceilings the Director approved and what has been recorded against them.
+        Summed from the plans, not the legacy project figures. */}
+    {isDirector && (counts.plansBudget > 0 || counts.plansSpent > 0) && <>
+      <h3 className="home-heading">{t('home.budgetOverview')}</h3>
+      <div className="budget-overview">
+        <MoneyBar approved={counts.plansBudget || 0} spent={counts.plansSpent || 0} format={formatUsdShort} rates={rate} />
+        <small className="muted-cell">{t('home.budgetApprovedOpen')} · {t('home.budgetSpentOpen')}</small>
+      </div>
+    </>}
+
+    <h3 className="home-heading">{isDirector ? `${t('home.sectorProgress')} · ${monthLabel(month, language)}` : fill(t('home.thisMonth'), { month: monthLabel(month, language) })}</h3>
     <div className="home-operations">
       {operations.map((operation) => {
         const plan = planFor(operation.id);
@@ -328,6 +467,84 @@ export default function Home({
       })}
     </div>
   </div>;
+}
+
+// One notification as a sentence, in the reader's language. The server stores
+// the event's kind and its params, never a sentence, so the same row reads in
+// Kinyarwanda for one person and French for the next.
+export function noticeSentence(notice, t, language) {
+  const params = notice.params || {};
+  // The Director's change, in the trail's own words. Not every action the
+  // server writes has a history.* key (the plan trail falls back to the English
+  // action for those, in trailActionLabel), so the same fallback applies here
+  // rather than printing "history.Objective set" under the bell.
+  const actionLabel = (action) => {
+    const key = `history.${action}`;
+    const label = t(key);
+    return label === key ? action : label;
+  };
+  const detail = Array.isArray(params.changes) && params.changes.length
+    ? params.changes.map(actionLabel).join(', ') + (params.detail ? ` (${params.detail})` : '')
+    : (params.detail || '');
+  return fill(t(`notice.kind.${notice.kind}`), {
+    operation: params.operation ? operationName(params.operation, language) : '',
+    month: params.month ? monthLabel(params.month, language) : '',
+    detail,
+    name: params.managerName || notice.actorName || '',
+    reason: params.reason || '',
+    activity: params.activity || ''
+  });
+}
+
+// The Director's REVIEW WORK page (section 8 of the brief): what the managers
+// have handed in. Two lists -- finished activities waiting for the final check,
+// and month-end reports waiting to be accepted or returned -- each item opening
+// the record where the approve / return buttons live. Both come from the same
+// queries as the dashboard tiles, so the numbers and the lists agree.
+export function ReviewQueue({ fetchJson, reloadKey, user, onOpenActivity, onOpenPlan }) {
+  const { language, t } = useI18n();
+  const [checks, setChecks] = useState(null);
+  const [reports, setReports] = useState(null);
+  const latest = useRef(0);
+
+  useEffect(() => {
+    const request = ++latest.current;
+    Promise.allSettled([
+      fetchJson('/api/activities?awaiting=final-check&limit=50'),
+      fetchJson('/api/monthly-plans')
+    ]).then(([checkResult, planResult]) => {
+      if (request !== latest.current) return;
+      setChecks(checkResult.status === 'fulfilled' ? checkResult.value : []);
+      setReports(planResult.status === 'fulfilled'
+        ? (planResult.value || []).filter((plan) => plan.report?.status === 'Submitted' && plan.status !== 'Closed')
+        : []);
+    });
+  }, [fetchJson, reloadKey]);
+
+  if (checks === null || reports === null) return null;
+  return <section className="review-queue">
+    <p className="home-lead">{t('home.reviewQueueBlurb')}</p>
+    <h3 className="home-heading">{t('home.reviewReports')}</h3>
+    {reports.length
+      ? <ul className="work-list">
+        {reports.map((plan) => <li key={plan.id}>
+          <button type="button" className="work-card" onClick={() => onOpenPlan(plan.id)}>
+            <span className="work-card-text">
+              <strong>{operationName(plan.operation, language)} · {monthLabel(plan.month, language)}</strong>
+              <small>{plan.managerName || '—'}
+                {plan.report?.submittedAt ? ` · ${fill(t('home.submittedOn'), { date: new Date(plan.report.submittedAt).toLocaleDateString(language) })}` : ''}
+                {plan.overallProgress !== null && plan.overallProgress !== undefined ? ` · ${plan.overallProgress}%` : ''}</small>
+            </span>
+            <span className="status-badge tone-waiting">{t('monthend.status.Submitted')}</span>
+          </button>
+        </li>)}
+      </ul>
+      : <div className="empty-state"><strong>{t('home.nothingToReview')}</strong></div>}
+    <h3 className="home-heading">{t('home.tileChecks')}</h3>
+    {checks.length
+      ? <WorkList items={checks} user={user} t={t} language={language} onOpen={onOpenActivity} />
+      : <div className="empty-state"><strong>{t('home.nothingToReview')}</strong></div>}
+  </section>;
 }
 
 // A record waiting for a decision, as a card with the three things the approver

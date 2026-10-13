@@ -112,8 +112,11 @@ export function nextAction(activity, user, t) {
   const handedBack = Boolean(activity.completionSubmittedAt) && activity.status !== 'Completed';
   const monthOpen = activity.planStatus !== 'Closed';
   // Work in a month the Director has not confirmed has no budget behind it yet,
-  // and the API refuses to start it.
-  const monthReady = !activity.monthlyPlanId || activity.planStatus === 'Confirmed';
+  // and the API refuses to start it. Only a Draft month blocks it: this used to
+  // test for 'Confirmed' alone, so the moment a month moved to In Progress or
+  // Completed every planned activity on it read "Waiting for the budget" on
+  // the home cards while the server was perfectly willing to start it.
+  const monthReady = !activity.monthlyPlanId || activity.planStatus !== 'Draft';
   const waiting = activity.approvalRequired && activity.approvalStatus === 'pending'
     && !['Draft', 'Cancelled', 'On Hold'].includes(activity.status);
 

@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { displayLanguage, fill, translate, useI18n, useT } from './i18n.js';
-import { ExpensePanel } from './MonthlyPlans.jsx';
+import { ExpensePanel } from './ExpensePanel.jsx';
 import { FilePicker, Journey, MoneyBar, NextStep, Section, activityJourney, goToSection } from './journey.jsx';
+import { Fact } from './ui.jsx';
+import { formatUsd } from './format.js';
 
 // The Director's review screen for one activity, and the same record as the
 // manager sees it -- whether they raised it themselves or the Director handed
@@ -82,12 +84,6 @@ export function approverName(record, sectorLabel, t) {
 
 // A trimmed budget is a negative number, and the sign belongs in front of the
 // currency symbol: -$50.00, not $-50.00.
-export function formatUsd(value) {
-  const amount = Number(value || 0);
-  const digits = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Math.abs(amount));
-  return `${amount < 0 ? '-' : ''}$${digits}`;
-}
-
 function formatLocal(value, currency) {
   return `${currency} ${new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(Number(value || 0))}`;
 }
@@ -760,10 +756,6 @@ export function formatTrailValue(field, value, userNames, t) {
   // Instructions and notes run to paragraphs; a trail line is a summary.
   const text = String(value);
   return text.length > 70 ? `${text.slice(0, 70)}…` : text;
-}
-
-function Fact({ label, value }) {
-  return <div className="fact"><span>{label}</span><strong>{value}</strong></div>;
 }
 
 // Statuses with an approved budget that can still be changed. Mirrors

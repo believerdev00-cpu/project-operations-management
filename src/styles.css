@@ -166,6 +166,11 @@ input[type="checkbox"] { width: 18px; height: 18px; min-height: 0; }
 .status-badge { color: var(--green); background: #eaf7ef; }
 .priority-badge { color: #94671c; background: #fff6dd; }
 .empty-state { display: grid; place-items: center; gap: 6px; min-height: 130px; padding: 24px; color: var(--muted); text-align: center; }
+
+/* While a lazily-loaded page module is on its way. It holds the same height
+   as an empty panel so the surrounding layout does not jump when the real
+   screen replaces it. */
+.view-loading { display: grid; place-items: center; min-height: 180px; padding: 32px; color: var(--muted); font-size: .82rem; }
 .empty-state strong { color: var(--ink); font-size: .87rem; }
 .empty-state span { font-size: .76rem; }
 .load-issue { gap: 12px; }
@@ -1023,3 +1028,72 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .quick-amounts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
 .quick-amount { padding: 5px 12px; color: var(--navy); font-size: .82rem; font-weight: 700; background: var(--blue-soft); border: 1px solid var(--line); border-radius: 999px; cursor: pointer; }
 .quick-amount:hover { background: var(--surface); border-color: var(--blue); }
+
+/* ---- notifications: the bell and its list -------------------------------------
+   One mechanism for every role. The count is unread rows for THIS account; the
+   list is one sentence per event, built in the reader's language. */
+.notice-bell { position: relative; }
+.notice-btn { position: relative; color: var(--navy); }
+.notice-btn svg { width: 22px; height: 22px; }
+.mobile-bar .notice-btn { color: inherit; }
+.notice-count { position: absolute; top: 4px; right: 2px; min-width: 18px; padding: 1px 5px; color: white; background: var(--red); border-radius: 9px; font-size: .68rem; font-weight: 800; line-height: 16px; text-align: center; }
+.notice-panel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 40; width: min(380px, calc(100vw - 24px)); max-height: min(70vh, 560px); display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); }
+.notice-head { display: flex; align-items: center; gap: 8px; padding: 10px 8px 10px 16px; border-bottom: 1px solid var(--line); }
+.notice-head strong { flex: 1; color: var(--navy); }
+.notice-close { width: 36px; height: 36px; font-size: 1.3rem; color: var(--muted); }
+.notice-list { margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.notice-item { display: grid; gap: 4px; width: 100%; padding: 12px 16px; color: var(--ink); background: none; border: 0; border-bottom: 1px solid var(--line); text-align: left; font: inherit; }
+.notice-item:hover { background: #fbfdff; }
+.notice-item.unread { background: var(--blue-soft); }
+.notice-item.unread .notice-text { font-weight: 700; }
+.notice-text { font-size: .9rem; line-height: 1.45; overflow-wrap: anywhere; }
+.notice-item small { color: var(--muted); font-size: .76rem; }
+.notice-empty { margin: 0; padding: 18px 16px; color: var(--muted); font-size: .88rem; line-height: 1.5; }
+.notice-foot { margin: 0; padding: 8px 16px; color: var(--muted); font-size: .72rem; border-top: 1px solid var(--line); }
+.mobile-bar .notice-panel { position: fixed; top: calc(var(--mobile-bar-h) + var(--safe-top)); right: 12px; left: 12px; width: auto; color: var(--ink); }
+
+/* ---- the manager's alerts and plan block --------------------------------------- */
+.home-alerts { display: grid; gap: 10px; margin: 18px 0 0; padding: 0; list-style: none; }
+.home-alert { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; padding: 14px 16px; background: var(--blue-soft); border: 1px solid #cfe1f3; border-left: 4px solid var(--blue); border-radius: 6px; font-size: .92rem; line-height: 1.45; }
+.home-alert > span { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+.home-alert-report_returned, .home-alert-work_returned { background: #fff6dd; border-color: #f0dfae; border-left-color: #c9962c; }
+.home-alert-report_accepted, .home-alert-work_approved { background: #eaf7ef; border-color: #cfe8d8; border-left-color: var(--green); }
+.my-month-sub { margin: 14px 0 8px; color: var(--muted); font-size: .76rem; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+.my-month-objective-head .status-badge { flex: none; }
+.my-month-do { margin-top: 8px; }
+.my-month-note { margin: 14px 0 0; padding: 12px 14px; color: #94671c; background: #fff6dd; border-radius: 6px; font-weight: 700; }
+
+/* ---- the Director's attention list and budget line ------------------------------- */
+.attention-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.attention-item { display: block; width: 100%; padding: 13px 16px; color: var(--navy); background: var(--surface); border: 1px solid var(--line); border-left: 4px solid #c9962c; border-radius: 6px; text-align: left; font: inherit; font-weight: 700; }
+.attention-item:hover { border-color: #b9cfe4; background: #fbfdff; }
+.home-quick-director { gap: 8px; }
+.home-quick-director .text-btn { padding: 6px 8px; }
+.budget-overview { display: grid; gap: 6px; }
+.review-queue { margin-top: 10px; }
+
+/* ---- the plan screen for a manager ---------------------------------------------- */
+.manager-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.plan-instructions { margin-top: 16px; padding: 14px 16px; background: var(--blue-soft); border-left: 4px solid var(--blue); border-radius: 6px; }
+.plan-instructions strong { display: block; color: var(--navy); font-size: .78rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.plan-instructions p { margin: 8px 0 0; font-size: .95rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.plan-request-change { margin-top: 12px; }
+.objective-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 6px; }
+.objective-meta small { font-size: .8rem; }
+.month-state { display: block; }
+.month-state.next-step-waiting { border-left-color: #c9962c; background: #fff6dd; }
+.month-state.next-step-done { border-left-color: var(--green); background: #eaf7ef; }
+.month-state.next-step-stopped { border-left-color: var(--red); background: #fdf0f0; }
+.month-state .admin-note { margin: 8px 0; }
+.month-submit .form-section-title { margin-top: 10px; }
+.objective-deadline { grid-column: 1 / -1; }
+
+@media (min-width: 761px) {
+  .objective-editor .objective-row { grid-template-columns: 28px minmax(0, 1fr) 90px 120px 170px auto; }
+  .objective-deadline { grid-column: auto; }
+  .objective-editor .objective-row:has(.objective-supports) { grid-template-columns: 28px minmax(0, 1fr) 90px 120px 170px auto; }
+}
+@media (max-width: 640px) {
+  .manager-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .home-quick-director .primary-btn, .home-quick-director .secondary-btn { flex: 1 1 calc(50% - 4px); }
+}

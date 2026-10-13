@@ -359,3 +359,13 @@ export function useBusy() {
   }, []);
   return [busy, run];
 }
+
+// ---- small shared pieces ----------------------------------------------------
+
+// One label-and-value pair in a `.detail-facts` row. The same six lines lived
+// in ActivityReview.jsx, MonthlyPlans.jsx and MovementModule.jsx; a fact is
+// the smallest thing every record screen draws, so it belongs here with the
+// rest of the shared interface rather than three times over.
+export function Fact({ label, value }) {
+  return <div className="fact"><span>{label}</span><strong>{value}</strong></div>;
+}
