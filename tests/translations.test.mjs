@@ -9,7 +9,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import * as i18n from '../src/i18n.js';
+// The dictionary itself, from shared/ -- where it lives because the API reads
+// it too (an exported report is written in its reader's language). Imported
+// from there rather than through src/i18n.js, which is the browser's React
+// layer over it and would pull React into this test for nothing.
+import * as i18n from '../shared/strings.js';
 import * as ops from '../shared/businessOperations.js';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -27,7 +31,18 @@ const FILES = ['App.jsx', 'ui.jsx', 'journey.jsx', 'Home.jsx', 'MovementModule.j
   .map((name) => path.join(root, 'src', name));
 
 const sources = Object.fromEntries(FILES.map((file) => [path.basename(file), fs.readFileSync(file, 'utf8')]));
-const allSource = Object.values(sources).join('\n');
+
+// The API reads the same dictionary (shared/strings.js): a report exported as a
+// PDF or a spreadsheet is written in the language its reader chose, so those
+// files call translate() with keys of their own. They are scanned for the key
+// checks -- a key only the exports use would otherwise be reported as unused,
+// and a typo in one would be caught by nobody -- but NOT for the hard-coded
+// English check below, which is about JSX.
+const SERVER_FILES = ['routes/reports.js'].map((name) => path.join(root, 'server', name));
+const serverSources = Object.fromEntries(
+  SERVER_FILES.map((file) => [path.basename(file), fs.readFileSync(file, 'utf8')])
+);
+const allSource = [...Object.values(sources), ...Object.values(serverSources)].join('\n');
 
 console.log('\n=== 1. every key is translated into all four languages ===');
 const gaps = i18n.missingTranslations();

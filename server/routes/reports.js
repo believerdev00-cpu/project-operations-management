@@ -24,6 +24,18 @@ import { pool } from '../db/database.js';
 import { sectors } from '../data/seedData.js';
 import { asyncRoute, hasFullScope, isAdmin, managerScope, projectScope, sectorIds, withinScope } from '../lib/http.js';
 import { getCurrentRate, round2 } from '../lib/rates.js';
+// Progress and the month's budget are read through the monthly module's own
+// definitions rather than worked out again here: objectiveProgress and
+// planProgress are what the plan screen, /review and the month-end report use,
+// and a report that recomputes them is a report that can disagree with the plan
+// it reports on.
+import { monthStart, objectiveProgress, planProgress } from '../lib/monthly.js';
+// The words of the report, in the reader's language. The dictionary is in
+// shared/ for this reason: an exported PDF or spreadsheet is the one copy of a
+// report that is printed and carried, and it was the only part of the system
+// that could not be read in Kinyarwanda, French or Kiswahili.
+import { fill, knownLanguage, translate } from '../../shared/strings.js';
+import { operationName } from '../../shared/businessOperations.js';
 
 const router = express.Router();
 
@@ -256,23 +268,30 @@ function applyChoice(choice, columns, values, filters) {
 // created late in the evening cannot slide into the next day's report.
 const PERIOD_DAY = 'COALESCE(a.assigned_at::date, a.created_at::date)';
 
+// WHY THERE ARE NO NAMES IN HERE.
+//
+// A report used to carry a name on every line -- who the work was assigned to,
+// who raised it, who recorded the day, who asked for the budget change and who
+// answered it -- and a whole "manager performance" table of its own. The people
+// reading these reports already know who runs each operation, so every one of
+// those names was a column of noise between the reader and the figures. The
+// register still records all of it (every row has its own history screen); a
+// report is about the work, not about who typed it.
 const SELECT_ROWS = `
   SELECT a.id, a.activity, a.description, a.category, a.sector, a.status, a.origin,
          a.requested_budget, a.approved_budget, a.admin_note, a.quantity,
          a.deadline, a.assigned_at, a.accepted_at, a.completed_at,
-         a.completion_submitted_at, a.created_at, a.created_by_name, a.assigned_to,
+         a.completion_submitted_at, a.created_at, a.assigned_to,
          a.project_id, p.name AS project_name,
          -- The very day the row is filtered and bucketed on, returned as a
          -- date so the report never shows one day while counting another.
          -- Deriving it again in JavaScript would read a TIMESTAMPTZ in the Node
          -- process's zone while the filter cast it in the database's.
          ${PERIOD_DAY} AS period_day,
-         m.name AS assigned_to_name,
          COALESCE(ex.spent, 0) AS actual_spending,
          COALESCE(ev.items, 0)::int AS evidence_count
   FROM activities a
   LEFT JOIN projects p ON p.id = a.project_id
-  LEFT JOIN users m ON m.id = a.assigned_to
   -- Spending is the expense ledger, the same figure the activity review and the
   -- monthly plan show. It used to be the optional amount typed on an evidence
   -- upload, which a multi-file upload wrote onto every file, so three receipts
@@ -332,7 +351,7 @@ export async function buildReport(user, period, choice = null) {
       ),
       pool.query(
         `SELECT activity_id, current_budget, requested_amount, reason, status,
-                decision_note, requested_by_name, decided_by_name, decided_at, created_at
+                decision_note, decided_at, created_at
          FROM activity_budget_requests
          WHERE activity_id = ANY($1::varchar[])
          ORDER BY created_at`,
@@ -348,7 +367,6 @@ export async function buildReport(user, period, choice = null) {
       from: row.old_value === null ? null : round2(row.old_value),
       to: row.new_value === null ? null : round2(row.new_value),
       note: row.note || '',
-      changedBy: row.actor_name || '',
       changedAt: row.created_at
     });
   }
@@ -362,8 +380,6 @@ export async function buildReport(user, period, choice = null) {
       reason: row.reason,
       status: row.status,
       decisionNote: row.decision_note || '',
-      requestedBy: row.requested_by_name || '',
-      decidedBy: row.decided_by_name || '',
       decidedAt: row.decided_at,
       createdAt: row.created_at
     });
@@ -388,9 +404,10 @@ export async function buildReport(user, period, choice = null) {
       projectName: row.project_name || row.project_id,
       sector: row.sector,
       sectorName: sectorName(row.sector),
-      assignedTo: row.assigned_to,
-      assignedToName: row.assigned_to_name || null,
-      raisedBy: row.created_by_name || '',
+      // Whether anybody is carrying it, without saying who: work nobody has
+      // been given is a real gap in a report, the name of the person who has it
+      // is not (see the note on SELECT_ROWS).
+      assigned: Boolean(row.assigned_to),
       origin: row.origin || 'requested',
       originalBudget: original,
       revisedBudget: revised,
@@ -436,32 +453,6 @@ export async function buildReport(user, period, choice = null) {
     ? Math.round((budgetSummary.spent / budgetSummary.revised) * 100)
     : 0;
 
-  // Grouped from the same rows the details table shows, so the two can never
-  // disagree. Work nobody has been given yet still has to be accounted for, so
-  // it is gathered under one unassigned row instead of being dropped.
-  const byManager = new Map();
-  for (const item of activities) {
-    const key = item.assignedTo === null || item.assignedTo === undefined ? 'unassigned' : String(item.assignedTo);
-    if (!byManager.has(key)) {
-      byManager.set(key, {
-        managerId: item.assignedTo ?? null,
-        managerName: item.assignedToName || 'Not yet assigned',
-        assigned: 0, completed: 0, inProgress: 0, pending: 0, overdue: 0,
-        budgetHandled: 0, spent: 0
-      });
-    }
-    const entry = byManager.get(key);
-    entry.assigned += 1;
-    if (item.bucket === 'completed') entry.completed += 1;
-    if (item.bucket === 'inProgress') entry.inProgress += 1;
-    if (item.bucket === 'pending') entry.pending += 1;
-    if (item.overdue) entry.overdue += 1;
-    entry.budgetHandled = round2(entry.budgetHandled + item.effectiveBudget);
-    entry.spent = round2(entry.spent + item.actualSpending);
-  }
-  const managers = [...byManager.values()].sort((left, right) => right.assigned - left.assigned
-    || left.managerName.localeCompare(right.managerName));
-
   // Budgets are kept in USD, but the people reading a report work in Rwandan
   // and Congolese francs. The report carries today's reference rate and says
   // so, rather than leaving every reader to convert the figures themselves.
@@ -479,11 +470,11 @@ export async function buildReport(user, period, choice = null) {
       // What the report actually covers, which is the asked-for operation when
       // one was asked for and the reader's own coverage otherwise. The header,
       // the spreadsheet and the PDF all read this one field, so a file for
-      // Mining alone cannot be headed "All working areas" -- which is the whole
+      // Mining alone cannot be headed "All operations" -- which is the whole
       // point of being able to ask for one operation.
       sector: choice?.operation ?? (hasFullScope(user) ? null : user.sector),
       sectorName: choice?.operationName
-        ?? (hasFullScope(user) ? 'All working areas' : sectorName(user.sector)),
+        ?? (hasFullScope(user) ? 'All operations' : sectorName(user.sector)),
       projectId: choice?.projectId ?? null,
       projectName: choice?.projectName ?? null,
       // Whether the reader narrowed it themselves, so the screen can say "all
@@ -491,113 +482,271 @@ export async function buildReport(user, period, choice = null) {
       filtered: Boolean(choice?.operation || choice?.projectId),
       viewer: user.name
     },
-    basis: 'Activities are counted in the period they were assigned or raised.',
     activitySummary,
     budgetSummary,
-    managers,
     activities,
-    // The month's own work: the objectives the managers recorded against in
-    // this period, and the days that make them up.
+    // THE BODY OF THE REPORT, and the reason the order of this object matters:
+    // the month's objectives and the days recorded against them come first
+    // everywhere a report is rendered, and the activity register below is shown
+    // only when it has something in it.
     //
-    // WHY THIS IS HERE: everything above reads the activity register, and a
-    // month is no longer worked that way. A Director who set objectives and
-    // watched their manager record five days against them exported a report
-    // that said "No activities fall in this period" -- true of the register,
-    // and completely wrong about the month.
+    // Everything above reads the activity register, and a month is no longer
+    // worked that way. A Director who set objectives and watched their manager
+    // record five days against them used to get a report headed "No work in
+    // those dates" -- true of the register, and completely wrong about the
+    // month. On screen it was worse than wrong: the register's emptiness hid
+    // the recorded days altogether, while the PDF of the same query printed
+    // them.
     monthlyWork: await buildMonthlyWork(user, period, choice)
   };
 }
 
-// The daily records inside the period, and what they did to the objectives they
-// were recorded against.
+// THE MONTH'S OWN WORK -- the body of the report.
+//
+// The months the period falls in, every objective agreed for them, and the days
+// recorded against those objectives inside the period.
+//
+// WHY EVERY OBJECTIVE AND NOT ONLY THE WORKED ONES: this used to start from the
+// daily records, so an objective nobody had touched simply did not appear in
+// the report. "Nothing has been recorded against this commitment" is the single
+// most useful line a monthly report can carry, and it was the one line the
+// report could not print -- an untouched objective and an objective that does
+// not exist read identically.
 //
 // Scoped exactly like the rest of the report: a manager reads their own
-// operation, the Director reads all of them. Progress on an objective is
-// deliberately its lifetime figure, not the period's -- "40 of 500 tonnes" is
-// the number anybody reading a weekly report actually wants, and a percentage
-// of one week against a monthly target would be meaningless.
+// operation, the Director reads all of them. Progress is the objective's
+// lifetime figure, not the period's -- "320 of 500 tonnes" is the number
+// anybody reading a weekly report actually wants, and a percentage of one week
+// against a monthly target would be meaningless. It is computed by
+// objectiveProgress/planProgress from lib/monthly.js, the same definition the
+// plan screen, /review and the month-end report read, so a report can never
+// disagree with the plan it reports on.
 async function buildMonthlyWork(user, period, choice = null) {
-  const values = [period.start, period.end];
-  const filters = ['r.report_date BETWEEN $1::date AND $2::date'];
+  // Whole months, because a plan IS a month: a week inside October is reported
+  // against October's plan. monthStart() parses the string by hand rather than
+  // through Date, which would read a bare month as UTC and land on the previous
+  // one west of Greenwich.
+  const values = [monthStart(period.start), monthStart(period.end), period.start, period.end];
+  const filters = ['p.month BETWEEN $1::date AND $2::date'];
   managerScope(user, 'p.sector', values, filters);
   // Narrowed the same way as the activity half, or a report asked for Mining
   // would list Mining's activities above every operation's recorded days.
   applyChoice(choice, { sector: 'p.sector', project: 'p.project_id' }, values, filters);
 
-  const days = (await pool.query(
-    `SELECT r.id, r.report_date, r.quantity_done, r.cost, r.notes, r.submitted_by_name,
-            p.id AS plan_id, p.sector, to_char(p.month, 'YYYY-MM') AS plan_month,
-            o.id AS objective_id, o.title AS objective_title, o.target_unit, o.target_quantity,
-            o.supports_operation,
-            (SELECT COUNT(*) FROM plan_report_evidence e WHERE e.report_id = r.id)::int AS evidence_count,
-            COALESCE((SELECT SUM(d.quantity_done) FROM plan_daily_reports d
-                       WHERE d.objective_id = o.id), 0) AS objective_done
-       FROM plan_daily_reports r
-       JOIN monthly_plans p ON p.id = r.plan_id
-       LEFT JOIN plan_objectives o ON o.id = r.objective_id
+  const plans = (await pool.query(
+    `SELECT p.id, p.sector, p.status, to_char(p.month, 'YYYY-MM') AS plan_month,
+            COALESCE(p.approved_budget, 0) AS approved_budget,
+            -- The plan's lifetime spend, summed exactly as PLAN_TOTALS in
+            -- routes/monthlyPlans.js sums it: the days' own costs plus anything
+            -- recorded against the month's activities. Reading it any other way
+            -- here would put a different "spent" in the report than the one the
+            -- manager is looking at on the plan itself.
+            COALESCE((SELECT SUM(r.cost) FROM plan_daily_reports r WHERE r.plan_id = p.id), 0)
+              + COALESCE((SELECT SUM(e.amount) FROM activity_expenses e
+                          JOIN activities ea ON ea.id = e.activity_id
+                          WHERE ea.monthly_plan_id = p.id), 0) AS spent,
+            COALESCE((SELECT SUM(r.cost) FROM plan_daily_reports r
+                       WHERE r.plan_id = p.id
+                         AND r.report_date BETWEEN $3::date AND $4::date), 0) AS cost_in_period,
+            (SELECT COUNT(*) FROM plan_daily_reports r
+              WHERE r.plan_id = p.id
+                AND r.report_date BETWEEN $3::date AND $4::date)::int AS records_in_period
+       FROM monthly_plans p
       WHERE ${filters.join(' AND ')}
-      ORDER BY r.report_date, r.id`,
+      ORDER BY p.month, p.sector`,
     values
   )).rows;
 
-  // One line per objective that was actually worked in the period: what the
-  // period added, and where that objective now stands overall.
-  const byObjective = new Map();
-  for (const row of days) {
-    const key = row.objective_id ?? `plan-${row.plan_id}`;
-    const group = byObjective.get(key) || {
-      objectiveId: row.objective_id ?? null,
-      title: row.objective_title || '(not linked to an objective)',
-      operation: row.sector,
-      planId: row.plan_id,
-      planMonth: row.plan_month,
-      unit: row.target_unit || '',
-      supportsOperation: row.supports_operation || null,
-      target: row.target_quantity === null || row.target_quantity === undefined
-        ? null : round2(row.target_quantity),
-      doneInPeriod: 0,
-      doneOverall: round2(row.objective_done),
-      costInPeriod: 0,
-      records: 0,
-      evidence: 0
-    };
-    group.doneInPeriod = round2(group.doneInPeriod + Number(row.quantity_done || 0));
-    group.costInPeriod = round2(group.costInPeriod + Number(row.cost || 0));
-    group.records += 1;
-    group.evidence += Number(row.evidence_count || 0);
-    byObjective.set(key, group);
+  // HOW MANY MONTHS THE PROJECT FILTER LEFT OUT.
+  //
+  // A monthly plan may or may not be filed under a project. When a report is
+  // asked for one project, a month of the same operation that is not filed
+  // under it is correctly excluded -- it is somebody else's work -- but the
+  // report then said "No monthly plan covers these dates", which reads as
+  // "nothing was agreed for this month". Those are different statements, and
+  // the second one is the kind a decision gets made on. Counted here so every
+  // rendering can say which it means.
+  let monthsOutsideProject = 0;
+  if (choice?.projectId) {
+    const wider = [monthStart(period.start), monthStart(period.end)];
+    const widerFilters = ['p.month BETWEEN $1::date AND $2::date'];
+    managerScope(user, 'p.sector', wider, widerFilters);
+    // The operation's months, without the project narrowing: the difference is
+    // what the filter cost.
+    applyChoice({ operation: choice.operation }, { sector: 'p.sector' }, wider, widerFilters);
+    const all = await pool.query(
+      `SELECT COUNT(*)::int AS months FROM monthly_plans p WHERE ${widerFilters.join(' AND ')}`,
+      wider
+    );
+    monthsOutsideProject = Math.max(0, Number(all.rows[0].months || 0) - plans.length);
   }
 
-  const objectives = [...byObjective.values()].map((group) => ({
-    ...group,
-    percent: group.target && group.target > 0
-      ? Math.min(100, Math.round((group.doneOverall / group.target) * 100))
-      : null
-  }));
+  if (!plans.length) return { ...emptyMonthlyWork(), monthsOutsideProject };
+
+  const planIds = plans.map((row) => row.id);
+  const range = [planIds, period.start, period.end];
+  const [objectiveRows, dayRows] = await Promise.all([
+    pool.query(
+      `SELECT o.id, o.plan_id, o.title, o.target_quantity, o.target_unit, o.weight,
+              o.supports_operation, o.deadline,
+              p.sector, to_char(p.month, 'YYYY-MM') AS plan_month,
+              COALESCE((SELECT SUM(d.quantity_done) FROM plan_daily_reports d
+                         WHERE d.objective_id = o.id), 0) AS done_overall,
+              COALESCE((SELECT SUM(d.quantity_done) FROM plan_daily_reports d
+                         WHERE d.objective_id = o.id
+                           AND d.report_date BETWEEN $2::date AND $3::date), 0) AS done_in_period,
+              COALESCE((SELECT SUM(d.cost) FROM plan_daily_reports d
+                         WHERE d.objective_id = o.id
+                           AND d.report_date BETWEEN $2::date AND $3::date), 0) AS cost_in_period,
+              (SELECT COUNT(*) FROM plan_daily_reports d
+                WHERE d.objective_id = o.id
+                  AND d.report_date BETWEEN $2::date AND $3::date)::int AS records_in_period,
+              (SELECT COUNT(*) FROM plan_report_evidence e
+                 JOIN plan_daily_reports d ON d.id = e.report_id
+                WHERE d.objective_id = o.id
+                  AND d.report_date BETWEEN $2::date AND $3::date)::int AS evidence_in_period
+         FROM plan_objectives o
+         JOIN monthly_plans p ON p.id = o.plan_id
+        WHERE o.plan_id = ANY($1::int[])
+        ORDER BY p.month, p.sector, o.sort_order, o.id`,
+      range
+    ),
+    pool.query(
+      `SELECT r.id, r.report_date, r.quantity_done, r.cost, r.notes,
+              p.id AS plan_id, p.sector, to_char(p.month, 'YYYY-MM') AS plan_month,
+              o.id AS objective_id, o.title AS objective_title, o.target_unit,
+              (SELECT COUNT(*) FROM plan_report_evidence e WHERE e.report_id = r.id)::int AS evidence_count
+         FROM plan_daily_reports r
+         JOIN monthly_plans p ON p.id = r.plan_id
+         LEFT JOIN plan_objectives o ON o.id = r.objective_id
+        WHERE r.plan_id = ANY($1::int[])
+          AND r.report_date BETWEEN $2::date AND $3::date
+        ORDER BY r.report_date, r.id`,
+      range
+    )
+  ]);
+
+  const objectives = objectiveRows.rows.map((row) => {
+    const progress = objectiveProgress(row.target_quantity, row.done_overall);
+    return {
+      objectiveId: row.id,
+      planId: row.plan_id,
+      planMonth: row.plan_month,
+      operation: row.sector,
+      title: row.title,
+      unit: row.target_unit || '',
+      target: progress.target,
+      doneOverall: progress.done,
+      remaining: progress.remaining,
+      percent: progress.percent,
+      complete: progress.complete,
+      // planProgress() weights by this when any objective on the month carries
+      // one, so it has to travel with the objective.
+      weight: row.weight === null ? null : round2(row.weight),
+      doneInPeriod: round2(row.done_in_period),
+      costInPeriod: round2(row.cost_in_period),
+      records: row.records_in_period,
+      evidence: row.evidence_in_period,
+      // The report's one judgement, and it is a fact rather than an opinion:
+      // was anything at all written down against this commitment in these
+      // dates? Everything else on the line is a figure.
+      worked: row.records_in_period > 0,
+      supportsOperation: row.supports_operation || null,
+      deadline: toDateOnly(row.deadline)
+    };
+  });
+
+  const months = plans.map((row) => {
+    const own = objectives.filter((objective) => objective.planId === row.id);
+    const approved = round2(row.approved_budget);
+    const spent = round2(row.spent);
+    return {
+      planId: row.id,
+      operation: row.sector,
+      operationName: sectorName(row.sector),
+      planMonth: row.plan_month,
+      status: row.status,
+      objectives: own.length,
+      objectivesWorked: own.filter((objective) => objective.worked).length,
+      objectivesDone: own.filter((objective) => objective.complete).length,
+      records: row.records_in_period,
+      percent: planProgress(own),
+      // A month with approved_budget = 0 has no ceiling at all -- that is the
+      // documented meaning of zero, not "a budget of nothing" -- so it is
+      // reported as having none rather than as being 100% overspent.
+      budget: approved > 0 ? approved : null,
+      spent,
+      remaining: approved > 0 ? round2(approved - spent) : null,
+      costInPeriod: round2(row.cost_in_period)
+    };
+  });
+
+  const sum = (rows, pick) => round2(rows.reduce((total, row) => total + Number(pick(row) || 0), 0));
+  const withCeiling = months.filter((month) => month.budget !== null);
+  const budget = sum(withCeiling, (month) => month.budget);
+  const spent = sum(months, (month) => month.spent);
 
   return {
     summary: {
-      records: days.length,
+      months: months.length,
+      operations: new Set(plans.map((row) => row.sector)).size,
       objectives: objectives.length,
-      operations: new Set(days.map((row) => row.sector)).size,
-      cost: round2(days.reduce((total, row) => total + Number(row.cost || 0), 0)),
-      evidence: days.reduce((total, row) => total + Number(row.evidence_count || 0), 0)
+      objectivesWorked: objectives.filter((objective) => objective.worked).length,
+      objectivesDone: objectives.filter((objective) => objective.complete).length,
+      // The month as one figure, the same way the plan screen reads it.
+      percent: planProgress(objectives),
+      records: dayRows.rows.length,
+      evidence: dayRows.rows.reduce((total, row) => total + Number(row.evidence_count || 0), 0),
+      cost: sum(dayRows.rows, (row) => row.cost)
     },
+    // The money of the months covered, which is the figure a manager works
+    // against. It is deliberately NOT the same reading as budgetSummary above:
+    // that one totals the activity register's three budget figures, this one is
+    // the monthly plan's ceiling and what has been spent out of it. Keeping
+    // them in separate blocks, each saying what it is, is what stops a reader
+    // adding the two together.
+    money: {
+      budget,
+      spent,
+      remaining: budget > 0 ? round2(budget - spent) : null,
+      costInPeriod: sum(months, (month) => month.costInPeriod),
+      monthsWithoutCeiling: months.length - withCeiling.length
+    },
+    months,
+    // Months of this operation the project filter left out (0 unless a project
+    // was asked for), so a report can say that instead of implying nothing was
+    // agreed for the month.
+    monthsOutsideProject,
     objectives,
-    days: days.map((row) => ({
+    days: dayRows.rows.map((row) => ({
       id: row.id,
       date: toDateOnly(row.report_date),
       operation: row.sector,
       planId: row.plan_id,
       planMonth: row.plan_month,
       objective: row.objective_title || '',
+      objectiveId: row.objective_id ?? null,
       quantity: round2(row.quantity_done),
       unit: row.target_unit || '',
       cost: round2(row.cost),
       notes: row.notes || '',
-      recordedBy: row.submitted_by_name || '',
       evidenceCount: Number(row.evidence_count || 0)
     }))
+  };
+}
+
+// No plan covers the period at all -- a report on a month nobody has written
+// yet. Every field the renderers read, empty, so none of them has to guard.
+function emptyMonthlyWork() {
+  return {
+    summary: {
+      months: 0, operations: 0, objectives: 0, objectivesWorked: 0, objectivesDone: 0,
+      percent: null, records: 0, evidence: 0, cost: 0
+    },
+    money: { budget: 0, spent: 0, remaining: null, costInPeriod: 0, monthsWithoutCeiling: 0 },
+    months: [],
+    objectives: [],
+    days: []
   };
 }
 
@@ -639,16 +788,28 @@ router.get('/activities/export', asyncRoute(async (req, res) => {
   const period = resolvePeriod(req.query);
   const choice = await resolveFilters(req.user, req.query);
   const report = await buildReport(req.user, period, choice);
-  // The file says what is in it. Three downloads of "activity-report-<dates>"
+  // WHICH LANGUAGE THE FILE IS WRITTEN IN.
+  //
+  // The reader's own, sent by the browser from the language they picked (the
+  // screen has had it in four languages all along; the file was English only,
+  // which is the one copy of the report that leaves the building). Anything
+  // that is not one of the four reads as English rather than being trusted
+  // into a lookup, so a hand-typed URL cannot do anything but fall back.
+  //
+  // It is NOT stored on the account: the language is a display choice the
+  // browser owns, and a manager who switches the interface to French expects
+  // the next file to come out in French.
+  const language = knownLanguage(req.query.language || req.get('accept-language'));
+  // The file says what is in it. Three downloads of "report-<dates>"
   // for three different operations are indistinguishable in a downloads folder,
   // which is where these files are read from.
   const slug = (text) => String(text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
   const subject = choice.projectName ? slug(choice.projectName)
     : choice.operation ? slug(choice.operation) : null;
-  const stem = `activity-report-${subject ? `${subject}-` : ''}${period.start}-to-${period.end}`;
+  const stem = `report-${subject ? `${subject}-` : ''}${period.start}-to-${period.end}`;
 
   if (format === 'xlsx') {
-    const workbook = await buildWorkbook(report);
+    const workbook = await buildWorkbook(report, language);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${stem}.xlsx"`);
     await workbook.xlsx.write(res);
@@ -657,7 +818,7 @@ router.get('/activities/export', asyncRoute(async (req, res) => {
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${stem}.pdf"`);
-  return writePdf(report, res);
+  return writePdf(report, res, language);
 }));
 
 router.use((error, req, res, next) => {
@@ -668,8 +829,84 @@ router.use((error, req, res, next) => {
 export default router;
 
 // ---- exports --------------------------------------------------------------
+//
+// THE FILE IS WRITTEN IN ITS READER'S LANGUAGE.
+//
+// Every word below comes from shared/strings.js -- the same dictionary the
+// screen reads, which is why it lives in shared/ and not in src/i18n.js. The
+// exports were English only while the interface had been in four languages
+// from the start, and the exported file is the copy that is printed, carried to
+// a meeting and handed to a partner, so it was the one copy the reader could
+// not read. Where the file and the screen say the same thing they read the same
+// key, so the two cannot drift apart; the `export.*` family is only the words a
+// file needs and a screen does not.
+//
+// Money is deliberately NOT localised: amounts stay grouped the way
+// formatUsd/formatLocal group them on screen (en-US, "$50,710.89"), so a figure
+// read off the screen and the same figure read off the file are the same string
+// of characters. Only the words and the dates change.
 
 const MONEY = '#,##0.00';
+
+// The translator for one file: `t` for a word, `w` for a sentence with values
+// in it.
+function wordsFor(language) {
+  return {
+    t: (key) => translate(language, key),
+    w: (key, values) => fill(translate(language, key), values)
+  };
+}
+
+// A day as its reader writes one: "7 September 2026", "7 septembre 2026",
+// "2026 Nzeri 7". Built from the three numbers rather than parsed, so a
+// date-only string cannot slide a day either way through a timezone.
+//
+// The month names come from Node's own ICU data, not from the dictionary: all
+// four languages are in CLDR, and a table of 48 month names maintained by hand
+// is 48 chances to mistype one. A Node built with small-icu would fall back to
+// English dates -- the words around them would still be translated, and no
+// figure changes -- but every supported deployment (Vercel's runtime, and any
+// ordinary node build since v13) ships the full set.
+function dayInWords(value, language) {
+  if (!value) return '';
+  const [year, month, day] = String(value).slice(0, 10).split('-').map(Number);
+  if (!year || !month || !day) return String(value);
+  return new Intl.DateTimeFormat(language, { day: 'numeric', month: 'long', year: 'numeric' })
+    .format(new Date(year, month - 1, day));
+}
+
+// 'YYYY-MM' as a month and a year: "September 2026", "septembre 2026".
+function monthInWords(value, language) {
+  const [year, month] = String(value || '').split('-').map(Number);
+  if (!year || !month) return String(value || '');
+  return new Intl.DateTimeFormat(language, { month: 'long', year: 'numeric' })
+    .format(new Date(year, month - 1, 1));
+}
+
+// What the file is headed with. `period.label` is the English phrase the API
+// built for the payload; this is the same period in the reader's language.
+function periodInWords(period, language) {
+  const { w } = wordsFor(language);
+  if (period.kind === 'monthly') return monthInWords(period.start.slice(0, 7), language);
+  if (period.kind === 'weekly') return w('export.weekOf', { date: dayInWords(period.start, language) });
+  return `${dayInWords(period.start, language)} ${translate(language, 'report.to')} ${dayInWords(period.end, language)}`;
+}
+
+// An operation's name in the reader's language -- operationName() is where the
+// four names live, with their translations, precisely because the API needs
+// them too. sectorName() above is the English fallback for an id that is not
+// one of the four.
+function operationLabel(id, language) {
+  if (!id) return translate(language, 'review.notAssigned');
+  return operationName(id, language) || sectorName(id);
+}
+
+// A worksheet name Excel will accept: 31 characters, and none of the handful it
+// reserves. A translated name is a name somebody wrote, not a constant, so it
+// is checked rather than trusted.
+function sheetName(text) {
+  return String(text).replace(/[[\]:*?/\\]/g, ' ').trim().slice(0, 31) || 'Report';
+}
 
 // A spreadsheet is for working with the numbers again, so every money cell goes
 // in as a number with a format, never as a pre-formatted string.
@@ -683,221 +920,373 @@ function headerRow(sheet, rowNumber) {
   row.commit?.();
 }
 
-async function buildWorkbook(report) {
+// THE ORDER OF THE SHEETS IS THE ORDER OF THE REPORT.
+//
+// What was done, then the money, then the day-by-day record, and only then the
+// activity register -- and the register's sheets are added only when there are
+// activities in the period. A spreadsheet that opened on an empty "Summary" of
+// a register nobody uses any more, with the month's actual work on sheet four,
+// was a spreadsheet nobody scrolled to the end of.
+//
+// There is no "Manager performance" sheet and no "Recorded by" column: the
+// people reading this know who runs each operation (see SELECT_ROWS).
+async function buildWorkbook(report, language = 'en') {
+  const { t, w } = wordsFor(language);
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Gisuma Project Operations';
   workbook.created = new Date();
 
-  const summary = workbook.addWorksheet('Summary');
-  summary.columns = [{ width: 32 }, { width: 18 }, { width: 18 }, { width: 18 }];
+  const work = report.monthlyWork || emptyMonthlyWork();
+  const hasActivities = report.activities.length > 0;
+  const operation = (id) => operationLabel(id, language);
+
+  const summary = workbook.addWorksheet(sheetName(t('report.title')));
+  summary.columns = [{ width: 36 }, { width: 22 }, { width: 18 }, { width: 18 }];
+
+  // The title row is styled through the row addRow() hands back rather than by
+  // number: adding the logo first pushes everything down by one, and
+  // getRow(1).font then bolded an empty row and left the title plain -- which
+  // is exactly what the old workbook did.
+  const heading = report.scope.sector ? operation(report.scope.sector) : t('report.allOperations');
+  const titleRow = summary.addRow([`${heading} — ${periodInWords(report.period, language)}`]);
+  titleRow.font = { bold: true, size: 14 };
+  summary.addRow([t('export.datesCovered'),
+    `${dayInWords(report.period.start, language)} ${t('report.to')} ${dayInWords(report.period.end, language)}`]);
+  if (report.scope.projectName) summary.addRow([t('report.project'), report.scope.projectName]);
+  summary.addRow([t('export.printed'), new Date(report.generatedAt).toLocaleString(language)]);
 
   // The same mark as the PDF, floated over the first rows so it brands the
-  // sheet without occupying a cell anybody reads. Skipped silently when the
-  // file is missing, for the same reason as the PDF.
+  // sheet without occupying a cell anybody reads. Added after those rows so it
+  // cannot shift them. Skipped silently when the file is missing, for the same
+  // reason as the PDF.
   const logo = logoPath();
   if (logo) {
     const image = workbook.addImage({ filename: logo, extension: 'png' });
     summary.addImage(image, { tl: { col: 3.1, row: 0.1 }, ext: { width: 154, height: 90 } });
   }
 
-  summary.addRow(['Activity report', report.period.label]);
-  summary.addRow(['Period', `${report.period.start} to ${report.period.end}`]);
-  summary.addRow(['Working area', report.scope.sectorName]);
-  if (report.scope.projectName) summary.addRow(['Project', report.scope.projectName]);
-  summary.addRow(['Generated', new Date(report.generatedAt).toLocaleString()]);
   summary.addRow([]);
-  summary.addRow(['ACTIVITY SUMMARY']);
+
+  summary.addRow([t('report.whatWasDone')]);
   headerRow(summary, summary.rowCount);
-  summary.addRow(['Total activities', report.activitySummary.total]);
-  summary.addRow(['Completed', report.activitySummary.completed]);
-  summary.addRow(['In progress', report.activitySummary.inProgress]);
-  summary.addRow(['Pending', report.activitySummary.pending]);
-  summary.addRow(['Overdue', report.activitySummary.overdue]);
-  summary.addRow(['Cancelled', report.activitySummary.cancelled]);
+  if (work.objectives.length) {
+    summary.addRow([t('report.commitments'), work.summary.objectives]);
+    summary.addRow([t('report.workedOn'), work.summary.objectivesWorked]);
+    summary.addRow([t('portal.completed'), work.summary.objectivesDone]);
+    summary.addRow([t('report.daysWritten'), work.summary.records]);
+    summary.addRow([t('report.photos'), work.summary.evidence]);
+    if (work.summary.percent !== null) {
+      const row = summary.addRow([t('report.howFar'), work.summary.percent / 100]);
+      row.getCell(2).numFmt = '0%';
+    }
+  } else {
+    summary.addRow([t('report.noPlanForDates')]);
+  }
+  // A project was asked for and the operation's month is not filed under it:
+  // say so, rather than letting "no plan covers these dates" read as "nothing
+  // was agreed".
+  if (work.monthsOutsideProject > 0) {
+    summary.addRow([w('export.monthsNotInProject', { count: work.monthsOutsideProject })]);
+  }
   summary.addRow([]);
-  summary.addRow(['BUDGET SUMMARY']);
-  headerRow(summary, summary.rowCount);
-  summary.addRow(['', 'USD', 'RWF', 'CDF']);
-  headerRow(summary, summary.rowCount);
-  const budgetFrom = summary.rowCount + 1;
+
+  // A MONEY heading over nothing but the exchange rate is a heading that wastes
+  // a reader's time, so the whole block only appears when there is a figure in
+  // it.
+  const hasMoney = work.months.length > 0 || hasActivities;
+  if (hasMoney) {
+    summary.addRow([t('report.money')]);
+    headerRow(summary, summary.rowCount);
+    summary.addRow(['', 'USD', 'RWF', 'CDF']);
+    headerRow(summary, summary.rowCount);
+  }
   const inLocal = (amount) => [
     round2(amount * report.rate.rwfPerUsd),
     round2(amount * report.rate.cdfPerUsd)
   ];
-  summary.addRow(['Total assigned budget', report.budgetSummary.assigned, ...inLocal(report.budgetSummary.assigned)]);
-  summary.addRow(['Total revised budget', report.budgetSummary.revised, ...inLocal(report.budgetSummary.revised)]);
-  summary.addRow(['Total actual spending', report.budgetSummary.spent, ...inLocal(report.budgetSummary.spent)]);
-  summary.addRow(['Remaining budget', report.budgetSummary.remaining, ...inLocal(report.budgetSummary.remaining)]);
-  summary.addRow([`At today's rate: 1 USD = ${report.rate.rwfPerUsd} RWF = ${report.rate.cdfPerUsd} CDF`]);
-  for (let index = budgetFrom; index <= budgetFrom + 3; index += 1) {
-    summary.getCell(`B${index}`).numFmt = MONEY;
-    summary.getCell(`C${index}`).numFmt = MONEY;
-    summary.getCell(`D${index}`).numFmt = MONEY;
+  const moneyRow = (label, amount) => {
+    const row = summary.addRow([label, amount, ...inLocal(amount)]);
+    for (const column of [2, 3, 4]) row.getCell(column).numFmt = MONEY;
+    return row;
+  };
+  // The monthly plan's money first: that is the figure the manager works
+  // against. A month with no ceiling says so rather than printing a nought that
+  // reads as "you were given nothing".
+  if (work.money.budget > 0) {
+    moneyRow(t('report.monthBudget'), work.money.budget);
+    moneyRow(t('report.spentSoFar'), work.money.spent);
+    moneyRow(work.money.remaining < 0 ? t('report.overBudgetBy') : t('report.moneyLeft'),
+      Math.abs(work.money.remaining));
+  } else if (work.months.length) {
+    summary.addRow([t('report.monthBudget'), t('report.noCeiling')]);
+    moneyRow(t('report.spentSoFar'), work.money.spent);
   }
-  summary.getRow(1).font = { bold: true, size: 14 };
+  // Only when the period is narrower than the month it belongs to. On a
+  // monthly report the two figures are the same number printed twice.
+  if (work.money.costInPeriod > 0 && work.money.costInPeriod !== work.money.spent) {
+    moneyRow(t('report.spentInDates'), work.money.costInPeriod);
+  }
+  // The activity register's own three figures, kept apart and labelled, because
+  // they are a different reading of the money and must never be added to the
+  // figures above.
+  if (hasActivities) {
+    summary.addRow([]);
+    summary.addRow([t('export.fromRegister')]);
+    headerRow(summary, summary.rowCount);
+    moneyRow(t('report.totalAssignedBudget'), report.budgetSummary.assigned);
+    moneyRow(t('export.afterDirectorReviewed'), report.budgetSummary.revised);
+    moneyRow(t('field.spent'), report.budgetSummary.spent);
+    moneyRow(report.budgetSummary.remaining < 0 ? t('report.overBudgetBy') : t('report.moneyLeft'),
+      Math.abs(report.budgetSummary.remaining));
+  }
+  if (hasMoney) {
+    summary.addRow([w('export.rateLine', { rwf: report.rate.rwfPerUsd, cdf: report.rate.cdfPerUsd })]);
+  }
 
-  // The month's work gets its own two sheets rather than being squeezed into
-  // the activity sheets: it is a different register, counted in units the
-  // activity columns have no place for (tonnes, inspections, hectares).
-  const work = report.monthlyWork || { summary: { records: 0 }, objectives: [], days: [] };
-  if (work.summary.records > 0) {
-    const progress = workbook.addWorksheet('Monthly plan progress');
+  if (hasActivities) {
+    summary.addRow([]);
+    summary.addRow([t('report.activitiesInDates')]);
+    headerRow(summary, summary.rowCount);
+    summary.addRow([t('report.totalActivities'), report.activitySummary.total]);
+    summary.addRow([t('portal.completed'), report.activitySummary.completed]);
+    summary.addRow([t('portal.inProgress'), report.activitySummary.inProgress]);
+    summary.addRow([t('approval.pending'), report.activitySummary.pending]);
+    summary.addRow([t('report.overdue'), report.activitySummary.overdue]);
+    summary.addRow([t('status.Cancelled'), report.activitySummary.cancelled]);
+  }
+
+  // The month's work gets its own sheets rather than being squeezed into the
+  // activity columns: it is a different register, counted in units those
+  // columns have no place for (tonnes, inspections, hectares).
+  if (work.objectives.length) {
+    const progress = workbook.addWorksheet(sheetName(t('report.whatWasDone')));
     progress.columns = [
-      { header: 'Operation', key: 'operation', width: 24 },
-      { header: 'Month', key: 'month', width: 10 },
-      { header: 'Objective', key: 'objective', width: 34 },
-      { header: 'This period', key: 'period', width: 13 },
-      { header: 'Done overall', key: 'done', width: 14 },
-      { header: 'Target', key: 'target', width: 12 },
-      { header: 'Unit', key: 'unit', width: 14 },
-      { header: '%', key: 'percent', width: 8 },
-      { header: 'Records', key: 'records', width: 10 },
-      { header: 'Photos', key: 'photos', width: 9 },
-      { header: 'Supports', key: 'supports', width: 22 }
+      { header: t('report.operation'), key: 'operation', width: 24 },
+      { header: t('report.month'), key: 'month', width: 16 },
+      { header: t('report.commitment'), key: 'objective', width: 38 },
+      { header: t('export.doneInDates'), key: 'period', width: 19 },
+      { header: t('export.doneInTotal'), key: 'done', width: 14 },
+      { header: t('report.target'), key: 'target', width: 14 },
+      { header: t('export.unit'), key: 'unit', width: 14 },
+      { header: t('export.howFar'), key: 'percent', width: 12 },
+      { header: t('export.days'), key: 'records', width: 8 },
+      { header: t('report.photos'), key: 'photos', width: 9 },
+      { header: t('export.supportFor'), key: 'supports', width: 22 }
     ];
     headerRow(progress, 1);
     for (const objective of work.objectives) {
       progress.addRow({
-        operation: sectorName(objective.operation),
-        month: objective.planMonth,
+        operation: operation(objective.operation),
+        month: monthInWords(objective.planMonth, language),
         objective: objective.title,
-        period: objective.doneInPeriod,
+        // An objective nobody touched in these dates says so in words. Zero
+        // would read as a measurement; this is the absence of one.
+        period: objective.worked ? objective.doneInPeriod : t('report.nothingInDates'),
         done: objective.doneOverall,
-        target: objective.target ?? '',
+        target: objective.target ?? t('export.noNumberToCount'),
         unit: objective.unit,
-        percent: objective.percent === null ? 'not counted' : objective.percent / 100,
+        percent: objective.percent === null ? t('plan.notCounted') : objective.percent / 100,
         records: objective.records,
         photos: objective.evidence,
-        supports: objective.supportsOperation ? sectorName(objective.supportsOperation) : ''
+        supports: objective.supportsOperation ? operation(objective.supportsOperation) : ''
       });
       if (objective.percent !== null) progress.getCell(`H${progress.rowCount}`).numFmt = '0%';
     }
+  }
 
-    const daily = workbook.addWorksheet('Day-by-day record');
+  if (work.days.length) {
+    const daily = workbook.addWorksheet(sheetName(t('report.dayByDay')));
     daily.columns = [
-      { header: 'Date', key: 'date', width: 12 },
-      { header: 'Operation', key: 'operation', width: 24 },
-      { header: 'Objective', key: 'objective', width: 34 },
-      { header: 'Amount', key: 'quantity', width: 12 },
-      { header: 'Unit', key: 'unit', width: 14 },
-      { header: 'Cost (USD)', key: 'cost', width: 13 },
-      { header: 'Photos', key: 'photos', width: 9 },
-      { header: 'Recorded by', key: 'by', width: 24 },
-      { header: 'Notes', key: 'notes', width: 52 }
+      { header: t('report.date'), key: 'date', width: 20 },
+      { header: t('report.operation'), key: 'operation', width: 24 },
+      { header: t('report.commitment'), key: 'objective', width: 38 },
+      { header: t('report.amount'), key: 'quantity', width: 12 },
+      { header: t('export.unit'), key: 'unit', width: 14 },
+      { header: `${t('export.cost')} (USD)`, key: 'cost', width: 14 },
+      { header: t('report.photos'), key: 'photos', width: 9 },
+      { header: t('report.whatWasWritten'), key: 'notes', width: 60 }
     ];
     headerRow(daily, 1);
     for (const day of work.days) {
       daily.addRow({
-        date: day.date,
-        operation: sectorName(day.operation),
-        objective: day.objective,
+        date: dayInWords(day.date, language),
+        operation: operation(day.operation),
+        objective: day.objective || t('report.notLinked'),
         quantity: day.quantity,
         unit: day.unit,
         cost: day.cost,
         photos: day.evidenceCount,
-        by: day.recordedBy,
         notes: day.notes
       });
       daily.getCell(`F${daily.rowCount}`).numFmt = MONEY;
     }
   }
 
-  const people = workbook.addWorksheet('Manager performance');
-  people.columns = [
-    { header: 'Manager', key: 'name', width: 28 },
-    { header: 'Activities assigned', key: 'assigned', width: 20 },
-    { header: 'Completed', key: 'completed', width: 14 },
-    { header: 'In progress', key: 'inProgress', width: 14 },
-    { header: 'Overdue', key: 'overdue', width: 12 },
-    { header: 'Total budget handled', key: 'budget', width: 22 },
-    { header: 'Spent', key: 'spent', width: 16 }
-  ];
-  headerRow(people, 1);
-  for (const entry of report.managers) {
-    people.addRow({
-      name: entry.managerName, assigned: entry.assigned, completed: entry.completed,
-      inProgress: entry.inProgress, overdue: entry.overdue,
-      budget: entry.budgetHandled, spent: entry.spent
-    });
+  // And the register, last, only when it has anything in it.
+  if (hasActivities) {
+    const details = workbook.addWorksheet(sheetName(t('nav.activities')));
+    details.columns = [
+      { header: t('table.activity'), key: 'activity', width: 32 },
+      { header: t('report.project'), key: 'project', width: 26 },
+      { header: t('report.operation'), key: 'sector', width: 20 },
+      { header: t('export.budgetGiven'), key: 'original', width: 16 },
+      { header: t('export.afterReview'), key: 'revised', width: 18 },
+      { header: t('field.spent'), key: 'spent', width: 16 },
+      { header: t('report.moneyLeft'), key: 'remaining', width: 14 },
+      { header: t('export.whereItStands'), key: 'status', width: 22 },
+      { header: t('export.pastItsDate'), key: 'overdue', width: 13 },
+      { header: t('export.startedOn'), key: 'assignedOn', width: 18 },
+      { header: t('export.due'), key: 'deadline', width: 18 },
+      { header: t('export.finishedOn'), key: 'completed', width: 18 },
+      { header: t('report.adminNotes'), key: 'note', width: 46 },
+      { header: t('export.whyBudgetChanged'), key: 'reason', width: 46 }
+    ];
+    headerRow(details, 1);
+    for (const item of report.activities) {
+      details.addRow({
+        activity: item.activity,
+        project: item.projectName,
+        sector: operation(item.sector),
+        original: item.originalBudget,
+        // An undecided budget is left blank rather than shown as a nought, which
+        // would read as "the Director released nothing".
+        revised: item.revisedBudget === null ? t('export.notDecidedYet') : item.revisedBudget,
+        spent: item.actualSpending,
+        remaining: item.remainingBudget,
+        status: item.assigned
+          ? t(`status.${item.status}`)
+          : `${t(`status.${item.status}`)} — ${t('report.nobodyGivenIt')}`,
+        overdue: item.overdue ? t('export.yes') : t('export.no'),
+        assignedOn: dayInWords(item.dateAssigned, language),
+        deadline: dayInWords(item.deadline, language),
+        completed: dayInWords(item.completionDate, language),
+        note: item.adminNote,
+        reason: budgetReasonText(item, language)
+      });
+    }
+    money(details, ['original', 'revised', 'spent', 'remaining']);
   }
-  money(people, ['budget', 'spent']);
 
-  const details = workbook.addWorksheet('Activity details');
-  details.columns = [
-    { header: 'Activity', key: 'activity', width: 30 },
-    { header: 'Project', key: 'project', width: 26 },
-    { header: 'Working area', key: 'sector', width: 20 },
-    { header: 'Assigned manager', key: 'manager', width: 22 },
-    { header: 'Original budget', key: 'original', width: 16 },
-    { header: 'Revised budget', key: 'revised', width: 16 },
-    { header: 'Actual spending', key: 'spent', width: 16 },
-    { header: 'Remaining', key: 'remaining', width: 14 },
-    { header: 'Status', key: 'status', width: 18 },
-    { header: 'Overdue', key: 'overdue', width: 10 },
-    { header: 'Date assigned', key: 'assignedOn', width: 14 },
-    { header: 'Deadline', key: 'deadline', width: 14 },
-    { header: 'Completion date', key: 'completed', width: 16 },
-    { header: 'Admin note', key: 'note', width: 46 },
-    { header: 'Budget change reason', key: 'reason', width: 46 }
-  ];
-  headerRow(details, 1);
-  for (const item of report.activities) {
-    details.addRow({
-      activity: item.activity,
-      project: item.projectName,
-      sector: item.sectorName,
-      manager: item.assignedToName || 'Not yet assigned',
-      original: item.originalBudget,
-      // An undecided budget is left blank rather than shown as a nought, which
-      // would read as "the Director released nothing".
-      revised: item.revisedBudget === null ? '' : item.revisedBudget,
-      spent: item.actualSpending,
-      remaining: item.remainingBudget,
-      status: item.status,
-      overdue: item.overdue ? 'Yes' : 'No',
-      assignedOn: item.dateAssigned || '',
-      deadline: item.deadline || '',
-      completed: item.completionDate || '',
-      note: item.adminNote,
-      reason: budgetReasonText(item)
-    });
-  }
-  money(details, ['original', 'revised', 'spent', 'remaining']);
   return workbook;
 }
-
-// The reason a budget moved, as one readable line per change. The Director's
-// own note is the usual source; a manager's request and the answer to it are
-// added when there was one, because the "why" can sit on either side.
-function budgetReasonText(item) {
-  const parts = item.budgetRevisions.map((change) => {
-    const from = change.from === null ? 'not set' : change.from.toFixed(2);
-    const to = change.to === null ? 'not set' : change.to.toFixed(2);
-    return `${from} -> ${to}${change.note ? `: ${change.note}` : ''}`;
-  });
+// Why a budget moved, as one readable sentence per change, in the reader's
+// language. The Director's own note is the usual source; the request that asked
+// for it and the answer are added when there was one, because the "why" can sit
+// on either side. No names: who asked is in the record's own history, and in a
+// report it is one more thing between the reader and the figure.
+function budgetReasonText(item, language = 'en') {
+  const { t, w } = wordsFor(language);
+  // Each sentence without its full stop, so joining them cannot produce the
+  // "fuel prices.." a note that already ended in one used to print.
+  const sentence = (text) => String(text).replace(/\s*\.\s*$/, '');
+  const parts = item.budgetRevisions
+    // A revision out of NULL is the budget being set for the first time, which
+    // is the activity being created rather than its figure being changed.
+    // "Changed from nothing set to $500.00" is on every single row and says
+    // nothing.
+    .filter((change) => change.from !== null)
+    .map((change) => sentence(
+      w('report.changedFromTo', {
+        from: usd(change.from),
+        to: change.to === null ? t('report.notSet') : usd(change.to)
+      }) + (change.note ? ` — ${change.note}` : '')
+    ));
   for (const request of item.budgetRequests) {
-    const answer = request.status === 'Pending' ? 'awaiting an answer' : request.status.toLowerCase();
-    parts.push(`${request.requestedBy || 'Manager'} asked for ${request.requestedAmount.toFixed(2)} (${request.reason}) - ${answer}${request.decisionNote ? `: ${request.decisionNote}` : ''}`);
+    const answer = request.status === 'Pending'
+      ? t('report.awaitingAnswer')
+      : t(`budgetRequest.status.${request.status}`);
+    parts.push(sentence(
+      `${w('report.askedFor', { amount: usd(request.requestedAmount) })} (${sentence(request.reason)}) — ${answer}`
+      + (request.decisionNote ? `: ${request.decisionNote}` : '')
+    ));
   }
   if (!parts.length && item.adminNote) return item.adminNote;
-  return parts.join(' | ');
+  return parts.join('. ');
 }
 
+// Money is written the way the screen writes it -- grouped en-US, with the
+// dollar sign in front -- in every language, so a figure read off the screen
+// and the same figure read off the file are the same string of characters
+// (formatUsd in src/format.js, formatLocal in src/journey.jsx). Only the words
+// and the dates around them are translated.
 function usd(value) {
-  if (value === null || value === undefined || value === '') return '-';
-  return Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (value === null || value === undefined || value === '') return '0.00';
+  return `$${Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-// Landscape, because the details table carries three budget figures beside the
-// dates and will not read in portrait.
-function writePdf(report, stream) {
-  const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 36 });
+// The same figure in the two local currencies, for the readers who think in
+// them. Whole francs: nobody budgets to the centime of a franc.
+function localPair(amount, rate) {
+  const whole = (value) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(value);
+  return `${whole(amount * rate.rwfPerUsd)} RWF  ·  ${whole(amount * rate.cdfPerUsd)} CDF`;
+}
+
+// THE PRINTED REPORT.
+//
+// Portrait, and in this order: what was done, the money, the day-by-day record,
+// then the activity register if there is one. It used to be landscape because
+// the register's table of three budget figures would not fit in portrait -- so
+// every report, including the many that are nothing but a month's objectives,
+// was shaped around the one section that is now the least used. Portrait reads
+// as a report; landscape reads as a spreadsheet somebody printed.
+//
+// Nothing here names a person (see SELECT_ROWS).
+function writePdf(report, stream, language = 'en') {
+  const { t, w } = wordsFor(language);
+  const operation = (id) => operationLabel(id, language);
+  const day = (value) => dayInWords(value, language);
+  const doc = new PDFDocument({ size: 'A4', margin: 46 });
   doc.pipe(stream);
 
   const left = doc.page.margins.left;
   const width = doc.page.width - left - doc.page.margins.right;
   const bottom = doc.page.height - doc.page.margins.bottom;
+  const work = report.monthlyWork || emptyMonthlyWork();
 
+  const INK = '#102b46';
+  const QUIET = '#5b6b7c';
+
+  // ---- the pieces a page is made of ---------------------------------------
+
+  // Room for `height` more points, or a new page. Every block asks before it
+  // draws, which is what stops a heading printing at the foot of one page with
+  // its figures on the next.
+  const room = (height) => {
+    if (doc.y > bottom - height) doc.addPage();
+  };
+
+  const section = (title) => {
+    room(78);
+    doc.moveDown(0.9);
+    doc.fillColor(INK).font('Helvetica-Bold').fontSize(11.5).text(title, left, doc.y, { width });
+    doc.moveDown(0.1);
+    // A rule under the heading, so the eye can find where a section starts
+    // without counting blank lines.
+    doc.moveTo(left, doc.y).lineTo(left + width, doc.y).strokeColor('#c9d6e2').lineWidth(0.8).stroke();
+    doc.moveDown(0.55);
+    doc.font('Helvetica').fontSize(9.5).fillColor(INK);
+  };
+
+  // One fact per line, label left and value right, which is how a figure gets
+  // read. Six of them crammed on one line separated by runs of spaces -- what
+  // this replaces -- is a line nobody reads to the end of.
+  const fact = (label, value, hint = '') => {
+    room(22);
+    const top = doc.y;
+    doc.font('Helvetica').fontSize(9.5).fillColor(QUIET).text(label, left, top, { width: width * 0.52 });
+    const labelBottom = doc.y;
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(INK)
+      .text(String(value), left + width * 0.54, top, { width: width * 0.46, align: 'right' });
+    doc.y = Math.max(labelBottom, doc.y);
+    if (hint) {
+      doc.font('Helvetica').fontSize(8).fillColor(QUIET).text(hint, left, doc.y, { width });
+    }
+    doc.moveDown(0.3);
+    doc.fillColor(INK);
+  };
+
+  // ---- the header ---------------------------------------------------------
+  //
   // The company mark, on every printed report. A report leaves the building --
   // it goes to a partner, a lender, a meeting -- and an unbranded sheet of
   // figures does not say who produced it.
@@ -910,188 +1299,263 @@ function writePdf(report, stream) {
   let headerX = left;
   const logo = logoPath();
   if (logo) {
-    doc.image(logo, left, headerTop, { fit: [96, 56] });
-    headerX = left + 108;
+    doc.image(logo, left, headerTop, { fit: [84, 50] });
+    headerX = left + 96;
   }
 
-  doc.fontSize(17).font('Helvetica-Bold').text('Activity report', headerX, headerTop);
-  doc.moveDown(0.2);
-  doc.fontSize(10).font('Helvetica')
-    .text(`${report.period.label}  (${report.period.start} to ${report.period.end})`)
-    .text(`Working area: ${report.scope.sectorName}${report.scope.projectName ? `    Project: ${report.scope.projectName}` : ''}`
-      + `    Generated: ${new Date(report.generatedAt).toLocaleString()}`)
-    .text(report.basis);
-  // Clear the logo even when the text block is shorter than it, so the first
-  // section never overlaps the mark.
-  if (logo) doc.y = Math.max(doc.y, headerTop + 56);
+  // The title says what this is a report ON, not the word "Activity report"
+  // over a page with no activities in it.
+  doc.fillColor(INK).fontSize(16).font('Helvetica-Bold')
+    .text(report.scope.sector ? operation(report.scope.sector) : t('report.allOperations'),
+      headerX, headerTop, { width: width - (headerX - left) });
+  doc.fontSize(10.5).font('Helvetica').fillColor(QUIET)
+    .text(periodInWords(report.period, language), { width: width - (headerX - left) });
+  doc.fontSize(8.5).text(
+    `${day(report.period.start)} ${t('report.to')} ${day(report.period.end)}`
+    + (report.scope.projectName ? `   ·   ${report.scope.projectName}` : '')
+    + `   ·   ${t('export.printed').toLowerCase()} ${new Date(report.generatedAt).toLocaleString(language)}`,
+    { width: width - (headerX - left) }
+  );
+  if (logo) doc.y = Math.max(doc.y, headerTop + 50);
   doc.x = left;
-  doc.moveDown(0.8);
+  doc.fillColor(INK);
 
-  const section = (title) => {
-    if (doc.y > bottom - 70) doc.addPage();
-    doc.fontSize(11).font('Helvetica-Bold').text(title, left, doc.y);
-    doc.moveDown(0.35);
-    doc.font('Helvetica').fontSize(9);
-  };
-
-  // Six figures across one line each, so the eye can compare them without a
-  // table border getting in the way.
-  section('ACTIVITY SUMMARY');
-  const counts = report.activitySummary;
-  doc.text(`Total activities: ${counts.total}      Completed: ${counts.completed}      In progress: ${counts.inProgress}`
-    + `      Pending: ${counts.pending}      Overdue: ${counts.overdue}      Cancelled: ${counts.cancelled}`);
-  doc.moveDown(0.8);
-
-  // The month's work, before the budget figures: on a month run through
-  // objectives this is the only section with anything in it, and burying it
-  // under an empty activity register is how the report came to read as "you did
-  // nothing this week".
-  const work = report.monthlyWork || { summary: { records: 0 }, objectives: [], days: [] };
-  if (work.summary.records > 0) {
-    section('MONTHLY PLAN PROGRESS');
-    doc.text(`Records in this period: ${work.summary.records}      Objectives worked: ${work.summary.objectives}`
-      + `      Operations: ${work.summary.operations}      Photos attached: ${work.summary.evidence}`
-      + (work.summary.cost > 0 ? `      Cost recorded: ${usd(work.summary.cost)}` : ''));
+  // ---- what was done ------------------------------------------------------
+  //
+  // First, always. On a month run through objectives this is the whole report,
+  // and burying it under an empty activity register is how the report came to
+  // read as "you did nothing this week".
+  section(t('report.whatWasDone'));
+  if (!work.objectives.length) {
+    doc.font('Helvetica-Oblique').fontSize(9.5).fillColor(QUIET)
+      .text(t('report.noPlanForDates'), left, doc.y, { width });
+    doc.fillColor(INK);
+  } else {
+    if (work.summary.percent !== null) {
+      fact(t('report.howFar'), `${work.summary.percent}%`);
+    }
+    fact(t('report.commitments'), work.summary.objectives);
+    fact(t('report.workedOn'), `${work.summary.objectivesWorked} / ${work.summary.objectives}`);
+    if (work.summary.objectivesDone) fact(t('portal.completed'), work.summary.objectivesDone);
+    fact(t('report.daysWritten'), work.summary.records);
+    if (work.summary.evidence) fact(t('report.photos'), work.summary.evidence);
     doc.moveDown(0.5);
 
+    // One block per commitment: its own words, then where it stands. An
+    // objective nobody touched is printed too, saying so -- it is the most
+    // important line on the page and it used to be missing altogether.
     for (const objective of work.objectives) {
-      if (doc.y > bottom - 50) doc.addPage();
-      const target = objective.target === null
-        ? `${objective.doneOverall} ${objective.unit}`.trim()
-        : `${objective.doneOverall} of ${objective.target} ${objective.unit}`.trim();
-      const standing = objective.percent === null ? 'not counted' : `${objective.percent}%`;
-      doc.font('Helvetica-Bold').text(`${sectorName(objective.operation)} · ${objective.title}`, { continued: false });
-      doc.font('Helvetica').fontSize(9).fillColor('#555555').text(
-        `This period: +${objective.doneInPeriod} ${objective.unit}`.trimEnd()
-        + `   ·   Overall: ${target}   ·   ${standing}`
-        + `   ·   ${objective.records} record(s)`
-        + (objective.evidence ? `, ${objective.evidence} photo(s)` : '')
-        + (objective.supportsOperation ? `   ·   supports ${sectorName(objective.supportsOperation)}` : '')
+      room(58);
+      // The commitment in its own words on the left, how far it has got on the
+      // right, both printed from the same top so a title that wraps to two
+      // lines does not drag the percentage down with it.
+      const blockTop = doc.y;
+      doc.font('Helvetica-Bold').fontSize(10).fillColor(INK)
+        .text(objective.title, left, blockTop, { width: width * 0.76 });
+      const titleBottom = doc.y;
+      const standing = objective.percent === null ? t('plan.notCounted') : `${objective.percent}%`;
+      doc.font('Helvetica-Bold').fontSize(objective.percent === null ? 8.5 : 10)
+        .fillColor(objective.complete ? '#1f7a4d' : QUIET)
+        .text(standing, left + width * 0.78, blockTop, { width: width * 0.22, align: 'right' });
+      doc.y = Math.max(titleBottom, doc.y);
+
+      // The progress bar: the one place a picture says it faster than a number.
+      if (objective.percent !== null) {
+        const barTop = doc.y + 2;
+        doc.roundedRect(left, barTop, width, 5, 2.5).fillColor('#e7edf4').fill();
+        if (objective.percent > 0) {
+          doc.roundedRect(left, barTop, Math.max(2, width * (objective.percent / 100)), 5, 2.5)
+            .fillColor(objective.complete ? '#1f7a4d' : '#2563a6').fill();
+        }
+        doc.y = barTop + 9;
+      }
+
+      const line = [];
+      line.push(objective.worked
+        ? w('report.doneInDates', { amount: `${objective.doneInPeriod} ${objective.unit}`.trim() })
+        : t('report.nothingInDates'));
+      line.push(objective.target === null
+        ? w('report.doneInTotal', { amount: `${objective.doneOverall} ${objective.unit}`.trim() })
+        : w('report.doneInTotal', {
+          amount: w('plan.doneOfTarget', {
+            done: objective.doneOverall, target: objective.target, unit: objective.unit
+          }).trim()
+        }));
+      if (objective.records) line.push(w('report.daysCount', { count: objective.records }));
+      if (objective.evidence) line.push(w('report.photosCount', { count: objective.evidence }));
+      if (objective.costInPeriod > 0) line.push(w('report.spentAmount', { amount: usd(objective.costInPeriod) }));
+      if (objective.supportsOperation) {
+        line.push(w('plan.supportsBadge', { operation: operation(objective.supportsOperation) }));
+      }
+      // Which operation and month this belongs to, but only when the report
+      // covers more than one -- on a single operation's month it is the title
+      // of the report repeated on every line.
+      if (work.months.length > 1) {
+        line.unshift(`${operation(objective.operation)}, ${monthInWords(objective.planMonth, language)}`);
+      }
+      doc.font('Helvetica').fontSize(8.5).fillColor(QUIET).text(line.join('   ·   '), left, doc.y, { width });
+      doc.fillColor(INK);
+      doc.moveDown(0.7);
+    }
+  }
+
+  // A project was asked for and the operation's month is not filed under it:
+  // say so. "No monthly plan covers these dates" would read as "nothing was
+  // agreed", which is a different and wrong statement.
+  if (work.monthsOutsideProject > 0) {
+    doc.moveDown(0.3);
+    doc.font('Helvetica-Oblique').fontSize(8.5).fillColor(QUIET)
+      .text(w('export.monthsNotInProject', { count: work.monthsOutsideProject }), left, doc.y, { width });
+    doc.fillColor(INK);
+  }
+
+  // ---- the money ----------------------------------------------------------
+  //
+  // Only when there is a figure to print. A MONEY heading with nothing under it
+  // but the exchange rate is a heading that wastes a reader's time.
+  const hasMoney = work.months.length > 0 || report.activities.length > 0;
+  if (hasMoney) {
+    section(t('report.money'));
+  }
+  if (work.months.length) {
+    if (work.money.budget > 0) {
+      fact(t('report.monthBudget'), usd(work.money.budget), localPair(work.money.budget, report.rate));
+      fact(t('report.spentSoFar'), usd(work.money.spent), localPair(work.money.spent, report.rate));
+      fact(work.money.remaining < 0 ? t('report.overBudgetBy') : t('report.moneyLeft'),
+        usd(Math.abs(work.money.remaining)), localPair(Math.abs(work.money.remaining), report.rate));
+    } else {
+      // approved_budget = 0 means no ceiling was set, which is not a budget of
+      // nothing. Printing "$0.00 left" on such a month said the opposite of
+      // what is true.
+      fact(t('report.monthBudget'), t('report.noCeiling'));
+      fact(t('report.spentSoFar'), usd(work.money.spent), localPair(work.money.spent, report.rate));
+    }
+    // Same reason as the spreadsheet: on a monthly report this is the figure
+    // above, printed again.
+    if (work.money.costInPeriod > 0 && work.money.costInPeriod !== work.money.spent) {
+      fact(t('report.spentInDates'), usd(work.money.costInPeriod));
+    }
+  }
+
+  // The register's own three figures, under their own sub-heading so nobody
+  // adds them to the month's. They are a different reading of the money.
+  if (report.activities.length) {
+    doc.moveDown(0.4);
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(QUIET).text(t('export.fromRegister'), left, doc.y, { width });
+    doc.moveDown(0.35);
+    doc.fillColor(INK);
+    fact(t('report.totalAssignedBudget'), usd(report.budgetSummary.assigned),
+      localPair(report.budgetSummary.assigned, report.rate));
+    if (report.budgetSummary.revised !== report.budgetSummary.assigned) {
+      fact(t('export.afterDirectorReviewed'), usd(report.budgetSummary.revised),
+        localPair(report.budgetSummary.revised, report.rate));
+    }
+    fact(t('field.spent'), usd(report.budgetSummary.spent), localPair(report.budgetSummary.spent, report.rate));
+    fact(report.budgetSummary.remaining < 0 ? t('report.overBudgetBy') : t('report.moneyLeft'),
+      usd(Math.abs(report.budgetSummary.remaining)),
+      localPair(Math.abs(report.budgetSummary.remaining), report.rate));
+  }
+  if (hasMoney) {
+    doc.font('Helvetica').fontSize(8).fillColor(QUIET)
+      .text(w('export.rateLine', { rwf: report.rate.rwfPerUsd, cdf: report.rate.cdfPerUsd }), left, doc.y, { width });
+    doc.fillColor(INK);
+  }
+
+  // ---- the day-by-day record ----------------------------------------------
+  //
+  // What the managers actually wrote down, in date order, grouped under each
+  // day so one date is read once instead of once per line.
+  if (work.days.length) {
+    section(t('report.dayByDay'));
+    let currentDate = null;
+    for (const entry of work.days) {
+      room(40);
+      if (entry.date !== currentDate) {
+        currentDate = entry.date;
+        doc.moveDown(0.25);
+        doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK).text(day(entry.date), left, doc.y, { width });
+        doc.moveDown(0.15);
+      }
+      const what = [`${entry.quantity} ${entry.unit}`.trim()];
+      if (entry.cost > 0) what.push(usd(entry.cost));
+      if (entry.evidenceCount) what.push(w('report.photosCount', { count: entry.evidenceCount }));
+      doc.font('Helvetica').fontSize(9).fillColor(INK).text(
+        `${work.months.length > 1 ? `${operation(entry.operation)} — ` : ''}${entry.objective || t('report.notLinked')}`
+        + `   ·   ${what.join('   ·   ')}`,
+        left + 12, doc.y, { width: width - 12 }
       );
-      doc.fillColor('#000000').fontSize(10);
+      // The manager's own words, left whole: wrapped, never clipped. These are
+      // the sentences a report exists to carry.
+      if (entry.notes) {
+        doc.font('Helvetica-Oblique').fontSize(8.5).fillColor(QUIET)
+          .text(entry.notes, left + 12, doc.y, { width: width - 12 });
+        doc.fillColor(INK);
+      }
       doc.moveDown(0.35);
     }
+  }
+
+  // ---- the activity register, when there is one ---------------------------
+  if (report.activities.length) {
+    section(t('report.activitiesInDates'));
+    fact(t('report.totalActivities'), report.activitySummary.total);
+    if (report.activitySummary.completed) fact(t('portal.completed'), report.activitySummary.completed);
+    if (report.activitySummary.inProgress) fact(t('portal.inProgress'), report.activitySummary.inProgress);
+    if (report.activitySummary.pending) fact(t('approval.pending'), report.activitySummary.pending);
+    if (report.activitySummary.overdue) fact(t('report.overdue'), report.activitySummary.overdue);
+    if (report.activitySummary.cancelled) fact(t('status.Cancelled'), report.activitySummary.cancelled);
     doc.moveDown(0.5);
-  }
 
-  section('BUDGET SUMMARY (USD)');
-  const budget = report.budgetSummary;
-  doc.text(`Total assigned: ${usd(budget.assigned)}      Total revised: ${usd(budget.revised)}`
-    + `      Actual spending: ${usd(budget.spent)}      Remaining: ${usd(budget.remaining)}`);
-  const local = (amount, perUsd) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(amount * perUsd);
-  doc.moveDown(0.3);
-  doc.fontSize(8).fillColor('#555555').text(
-    `In RWF: assigned ${local(budget.assigned, report.rate.rwfPerUsd)}      revised ${local(budget.revised, report.rate.rwfPerUsd)}`
-    + `      spent ${local(budget.spent, report.rate.rwfPerUsd)}      remaining ${local(budget.remaining, report.rate.rwfPerUsd)}`
-  );
-  doc.text(
-    `In CDF: assigned ${local(budget.assigned, report.rate.cdfPerUsd)}      revised ${local(budget.revised, report.rate.cdfPerUsd)}`
-    + `      spent ${local(budget.spent, report.rate.cdfPerUsd)}      remaining ${local(budget.remaining, report.rate.cdfPerUsd)}`
-  );
-  doc.text(`At today's rate: 1 USD = ${report.rate.rwfPerUsd} RWF = ${report.rate.cdfPerUsd} CDF`);
-  doc.fillColor('#000000').fontSize(10);
-  doc.moveDown(0.8);
-
-  // One shared row painter for both tables. Widths are fractions of the text
-  // column, so the layout survives a change of page size.
-  const table = (headers, fractions, rows) => {
-    const widths = fractions.map((fraction) => fraction * width);
-    const paint = (cells, bold) => {
-      const height = 14;
-      if (doc.y > bottom - height * 2) {
-        doc.addPage();
-        paint(headers, true);
+    // One block per activity rather than a row in a nine-column table. The
+    // table was drawn with line breaks switched off and an ellipsis, so every
+    // activity name and every note longer than its share of the page width was
+    // silently cut -- in a document whose whole purpose is to be read later.
+    for (const item of report.activities) {
+      room(54);
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK).text(item.activity, left, doc.y, { width });
+      const facts = [activityStanding(item, language)];
+      if (item.projectName) facts.push(item.projectName);
+      if (work.months.length > 1 || report.scope.sector === null) facts.push(operation(item.sector));
+      facts.push(w('export.givenSpent', {
+        given: usd(item.effectiveBudget), spent: usd(item.actualSpending)
+      }));
+      if (item.dateAssigned) facts.push(`${t('export.startedOn')} ${day(item.dateAssigned)}`);
+      if (item.deadline) facts.push(`${t('export.due')} ${day(item.deadline)}`);
+      if (item.completionDate) facts.push(`${t('export.finishedOn')} ${day(item.completionDate)}`);
+      doc.font('Helvetica').fontSize(8.5).fillColor(QUIET).text(facts.join('   ·   '), left, doc.y, { width });
+      const reason = budgetReasonText(item, language);
+      if (reason) {
+        doc.font('Helvetica-Oblique').fontSize(8.5).text(reason, left, doc.y, { width });
       }
-      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8);
-      let x = left;
-      const top = doc.y;
-      cells.forEach((cell, index) => {
-        doc.text(String(cell ?? ''), x + 2, top, { width: widths[index] - 4, height, ellipsis: true, lineBreak: false });
-        x += widths[index];
-      });
-      doc.y = top + height;
-      doc.moveTo(left, doc.y - 3).lineTo(left + width, doc.y - 3)
-        .strokeColor(bold ? '#333333' : '#dddddd').lineWidth(0.5).stroke();
-    };
-    paint(headers, true);
-    for (const row of rows) paint(row, false);
-  };
-
-  section('MANAGER PERFORMANCE');
-  table(
-    ['Manager', 'Assigned', 'Completed', 'In progress', 'Overdue', 'Budget handled', 'Spent'],
-    [0.28, 0.1, 0.11, 0.12, 0.1, 0.15, 0.14],
-    report.managers.map((entry) => [
-      entry.managerName, entry.assigned, entry.completed, entry.inProgress,
-      entry.overdue, usd(entry.budgetHandled), usd(entry.spent)
-    ])
-  );
-  doc.moveDown(1);
-
-  section('ACTIVITY DETAILS');
-  table(
-    ['Activity', 'Project', 'Manager', 'Original', 'Revised', 'Spent', 'Status', 'Assigned', 'Completed'],
-    [0.19, 0.15, 0.13, 0.08, 0.08, 0.08, 0.11, 0.09, 0.09],
-    report.activities.map((item) => [
-      item.activity, item.projectName, item.assignedToName || 'Not yet assigned',
-      usd(item.originalBudget), item.revisedBudget === null ? '-' : usd(item.revisedBudget),
-      usd(item.actualSpending), item.overdue ? `${item.status} (late)` : item.status,
-      item.dateAssigned || '-', item.completionDate || '-'
-    ])
-  );
-
-  // The notes are the point of keeping three budget figures apart, so they get
-  // their own block rather than being squeezed into a table cell and clipped.
-  const annotated = report.activities.filter((item) => item.adminNote || budgetReasonText(item));
-  if (annotated.length) {
-    doc.moveDown(1);
-    section('BUDGET CHANGES AND ADMIN NOTES');
-    for (const item of annotated) {
-      if (doc.y > bottom - 40) doc.addPage();
-      doc.font('Helvetica-Bold').fontSize(8.5).text(item.activity, left, doc.y, { width });
-      doc.font('Helvetica').fontSize(8)
-        .text(`Original ${usd(item.originalBudget)}  |  Revised ${item.revisedBudget === null ? 'not decided' : usd(item.revisedBudget)}  |  Spent ${usd(item.actualSpending)}`, { width });
-      const reason = budgetReasonText(item);
-      if (reason) doc.text(`Reason: ${reason}`, { width });
-      if (item.adminNote && reason !== item.adminNote) doc.text(`Admin note: ${item.adminNote}`, { width });
-      doc.moveDown(0.5);
-    }
-  }
-
-  // The day-by-day record: what the managers actually wrote down, in date
-  // order. This is the body of the report on a month run through objectives.
-  if (work.days.length) {
-    if (doc.y > bottom - 90) doc.addPage();
-    section('DAY-BY-DAY RECORD');
-    for (const day of work.days) {
-      if (doc.y > bottom - 34) doc.addPage();
-      doc.font('Helvetica-Bold').fontSize(8.5)
-        .text(`${readableDay(day.date)}  ·  ${sectorName(day.operation)}  ·  ${day.objective || '(no objective)'}`, left, doc.y, { width });
-      doc.font('Helvetica').fontSize(8).text(
-        `${day.quantity} ${day.unit}`.trim()
-        + (day.cost > 0 ? `  |  ${usd(day.cost)}` : '')
-        + `  |  ${day.evidenceCount} photo(s)`
-        + `  |  recorded by ${day.recordedBy || 'unknown'}`
-        + (day.notes ? `  |  ${day.notes}` : ''),
-        { width }
-      );
-      doc.moveDown(0.4);
+      // Only when the note is not already inside the reason line above: the
+      // Director's note IS usually the reason they changed the figure, and
+      // printing it twice under one activity reads as two separate remarks.
+      if (item.adminNote && !reason.includes(item.adminNote.replace(/\s*\.\s*$/, ''))) {
+        doc.font('Helvetica-Oblique').fontSize(8.5)
+          .text(w('export.directorsNoteLine', { note: item.adminNote }), left, doc.y, { width });
+      }
+      doc.fillColor(INK);
+      doc.moveDown(0.6);
     }
   }
 
   // Only truly empty when BOTH registers are empty. Saying "no activities" on a
   // week full of recorded days was the bug this replaces.
-  if (!report.activities.length && !work.days.length) {
+  if (!report.activities.length && !work.days.length && !work.objectives.length) {
     doc.moveDown(1);
-    doc.font('Helvetica-Oblique').fontSize(10)
-      .text('Nothing was recorded in this period -- no activities, and no days against a monthly plan.', left, doc.y, { width });
-  } else if (!report.activities.length) {
-    doc.moveDown(0.6);
-    doc.font('Helvetica-Oblique').fontSize(9).fillColor('#555555')
-      .text('No activity-register entries fall in this period. The work above was recorded against the monthly plan.', left, doc.y, { width });
-    doc.fillColor('#000000');
+    doc.font('Helvetica-Oblique').fontSize(10).fillColor(QUIET)
+      .text(t('export.nothingAtAll'), left, doc.y, { width });
   }
 
   doc.end();
   return doc;
+}
+
+// Where an activity stands, including the one thing worth saying about who has
+// it: whether anybody has it at all.
+function activityStanding(item, language = 'en') {
+  const { t } = wordsFor(language);
+  const standing = t(`status.${item.status}`) + (item.overdue ? ` (${t('export.pastItsDate').toLowerCase()})` : '');
+  if (!item.assigned) return `${standing} — ${t('report.nobodyGivenIt')}`;
+  return standing;
 }

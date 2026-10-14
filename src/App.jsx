@@ -1798,9 +1798,15 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       const slug = (text) => String(text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
       const subject = report.scope?.projectName ? `${slug(report.scope.projectName)}-`
         : report.scope?.sector ? `${slug(report.scope.sector)}-` : '';
+      // The language the reader is reading in goes with the request: the file
+      // is written in it, headings, dates and all. The exports used to be
+      // English only -- and the exported file is the copy that gets printed and
+      // carried to the meeting, so it was the one copy the reader could not
+      // read. The server takes it from here rather than from the account,
+      // because the language is this browser's choice.
       await download(
-        `/api/reports/activities/export?format=${format}&${reportQueryUsed}`,
-        `activity-report-${subject}${report.period.start}-to-${report.period.end}.${format}`
+        `/api/reports/activities/export?format=${format}&${reportQueryUsed}&language=${encodeURIComponent(language)}`,
+        `report-${subject}${report.period.start}-to-${report.period.end}.${format}`
       );
       notify(fill(t('msg.reportDownloaded'), { format: format === 'xlsx' ? 'Excel' : 'PDF' }));
     } catch (exportError) {
@@ -2706,18 +2712,50 @@ function ReportsSection({
   </section>;
 }
 
+// THE REPORT ON SCREEN, in the order a report is read: what was done, then the
+// money, then the day-by-day record, and the activity register last and only
+// when there is one.
+//
+// WHAT THIS REPLACES. The screen read `activitySummary` first and, when the
+// register was empty for the period, drew "No work in those dates. Nobody gave
+// out or asked for work." and stopped -- throwing away `monthlyWork`, which it
+// never rendered at all. So a Director who set four objectives and watched
+// their manager record ten days against them was told on screen that nothing
+// had happened, while the PDF export of the very same query printed all ten
+// days. A month is worked through objectives now; the register is the older
+// structure, and it no longer decides whether a report has anything in it.
+//
+// There are no names anywhere below. Who recorded a day, who asked for a budget
+// change and who answered it are all in the record's own history screen; in a
+// report they were a column of noise between the reader and the figures, and
+// the people reading these reports already know who runs each operation.
 function ReportBody({ report, busy, sectorLabel, onExport, onPrint, onClose }) {
   const t = useT();
+  const work = report.monthlyWork || { summary: {}, money: {}, months: [], objectives: [], days: [] };
   const counts = report.activitySummary;
   const budget = report.budgetSummary;
+  const hasActivities = counts.total > 0;
+  // Empty only when BOTH registers are empty. This is the whole bug in one
+  // condition: it used to read `counts.total === 0`.
+  const empty = !hasActivities && !work.objectives.length && !work.days.length;
+  // The register's money and the month's money are two different readings, and
+  // the block only appears when one of them has something in it.
+  const hasMoney = (work.months || []).length > 0 || hasActivities;
+  // The operation and month are worth repeating on each line only when the
+  // report covers more than one of them.
+  const manyMonths = (work.months || []).length > 1;
 
   return <div className="report-result-body">
     <div className="report-meta">
       <div>
-        <strong>{report.period.label}</strong>
+        <strong>{report.scope.sector ? sectorLabel(report.scope.sector) : t('report.allOperations')}
+          {report.scope.projectName && <> &middot; {report.scope.projectName}</>}</strong>
+        {/* The dates in the reader's own language. `period.label` is the
+            server's English phrase ("Week of 7 September 2026"); it is what the
+            exported file is headed with, but on screen these two dates say the
+            same thing in the language the reader chose. */}
         <span>
-          {formatDate(report.period.start)} {t('report.to')} {formatDate(report.period.end)} &middot; {sectorName(report.scope.sector) || report.scope.sectorName}
-          {report.scope.projectName && <> &middot; {report.scope.projectName}</>}
+          {formatDate(report.period.start)} {t('report.to')} {formatDate(report.period.end)}
           {' '}&middot; {t('report.generated')} {new Date(report.generatedAt).toLocaleString(displayLanguage())}
         </span>
       </div>
@@ -2729,129 +2767,245 @@ function ReportBody({ report, busy, sectorLabel, onExport, onPrint, onClose }) {
       </div>
     </div>
 
-    {counts.total === 0
+    {empty
       ? <div className="empty-state">
         <strong>{t('report.noneInPeriod')}</strong>
         <span>{t('report.nothingBetween')}</span>
       </div>
       : <>
-        <h3 className="form-section-title">{t('report.activitySummary')}</h3>
-        {/* Overdue cuts across the other counts rather than being one of them,
-            so these six are not meant to add up to the total. */}
-        <div className="metric-grid metric-grid-6">
-          <Metric label={t('report.totalActivities')} value={counts.total} />
-          <Metric label={t('portal.completed')} value={counts.completed} />
-          <Metric label={t('portal.inProgress')} value={counts.inProgress} />
-          <Metric label={t('approval.pending')} value={counts.pending} />
-          <Metric label={t('report.overdue')} value={counts.overdue} />
-          <Metric label={t('status.Cancelled')} value={counts.cancelled} />
-        </div>
+        {/* ---- what was done ------------------------------------------- */}
+        <h3 className="form-section-title">{t('report.whatWasDone')}</h3>
+        {/* A project was asked for and this operation's month is not filed
+            under it: say so. Reading "no monthly plan covers these dates" there
+            would mean "nothing was agreed", which is a different thing. */}
+        {work.monthsOutsideProject > 0 && <p className="field-hint">
+          {fill(t('export.monthsNotInProject'), { count: work.monthsOutsideProject })}
+        </p>}
+        {work.objectives.length === 0
+          ? <p className="field-hint">{t('report.noPlanForDates')}</p>
+          : <>
+            <div className="metric-grid metric-grid-4">
+              {work.summary.percent !== null && <Metric label={t('report.howFar')} value={`${work.summary.percent}%`} />}
+              <Metric label={t('report.commitments')} value={work.summary.objectives} />
+              <Metric label={t('report.workedOn')} value={`${work.summary.objectivesWorked}/${work.summary.objectives}`} />
+              <Metric label={t('report.daysWritten')} value={work.summary.records} />
+            </div>
 
-        <h3 className="form-section-title">{t('report.budgetSummary')}</h3>
-        <div className="budget-strip budget-strip-4">
-          {/* Each figure in the local currencies too, at the rate the report
-              was generated with (it carries that rate with it). */}
+            {/* One card per commitment, in the manager's own words, with the
+                bar the plan screen uses so the two read alike. An objective
+                nobody touched is drawn too, saying so -- it used to be absent
+                from the report altogether, which made "nothing recorded" and
+                "no such commitment" look identical. */}
+            <div className="objective-board report-objectives">
+              {work.objectives.map((objective) => <div className="objective-card" key={objective.objectiveId}>
+                <div className="objective-card-head">
+                  <strong>{objective.title}</strong>
+                  {objective.percent === null
+                    ? <span className="objective-percent muted-cell">{t('plan.notCounted')}</span>
+                    : <span className={`objective-percent${objective.complete ? ' is-done' : ''}`}>{objective.percent}%</span>}
+                </div>
+                {manyMonths && <small className="muted-cell">
+                  {sectorLabel(objective.operation)} &middot; {objective.planMonth}
+                </small>}
+                {objective.supportsOperation && <span className="supports-badge">
+                  {fill(t('plan.supportsBadge'), { operation: sectorLabel(objective.supportsOperation) })}
+                </span>}
+                {objective.percent !== null && <div className="objective-bar">
+                  <span style={{ width: `${objective.percent}%` }} />
+                </div>}
+                <div className="objective-figures">
+                  {/* What these dates added, which is the question a weekly
+                      report asks, beside where the commitment now stands
+                      overall, which is the question a monthly one asks. */}
+                  <span>{objective.worked
+                    ? fill(t('report.doneInDates'), { amount: `${objective.doneInPeriod} ${objective.unit}`.trim() })
+                    : <em>{t('report.nothingInDates')}</em>}</span>
+                  <span className="muted-cell">{objective.target === null
+                    ? fill(t('report.doneInTotal'), { amount: `${objective.doneOverall} ${objective.unit}`.trim() })
+                    : fill(t('plan.doneOfTarget'), {
+                      done: objective.doneOverall, target: objective.target, unit: objective.unit
+                    })}</span>
+                  {objective.records > 0 && <span className="muted-cell">
+                    {fill(t('report.daysCount'), { count: objective.records })}</span>}
+                  {objective.evidence > 0 && <span className="muted-cell">
+                    {fill(t('report.photosCount'), { count: objective.evidence })}</span>}
+                  {objective.costInPeriod > 0 && <span className="muted-cell">
+                    {fill(t('report.spentAmount'), { amount: formatUsd(objective.costInPeriod) })}</span>}
+                </div>
+              </div>)}
+            </div>
+          </>}
+
+        {/* ---- the money -----------------------------------------------
+            Only when there is a figure to show: a Money heading with nothing
+            under it but the exchange rate wastes a reader's time. */}
+        {hasMoney && <h3 className="form-section-title">{t('report.money')}</h3>}
+        {work.months.length > 0 && <div className="budget-strip budget-strip-4">
+          {/* The monthly plan's own money: the ceiling the Director set and
+              what has gone out of it. A month with no ceiling says so --
+              approved_budget = 0 means unlimited, not a budget of nothing. */}
           <div className="budget-block">
-            <span>{t('report.totalAssignedBudget')}</span>
-            <strong>{formatUsd(budget.assigned)}</strong>
-            <small className="money-equivalent">{localPair(budget.assigned, report.rate)}</small>
-            <small>{t('report.assignedHint')}</small>
-          </div>
-          <div className={`budget-block${budget.revised !== budget.assigned ? ' budget-adjusted' : ''}`}>
-            <span>{t('report.totalRevisedBudget')}</span>
-            <strong>{formatUsd(budget.revised)}</strong>
-            <small className="money-equivalent">{localPair(budget.revised, report.rate)}</small>
-            <small>{budget.revised === budget.assigned
-              ? t('report.unchangedOnReview')
-              : fill(t('report.againstOriginal'), { change: `${budget.revised > budget.assigned ? '+' : ''}${formatUsd(budget.revised - budget.assigned)}` })}</small>
+            <span>{t('report.monthBudget')}</span>
+            <strong>{work.money.budget > 0 ? formatUsd(work.money.budget) : t('report.noCeiling')}</strong>
+            {work.money.budget > 0 && <small className="money-equivalent">{localPair(work.money.budget, report.rate)}</small>}
           </div>
           <div className="budget-block">
-            <span>{t('report.totalActualSpending')}</span>
-            <strong>{formatUsd(budget.spent)}</strong>
-            <small className="money-equivalent">{localPair(budget.spent, report.rate)}</small>
-            <small>{fill(t('report.utilisationHint'), { percent: budget.utilisation })}</small>
+            <span>{t('report.spentSoFar')}</span>
+            <strong>{formatUsd(work.money.spent)}</strong>
+            <small className="money-equivalent">{localPair(work.money.spent, report.rate)}</small>
           </div>
-          <div className={`budget-block${budget.remaining < 0 ? ' budget-adjusted' : ''}`}>
-            <span>{t('report.remainingBudget')}</span>
-            <strong>{formatUsd(budget.remaining)}</strong>
-            <small className="money-equivalent">{localPair(budget.remaining, report.rate)}</small>
-            <small>{budget.remaining < 0 ? t('report.overspent') : t('report.releasedNotSpent')}</small>
-          </div>
-        </div>
-        {report.rate?.rwfPerUsd > 0 && <p className="field-hint">
+          {work.money.remaining !== null && <div className={`budget-block${work.money.remaining < 0 ? ' budget-adjusted' : ''}`}>
+            <span>{work.money.remaining < 0 ? t('report.overBudgetBy') : t('report.moneyLeft')}</span>
+            <strong>{formatUsd(Math.abs(work.money.remaining))}</strong>
+            <small className="money-equivalent">{localPair(Math.abs(work.money.remaining), report.rate)}</small>
+          </div>}
+          {/* Only when the dates are narrower than the month: on a monthly
+              report this is the figure beside it, printed twice. */}
+          {work.money.costInPeriod > 0 && work.money.costInPeriod !== work.money.spent && <div className="budget-block">
+            <span>{t('report.spentInDates')}</span>
+            <strong>{formatUsd(work.money.costInPeriod)}</strong>
+            <small className="money-equivalent">{localPair(work.money.costInPeriod, report.rate)}</small>
+          </div>}
+        </div>}
+        {hasMoney && report.rate?.rwfPerUsd > 0 && <p className="field-hint">
           {t('money.todayRate')}: 1 USD = {formatLocal(report.rate.rwfPerUsd, 'RWF')} = {formatLocal(report.rate.cdfPerUsd, 'CDF')}
         </p>}
 
-        <h3 className="form-section-title">{t('report.managerPerformance')}</h3>
-        <div className="table-wrap"><table className="card-table">
-          <thead><tr>
-            <th>{t('field.manager')}</th><th>{t('report.activitiesAssigned')}</th><th>{t('portal.completed')}</th><th>{t('portal.inProgress')}</th>
-            <th>{t('report.overdue')}</th><th>{t('report.totalBudgetHandled')}</th><th>{t('field.spent')}</th>
-          </tr></thead>
-          <tbody>{report.managers.map((entry) => <tr key={entry.managerId ?? 'unassigned'}>
-            <td className="card-title-cell"><strong>{entry.managerId === null ? t('table.unassigned') : entry.managerName}</strong>
-              {entry.managerId === null && <small className="muted-cell">{t('report.unassignedWork')}</small>}</td>
-            <td data-label={t('report.activitiesAssigned')}>{entry.assigned}</td>
-            <td data-label={t('portal.completed')}>{entry.completed}</td>
-            <td data-label={t('portal.inProgress')}>{entry.inProgress}</td>
-            <td data-label={t('report.overdue')} className={entry.overdue ? 'over-budget' : undefined}>{entry.overdue || <span className="muted-cell">0</span>}</td>
-            <td data-label={t('report.totalBudgetHandled')}>{formatUsd(entry.budgetHandled)}</td>
-            <td data-label={t('field.spent')}>{formatUsd(entry.spent)}</td>
-          </tr>)}</tbody>
-        </table></div>
+        {/* ---- the day-by-day record ----------------------------------- */}
+        {work.days.length > 0 && <>
+          <h3 className="form-section-title">{t('report.dayByDay')}</h3>
+          <div className="table-wrap"><table className="card-table">
+            <thead><tr>
+              <th>{t('report.date')}</th><th>{t('report.commitment')}</th><th>{t('report.amount')}</th>
+              <th>{t('field.spent')}</th><th>{t('report.photos')}</th><th>{t('report.whatWasWritten')}</th>
+            </tr></thead>
+            <tbody>{work.days.map((day) => <tr key={day.id}>
+              <td className="card-title-cell"><strong>{formatDate(day.date)}</strong>
+                {manyMonths && <small className="muted-cell">{sectorLabel(day.operation)}</small>}</td>
+              <td data-label={t('report.commitment')}>{day.objective
+                || <span className="muted-cell">{t('report.notLinked')}</span>}</td>
+              <td data-label={t('report.amount')}>{day.quantity} {day.unit}</td>
+              <td data-label={t('field.spent')}>{day.cost > 0
+                ? formatUsd(day.cost) : <span className="muted-cell">&mdash;</span>}</td>
+              <td data-label={t('report.photos')}>{day.evidenceCount
+                || <span className="muted-cell">0</span>}</td>
+              {/* The manager's own sentence, whole and wrapped. */}
+              <td data-label={t('report.whatWasWritten')} className="report-note-cell">{day.notes
+                || <span className="muted-cell">&mdash;</span>}</td>
+            </tr>)}</tbody>
+          </table></div>
+        </>}
 
-        <h3 className="form-section-title">{t('report.activityDetails')}</h3>
-        <div className="table-wrap scroll-hint"><table className="report-detail-table">
-          <thead><tr>
-            <th>{t('table.activity')}</th><th>{t('report.projectArea')}</th><th>{t('report.assignedManager')}</th>
-            <th>{t('activities.originalBudget')}</th><th>{t('report.revisedBudget')}</th><th>{t('report.actualSpending')}</th>
-            <th>{t('table.status')}</th><th>{t('report.dateAssigned')}</th><th>{t('report.completionDate')}</th><th>{t('report.adminNotes')}</th>
-          </tr></thead>
-          <tbody>{report.activities.map((item) => <tr key={item.id}>
-            <td><strong>{item.activity}</strong><small>{categoryLabel(item.category, t)}</small></td>
-            <td>{item.projectName}<small className="muted-cell">{sectorLabel(item.sector)}</small></td>
-            <td>{item.assignedToName || <span className="muted-cell">{t('review.notAssigned')}</span>}</td>
-            <td>{formatUsd(item.originalBudget)}</td>
-            {/* An undecided budget is not a zero, and showing it as one would
-                read as the Director having released nothing. */}
-            <td className={item.budgetAdjustment ? 'over-budget' : undefined}>
-              {item.revisedBudget === null
-                ? <span className="muted-cell">{t('activities.notDecided')}</span>
-                : <>{formatUsd(item.revisedBudget)}
-                  {item.budgetAdjustment ? <small>{item.budgetAdjustment > 0 ? '+' : ''}{formatUsd(item.budgetAdjustment)}</small> : null}</>}
-            </td>
-            <td>{formatUsd(item.actualSpending)}
-              <small className={item.remainingBudget < 0 ? 'over-budget' : 'muted-cell'}>
-                {fill(t('report.left'), { amount: formatUsd(item.remainingBudget) })}
-              </small></td>
-            <td><span className={`status-badge ${statusTone(item.status)}`}>{t(`status.${item.status}`)}</span>
-              {item.overdue && <small className="deadline-flag deadline-overdue">{t('report.overdue')}</small>}</td>
-            <td>{item.dateAssigned ? formatDate(item.dateAssigned) : <span className="muted-cell">&mdash;</span>}</td>
-            <td>{item.completionDate ? formatDate(item.completionDate) : <span className="muted-cell">&mdash;</span>}</td>
-            <td className="report-note-cell"><ReportNotes item={item} /></td>
-          </tr>)}</tbody>
-        </table></div>
+        {/* ---- the activity register, when there is one ---------------- */}
+        {hasActivities && <>
+          <h3 className="form-section-title">{t('report.activitiesInDates')}</h3>
+          <h4 className="report-subheading">{t('report.activitySummary')}</h4>
+          <div className="metric-grid metric-grid-6">
+            <Metric label={t('report.totalActivities')} value={counts.total} />
+            <Metric label={t('portal.completed')} value={counts.completed} />
+            <Metric label={t('portal.inProgress')} value={counts.inProgress} />
+            <Metric label={t('approval.pending')} value={counts.pending} />
+            <Metric label={t('report.overdue')} value={counts.overdue} />
+            <Metric label={t('status.Cancelled')} value={counts.cancelled} />
+          </div>
+
+          {/* The register's three budget figures, under their own heading so
+              nobody adds them to the month's figures above: they are a
+              different reading of the same money. */}
+          <h4 className="report-subheading">{t('report.budgetSummary')}</h4>
+          <div className="budget-strip budget-strip-4">
+            <div className="budget-block">
+              <span>{t('report.totalAssignedBudget')}</span>
+              <strong>{formatUsd(budget.assigned)}</strong>
+              <small className="money-equivalent">{localPair(budget.assigned, report.rate)}</small>
+              <small>{t('report.assignedHint')}</small>
+            </div>
+            <div className={`budget-block${budget.revised !== budget.assigned ? ' budget-adjusted' : ''}`}>
+              <span>{t('report.totalRevisedBudget')}</span>
+              <strong>{formatUsd(budget.revised)}</strong>
+              <small className="money-equivalent">{localPair(budget.revised, report.rate)}</small>
+              <small>{budget.revised === budget.assigned
+                ? t('report.unchangedOnReview')
+                : fill(t('report.againstOriginal'), { change: `${budget.revised > budget.assigned ? '+' : ''}${formatUsd(budget.revised - budget.assigned)}` })}</small>
+            </div>
+            <div className="budget-block">
+              <span>{t('report.totalActualSpending')}</span>
+              <strong>{formatUsd(budget.spent)}</strong>
+              <small className="money-equivalent">{localPair(budget.spent, report.rate)}</small>
+              <small>{fill(t('report.utilisationHint'), { percent: budget.utilisation })}</small>
+            </div>
+            <div className={`budget-block${budget.remaining < 0 ? ' budget-adjusted' : ''}`}>
+              <span>{t('report.remainingBudget')}</span>
+              <strong>{formatUsd(budget.remaining)}</strong>
+              <small className="money-equivalent">{localPair(budget.remaining, report.rate)}</small>
+              <small>{budget.remaining < 0 ? t('report.overspent') : t('report.releasedNotSpent')}</small>
+            </div>
+          </div>
+
+          <h4 className="report-subheading">{t('report.activityDetails')}</h4>
+          <div className="table-wrap scroll-hint"><table className="report-detail-table">
+            <thead><tr>
+              <th>{t('table.activity')}</th><th>{t('report.projectArea')}</th>
+              <th>{t('activities.originalBudget')}</th><th>{t('report.revisedBudget')}</th><th>{t('report.actualSpending')}</th>
+              <th>{t('table.status')}</th><th>{t('report.dateAssigned')}</th><th>{t('report.completionDate')}</th><th>{t('report.adminNotes')}</th>
+            </tr></thead>
+            <tbody>{report.activities.map((item) => <tr key={item.id}>
+              <td><strong>{item.activity}</strong><small>{categoryLabel(item.category, t)}</small></td>
+              <td>{item.projectName}<small className="muted-cell">{sectorLabel(item.sector)}</small></td>
+              <td>{formatUsd(item.originalBudget)}</td>
+              {/* An undecided budget is not a zero, and showing it as one would
+                  read as the Director having released nothing. */}
+              <td className={item.budgetAdjustment ? 'over-budget' : undefined}>
+                {item.revisedBudget === null
+                  ? <span className="muted-cell">{t('activities.notDecided')}</span>
+                  : <>{formatUsd(item.revisedBudget)}
+                    {item.budgetAdjustment ? <small>{item.budgetAdjustment > 0 ? '+' : ''}{formatUsd(item.budgetAdjustment)}</small> : null}</>}
+              </td>
+              <td>{formatUsd(item.actualSpending)}
+                <small className={item.remainingBudget < 0 ? 'over-budget' : 'muted-cell'}>
+                  {fill(t('report.left'), { amount: formatUsd(item.remainingBudget) })}
+                </small></td>
+              <td><span className={`status-badge ${statusTone(item.status)}`}>{t(`status.${item.status}`)}</span>
+                {item.overdue && <small className="deadline-flag deadline-overdue">{t('report.overdue')}</small>}
+                {/* Not who has it -- only whether anybody does, which is a gap
+                    worth reporting. */}
+                {!item.assigned && <small className="muted-cell">{t('report.nobodyGivenIt')}</small>}</td>
+              <td>{item.dateAssigned ? formatDate(item.dateAssigned) : <span className="muted-cell">&mdash;</span>}</td>
+              <td>{item.completionDate ? formatDate(item.completionDate) : <span className="muted-cell">&mdash;</span>}</td>
+              <td className="report-note-cell"><ReportNotes item={item} /></td>
+            </tr>)}</tbody>
+          </table></div>
+        </>}
       </>}
   </div>;
 }
 
 // Why a budget moved, which is the whole point of keeping the original figure
-// beside the revised one. The Director's standing note, the trail of what they
-// actually changed it to, and any request a manager raised, all read together.
+// beside the revised one: the Director's standing note, what they actually
+// changed it to, and the request that asked for it. Without names -- the
+// record's own history screen says who, and a report does not need to.
 function ReportNotes({ item }) {
   const t = useT();
-  const hasAnything = item.adminNote || item.budgetRevisions.length || item.budgetRequests.length;
+  // A revision out of nothing is the budget being set when the activity was
+  // created, not a change to it. Listing it put "Not set → $500.00" on every
+  // row in the report.
+  const changes = item.budgetRevisions.filter((change) => change.from !== null);
+  const hasAnything = item.adminNote || changes.length || item.budgetRequests.length;
   if (!hasAnything) return <span className="muted-cell">&mdash;</span>;
 
   return <div className="report-notes">
     {item.adminNote && <span className="admin-note">&ldquo;{item.adminNote}&rdquo;</span>}
-    {item.budgetRevisions.map((change, index) => <small key={`revision-${index}`}>
-      {change.from === null ? t('report.notSet') : formatUsd(change.from)} &rarr; {change.to === null ? t('report.notSet') : formatUsd(change.to)}
-      {change.changedBy ? ` · ${change.changedBy}` : ''}
-      {change.note ? ` — ${change.note}` : ''}
+    {changes.map((change, index) => <small key={`revision-${index}`}>
+      {fill(t('report.changedFromTo'), {
+        from: formatUsd(change.from),
+        to: change.to === null ? t('report.notSet') : formatUsd(change.to)
+      })}
+      {/* The note is only added when it is not the Director's standing note
+          shown above it, or the same sentence reads as two remarks. */}
+      {change.note && change.note !== item.adminNote ? ` — ${change.note}` : ''}
     </small>)}
     {item.budgetRequests.map((request, index) => <small key={`request-${index}`}>
-      {fill(t('report.askedFor'), { name: request.requestedBy || t('role.manager'), amount: formatUsd(request.requestedAmount) })}: {request.reason}
+      {fill(t('report.askedFor'), { amount: formatUsd(request.requestedAmount) })}: {request.reason}
       {' '}({request.status === 'Pending' ? t('report.awaitingAnswer') : t(`budgetRequest.status.${request.status}`)})
       {request.decisionNote ? ` — ${request.decisionNote}` : ''}
     </small>)}

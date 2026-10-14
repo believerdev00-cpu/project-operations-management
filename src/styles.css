@@ -389,8 +389,20 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 /* Reports: the period pickers, the two summary blocks and the details table.
    All of it reuses the panel, metric and table styles the rest of the app
    already uses -- only the grid widths and the notes column are new. */
+.metric-grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .metric-grid-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .budget-strip-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+/* The activity register is the report's last section and its own three-part
+   block, so its parts are sub-headings under one section title rather than
+   three more section titles competing with "What was done". */
+.report-subheading { margin: 20px 0 10px; color: var(--muted); font-size: .76rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+
+/* The commitments, drawn with the same cards and bars as the plan screen, so a
+   report and the plan it reports on read alike. */
+.report-objectives { margin-top: 4px; }
+.report-objectives .objective-card small { display: block; }
+.report-objectives .objective-figures em { color: var(--muted); font-style: italic; }
 
 .report-picker { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 14px; margin-top: 16px; padding: 16px; background: white; border: 1px solid var(--line); border-radius: 5px; }
 .report-picker .form-field { flex: 1 1 190px; }
@@ -651,7 +663,7 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
   .detail-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .planned-figures { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .metric-grid-5, .metric-grid-6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .metric-grid-4, .metric-grid-5, .metric-grid-6 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .budget-strip-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dashboard-columns { grid-template-columns: 1fr; }
 }
@@ -761,7 +773,7 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 
   .welcome-strip h2, .context-strip h2 { font-size: 1.15rem; }
   .month-picker { flex: 1 1 100%; }
-  .metric-grid, .metric-grid-5, .metric-grid-6 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .metric-grid, .metric-grid-4, .metric-grid-5, .metric-grid-6 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .metric-card { padding: 14px; }
   .metric-card strong { margin-top: 6px; font-size: 1.3rem; }
   .totals-strip { grid-template-columns: 1fr; }
@@ -833,7 +845,7 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 }
 
 @media (max-width: 380px) {
-  .metric-grid, .metric-grid-5, .metric-grid-6, .detail-facts, .accountability-grid, .approval-panel, .cost-grid, .planned-figures { grid-template-columns: 1fr; }
+  .metric-grid, .metric-grid-4, .metric-grid-5, .metric-grid-6, .detail-facts, .accountability-grid, .approval-panel, .cost-grid, .planned-figures { grid-template-columns: 1fr; }
   .card-table td { grid-template-columns: minmax(0, 1fr); }
   .card-table td::before { grid-row: auto; padding: 0 0 2px; }
   .card-table td > * { grid-column: 1; }
@@ -855,6 +867,13 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
   .report-detail-table { min-width: 0; }
   .table-wrap { overflow: visible; background: none; }
   table { font-size: .68rem; }
+  /* The progress bars are the one piece of the report that is a picture rather
+     than a figure, and a browser drops background fills when printing unless
+     it is told not to -- which would print every commitment as an empty rail. */
+  .objective-bar, .objective-bar span { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  /* A commitment and its figures are read together, so neither is split across
+     a page break. */
+  .objective-card { break-inside: avoid; }
   @page { size: landscape; margin: 12mm; }
 }
 
