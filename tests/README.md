@@ -20,6 +20,7 @@ running is left alone.
 | `partner-access.test.mjs` | an external partner sees one business operation and nothing else |
 | `monthly-workflow.test.mjs` | planning, the approved allocation, expenses, the budget block, evidence, month-end |
 | `monthly-target.test.mjs` | a month as one objective with a target, started and reported day by day by the operation's manager |
+| `reports.test.mjs` | a period report: a month of objectives reads as a full report, an objective nobody worked on says so, the month’s money kept apart from the register’s, no person named anywhere, and the PDF and spreadsheet written in each of the four languages |
 | `assigned-plan.test.mjs` | the whole cycle: the Director assigns a month, the named manager is told and works it, another manager cannot see it, evidence, submission, return with a reason, resubmission, approval, notifications, change requests, the dashboard counts; the same cycle on a planned activity |
 
 ## They run against the real database
@@ -44,7 +45,7 @@ The consequences are worth knowing:
   username. Clear them with:
 
   ```sql
-  DELETE FROM monthly_plans WHERE month = '2099-09-01';
+  DELETE FROM monthly_plans WHERE month IN ('2099-09-01', '2096-09-01', '2095-04-01');
   DELETE FROM activities WHERE activity LIKE 'ZZTEST %' OR activity LIKE 'TEST %';
   DELETE FROM users WHERE username LIKE 'zz-%';
   ```
