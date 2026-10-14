@@ -6,6 +6,7 @@ import bcrypt from 'bcryptjs';
 import { pool } from '../server/db/database.js';
 import { BUSINESS_OPERATIONS } from '../shared/businessOperations.js';
 import { directorSession } from './director.mjs';
+import { PROJECT_IDS, createProject, removeProject } from './fixtures.mjs';
 const API = process.env.API || 'http://localhost:5000';
 const MONTH = '2099-09';
 
@@ -51,11 +52,17 @@ async function cleanup() {
        OR approval_required_from=$1 OR approved_by=$1 OR reviewed_by=$1`, [id]);
     await pool.query('DELETE FROM users WHERE id = $1', [id]);
   }
+  // Last: an activity references its project, so the project goes after the
+  // work that was hanging on it.
+  await removeProject('farming');
 }
 
 try {
   section('setup');
   const { token: adminToken } = await directorSession();
+  // The off-plan request further down hangs on a project. It used to be
+  // 'PRJ-GISUMA', which nothing seeds -- see tests/fixtures.mjs.
+  await createProject('farming');
   const managers = {};
   for (const operation of BUSINESS_OPERATIONS) {
     const row = await pool.query(
@@ -402,7 +409,7 @@ try {
   const raised = await api(farmingManager.token, '/api/activities', {
     method: 'POST',
     body: JSON.stringify({
-      projectId: 'PRJ-GISUMA', sector: 'farming', category: 'Tools', activity: 'ZZTEST off-plan request',
+      projectId: PROJECT_IDS.farming, sector: 'farming', category: 'Tools', activity: 'ZZTEST off-plan request',
       description: 'Raised by the manager.', quantity: 1, costUsd: 400, costRwf: 580000, costCdf: 1140000
     })
   });

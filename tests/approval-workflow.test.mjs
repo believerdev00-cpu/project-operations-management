@@ -7,6 +7,7 @@
 import bcrypt from 'bcryptjs';
 import { pool } from '../server/db/database.js';
 import { directorSession } from './director.mjs';
+import { PROJECT_IDS, createProject, removeProject } from './fixtures.mjs';
 const API = process.env.API || 'http://localhost:5000';
 
 let passed = 0;
@@ -71,13 +72,16 @@ async function cleanup() {
     await pool.query('UPDATE activities SET created_by = NULL, assigned_to = NULL, approval_required_from = NULL, approved_by = NULL, reviewed_by = NULL WHERE created_by = $1 OR assigned_to = $1 OR approval_required_from = $1 OR approved_by = $1 OR reviewed_by = $1', [id]);
     await pool.query('DELETE FROM users WHERE id = $1', [id]);
   }
+  // Last: an activity references its project, so the project goes after the
+  // work that was hanging on it.
+  await removeProject('farming');
 }
 
 // A fresh activity payload. costRwf/costCdf mirror what the browser computes.
 function activityPayload(overrides = {}) {
   const usd = overrides.costUsd ?? 100;
   return {
-    projectId: 'PRJ-GISUMA',
+    projectId: PROJECT_IDS.farming,
     sector: 'farming',
     category: 'Meetings',
     activity: 'TEST Farming meeting',
@@ -92,6 +96,9 @@ function activityPayload(overrides = {}) {
 
 try {
   section('setup');
+  // The activities below hang on a project. It used to be 'PRJ-GISUMA', which
+  // nothing seeds -- see tests/fixtures.mjs.
+  await createProject('farming');
   const farmingManagerId = await seedManager('zz-test-farming', 'Test Farming Manager', 'farming');
   const agriManagerId = await seedManager('zz-test-agri', 'Test Agriculture Manager', 'agriculture');
   const { token: adminToken } = await directorSession();

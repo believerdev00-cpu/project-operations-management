@@ -38,6 +38,12 @@ The consequences are worth knowing:
 - **Everything created is removed again.** Fixtures use a `zz-` username prefix
   and `ZZTEST`/`TEST` record names, and each suite cleans up in a `finally`, so
   a failure part-way through still tidies up.
+- **A suite creates every row it needs, including its project.** `fixtures.mjs`
+  makes a `ZZ-PRJ-<operation>` project for the suites that hang work on one.
+  Four suites used to post their activities against `PRJ-GISUMA` and
+  `PRJ-MINING` — ids that nothing seeds, typed by hand into one development
+  database — so 63 assertions failed on every other machine, including on a
+  fresh `npm run migrate` and in CI.
 - **They run in sequence, never in parallel.** The suites share that `zz-`
   namespace and would trip over each other's fixtures.
 - **A killed run can leave fixtures behind** (piping to `head`, for instance,
@@ -48,6 +54,7 @@ The consequences are worth knowing:
   DELETE FROM monthly_plans WHERE month IN ('2099-09-01', '2096-09-01', '2095-04-01');
   DELETE FROM activities WHERE activity LIKE 'ZZTEST %' OR activity LIKE 'TEST %';
   DELETE FROM users WHERE username LIKE 'zz-%';
+  DELETE FROM projects WHERE id LIKE 'ZZ-PRJ-%';
   ```
 
 The suites act as the Director through `tests/director.mjs`, which signs a short

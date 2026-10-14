@@ -9,6 +9,7 @@ import bcrypt from 'bcryptjs';
 import { pool } from '../server/db/database.js';
 import { BUSINESS_OPERATIONS } from '../shared/businessOperations.js';
 import { directorSession } from './director.mjs';
+import { PROJECT_IDS, createProject, removeProject } from './fixtures.mjs';
 const API = process.env.API || 'http://localhost:5000';
 // What each invited partner changes the Director's temporary password to at
 // their first sign-in.
@@ -56,6 +57,9 @@ async function cleanup() {
     );
     await pool.query('DELETE FROM users WHERE id = $1', [id]);
   }
+  // Last: an activity references its project, so the project goes after the
+  // work that was hanging on it.
+  await removeProject('mining');
 }
 
 // Every internal surface a partner might try to reach. None may answer.
@@ -83,6 +87,10 @@ try {
   section('setup');
   const { token: adminToken } = await directorSession();
   const directorId = (await pool.query("SELECT id FROM users WHERE role='super-admin' ORDER BY id LIMIT 1")).rows[0].id;
+
+  // The Mining activity below hangs on a project. It used to be 'PRJ-MINING',
+  // which nothing seeds -- see tests/fixtures.mjs.
+  await createProject('mining');
 
   // A manager in Mining, so a Mining activity can be raised, approved and then
   // checked for through a Mining partner's eyes.
@@ -222,7 +230,7 @@ try {
   const raised = await api(miningToken, '/api/activities', {
     method: 'POST',
     body: JSON.stringify({
-      projectId: 'PRJ-MINING', sector: 'mining', category: 'Extraction',
+      projectId: PROJECT_IDS.mining, sector: 'mining', category: 'Extraction',
       activity: 'TEST Mining partner visibility', description: 'Automated test record.',
       quantity: 1, costUsd: 200, costRwf: 290000, costCdf: 570000
     })

@@ -9,6 +9,7 @@
 import bcrypt from 'bcryptjs';
 import { pool } from '../server/db/database.js';
 import { directorSession } from './director.mjs';
+import { PROJECT_IDS, createProject, removeProject } from './fixtures.mjs';
 const API = process.env.API || 'http://localhost:5000';
 const MONTH = '2099-10';
 
@@ -74,11 +75,17 @@ async function cleanup() {
     await pool.query('UPDATE movements SET created_by = NULL, approval_required_from = NULL, approved_by = NULL WHERE created_by = $1 OR approval_required_from = $1 OR approved_by = $1', [id]);
     await pool.query('DELETE FROM users WHERE id = $1', [id]);
   }
+  // Last: an activity references its project, so the project goes after the
+  // work that was hanging on it.
+  await removeProject('farming');
 }
 
 try {
   section('setup');
   const { token: admin } = await directorSession();
+  // The work below hangs on a project. It used to be 'PRJ-GISUMA', which
+  // nothing seeds -- see tests/fixtures.mjs.
+  await createProject('farming');
   const farming = await seedManager('zz-wf-farming', 'farming');
   const logistics = await seedManager('zz-wf-movement', 'movement');
   console.log(`  farming manager #${farming.id}, movements manager #${logistics.id}`);
@@ -86,7 +93,7 @@ try {
   // ---- a manager's own request can be spent against once approved -----------
   section('A manager\'s approved request can carry its expenses');
   const request = await post(farming.token, '/api/activities', {
-    projectId: 'PRJ-GISUMA', sector: 'farming', category: 'Meetings', activity: 'ZZTEST own request',
+    projectId: PROJECT_IDS.farming, sector: 'farming', category: 'Meetings', activity: 'ZZTEST own request',
     description: 'Raised by the manager for the workflow suite.',
     quantity: 1, costUsd: 100, costRwf: 145000, costCdf: 285000, id: 'ZZTEST-CHOSEN-ID'
   });
@@ -108,7 +115,7 @@ try {
   check('  and the home count matches that list', workCount === workList.body.length, `${workCount} vs ${workList.body.length}`);
   // When the work happens is its own date, kept apart from the deadline.
   const dated = await post(farming.token, '/api/activities', {
-    projectId: 'PRJ-GISUMA', sector: 'farming', category: 'Planting and sowing', activity: 'ZZTEST dated work',
+    projectId: PROJECT_IDS.farming, sector: 'farming', category: 'Planting and sowing', activity: 'ZZTEST dated work',
     description: 'Work with a day of its own.',
     quantity: 1, costUsd: 25, costRwf: 36250, costCdf: 71250, scheduledFor: '2099-11-04'
   });
@@ -116,7 +123,7 @@ try {
   check('work can say when it takes place', dated.status === 201 && dated.body.scheduledFor === '2099-11-04',
     `${dated.status} ${dated.body.scheduledFor}`);
   const badDate = await post(farming.token, '/api/activities', {
-    projectId: 'PRJ-GISUMA', sector: 'farming', category: 'Planting and sowing', activity: 'ZZTEST bad date',
+    projectId: PROJECT_IDS.farming, sector: 'farming', category: 'Planting and sowing', activity: 'ZZTEST bad date',
     description: 'A day that does not exist.',
     quantity: 1, costUsd: 25, costRwf: 36250, costCdf: 71250, scheduledFor: '2099-02-31'
   });
@@ -146,7 +153,7 @@ try {
   check('  and exports as a spreadsheet', exported.status === 200 && (await exported.arrayBuffer()).byteLength > 1000, String(exported.status));
 
   // Project money is read from the work, not typed in.
-  const project = (await api(admin, '/api/projects')).body.find((item) => item.id === 'PRJ-GISUMA');
+  const project = (await api(admin, '/api/projects')).body.find((item) => item.id === PROJECT_IDS.farming);
   check('the project\'s spending includes the recorded expense', project && project.spentUsd >= 40, JSON.stringify(project && { spent: project.spentUsd }));
   check('  and its approved budget includes the approved request', project && project.approvedUsd >= 100, JSON.stringify(project && { approved: project.approvedUsd }));
   const deleteWithMoney = await api(admin, `/api/activities/${request.body.id}`, { method: 'DELETE' });
@@ -177,7 +184,7 @@ try {
   // ---- no reopening into a draft nobody can send ------------------------------
   section('Refused work reopens to a decision, not a dead-end draft');
   const refusable = await post(farming.token, '/api/activities', {
-    projectId: 'PRJ-GISUMA', sector: 'farming', category: 'Meetings', activity: 'ZZTEST refused request',
+    projectId: PROJECT_IDS.farming, sector: 'farming', category: 'Meetings', activity: 'ZZTEST refused request',
     description: 'A request the Director will refuse.',
     quantity: 1, costUsd: 10, costRwf: 14500, costCdf: 28500
   });
@@ -213,15 +220,33 @@ try {
   const planned = planActivities.find((item) => item.activity === 'ZZTEST planned work');
   const extra = planActivities.find((item) => item.activity === 'ZZTEST planned extra');
 
+  // THERE IS NO CONFIRMATION STAGE ANY MORE. A month is agreed with the four
+  // managers in a meeting and typing it in IS the decision, so POST
+  // /api/monthly-plans creates it Confirmed. This block used to create a Draft,
+  // check that work in it could not be started, and then confirm it -- a
+  // sequence no month goes through now, which is why its five assertions were
+  // failing against a plan that was live from the first line.
+  //
+  // What survives is the rule itself: work in a month that is not live cannot
+  // be started. Only months written before the change can be Draft, so one is
+  // put back into that state directly to prove the guard still refuses.
+  await pool.query("UPDATE monthly_plans SET status = 'Draft' WHERE id = $1", [plan.body.id]);
   const earlyStart = await patch(farming.token, `/api/activities/${planned.id}/status`, { status: 'In Progress' });
-  check('work in an unconfirmed month cannot be started', earlyStart.status === 409, `${earlyStart.status} ${earlyStart.body.message}`);
+  check('work in a month that is not live cannot be started', earlyStart.status === 409,
+    `${earlyStart.status} ${earlyStart.body.message}`);
+  await pool.query("UPDATE monthly_plans SET status = 'Confirmed' WHERE id = $1", [plan.body.id]);
 
-  const confirmed = await post(admin, `/api/monthly-plans/${plan.body.id}/confirm`);
-  check('the Director confirms the month', confirmed.status === 200, `${confirmed.status} ${confirmed.body.message}`);
-  const allocation = Number(confirmed.body.approvedBudget);
-  const committed = Number(confirmed.body.committedBudget);
+  const live = (await api(admin, `/api/monthly-plans/${plan.body.id}`)).body.plan;
+  check('  a month created by the Director is live without a second press', live.status === 'Confirmed', live.status);
+  const reconfirm = await post(admin, `/api/monthly-plans/${plan.body.id}/confirm`);
+  check('  and confirming a live month is refused rather than repeated', reconfirm.status === 409,
+    `${reconfirm.status} ${reconfirm.body.message}`);
+  // Read from the month itself rather than from a confirmation response that no
+  // longer happens.
+  const allocation = Number(live.approvedBudget);
+  const committed = Number(live.committedBudget);
   const start = await patch(farming.token, `/api/activities/${planned.id}/status`, { status: 'In Progress' });
-  check('  now the manager can start it', start.status === 200, `${start.status} ${start.body.message}`);
+  check('  the manager can start the planned work', start.status === 200, `${start.status} ${start.body.message}`);
 
   const removed = await api(admin, `/api/activities/${extra.id}`, { method: 'DELETE' });
   check('deleting a planned activity in a confirmed month works', removed.status === 200, `${removed.status} ${removed.body.message}`);
