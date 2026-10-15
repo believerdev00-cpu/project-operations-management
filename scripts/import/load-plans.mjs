@@ -107,7 +107,15 @@ if (health.status !== 200) throw new Error(`the API is not answering on ${API}: 
 let admin = jwt.sign({ id: Number(process.env.ADMIN_ID || 1) }, env.JWT_SECRET, { algorithm: 'HS256', expiresIn: '2h' });
 let session = await call('GET', '/api/auth/session', undefined, admin);
 let directorPassword = null;
-if (session.status === 401 || session.status === 403 || session.body?.code === 'PASSWORD_CHANGE_REQUIRED') {
+// The session route is one of the few authMiddleware lets through while the
+// flag is set -- that is what lets the client draw ChoosePasswordScreen -- so a
+// fresh deployment answers 200 here and 403 PASSWORD_CHANGE_REQUIRED on every
+// route this script actually needs. Keyed on the status alone, the import read
+// that 200 as "a database in use", skipped the sign-in below, and died on the
+// first real call with the accounts unread. The flag the route hands back is
+// the thing to ask.
+if (session.status === 401 || session.status === 403 || session.body?.code === 'PASSWORD_CHANGE_REQUIRED'
+  || session.body?.user?.mustChangePassword) {
   if (!env.ADMIN_PASSWORD) fail('the Director session (and no ADMIN_PASSWORD to sign in with)', session);
   const first = await call('POST', '/api/auth/login', { username: 'admin', password: env.ADMIN_PASSWORD });
   if (first.status !== 200) fail('the Director first sign-in', first);
