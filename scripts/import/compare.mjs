@@ -76,7 +76,16 @@ export function compareMonth(plan, existing, detail) {
       const key = dayKey(objectiveId, day);
       const have = recorded.get(key) || 0;
       if (have > 0) recorded.set(key, have - 1);
-      else verdict.missing.push({ objectiveId, title: objective.title, day });
+      // The operation a support objective serves travels with the day: on
+      // Movement & Facilitation's own plan the same words appear once per
+      // operation they are for, and a report that printed the title alone
+      // listed the same commitment twice with no way to tell them apart.
+      else verdict.missing.push({
+        objectiveId,
+        title: objective.title,
+        supportsOperation: objective.supportsOperation || null,
+        day
+      });
     }
   }
   // Whatever is left over is recorded in the month and not in this file: either

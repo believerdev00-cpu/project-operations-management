@@ -234,8 +234,11 @@ if (CHECK_ONLY) {
       + `$${verdict.missing.reduce((sum, entry) => sum + Number(entry.day.cost || 0), 0).toFixed(2)}`);
     const byObjective = new Map();
     for (const entry of verdict.missing) {
-      if (!byObjective.has(entry.title)) byObjective.set(entry.title, []);
-      byObjective.get(entry.title).push(entry.day.date);
+      const label = entry.supportsOperation
+        ? `${entry.title} (for ${OPERATION_NAME[entry.supportsOperation]})`
+        : entry.title;
+      if (!byObjective.has(label)) byObjective.set(label, []);
+      byObjective.get(label).push(entry.day.date);
     }
     for (const [title, dates] of byObjective) {
       console.log(`      ${title}: ${dates.join(', ')}`);
@@ -251,7 +254,11 @@ const people = await call('GET', '/api/users', undefined, admin);
 if (people.status !== 200) fail('reading the accounts', people);
 const managerFor = {};
 const credentials = [];
+// Who an id is, so a refusal can name the person whose account it is rather
+// than the number this script happens to hold.
+const usernameOf = new Map();
 for (const account of people.body.users) {
+  usernameOf.set(Number(account.id), account.username);
   if (account.role === 'manager' && account.sector) managerFor[account.sector] = account;
 }
 for (const [operation, who] of Object.entries(NEW_MANAGERS)) {
@@ -283,35 +290,59 @@ for (const [operation, manager] of Object.entries(managerFor)) {
       { currentPassword: fresh.temporary, newPassword: working }, first.body.token);
     if (chosen.status !== 200) fail(`choosing a password for ${fresh.username}`, chosen);
     sessions[operation] = chosen.body.token;
-  } else {
-    sessions[operation] = jwt.sign({ id: manager.id }, env.JWT_SECRET, { algorithm: 'HS256', expiresIn: '2h' });
   }
+  // A manager who was already here is NOT given a session up front. Theirs is
+  // minted and then checked by tokenForManager below, once, because a minted
+  // token is refused outright while the account still has to choose a password
+  // -- and an import that assumed otherwise answered 403 on every single day of
+  // the month and reported one problem per day instead of one per account.
 }
 console.log(`managers ready: ${Object.entries(managerFor).map(([operation, manager]) => `${operation}=${manager.username}`).join(', ')}`);
 
+// The session a day is posted with, and whether it works at all.
+//
 // A day is posted by the manager the month was ASSIGNED to: canWorkPlan reads
 // the plan's own manager_id, not whoever manages the operation today, so a
 // half-recorded month that was handed to somebody else is filled in as them.
+//
+// And the token is CHECKED before the month is touched. A minted token is
+// refused on every route but the session and the password while the account
+// still has to choose one -- which is the state this import leaves the accounts
+// it creates in, on purpose -- so an import run twice posted a day, got 403
+// PASSWORD_CHANGE_REQUIRED, and did it again for every remaining day of the
+// month: two objectives reported as two problems, where the truth was one
+// account that has never been signed into. Asked once, here, it reads as what
+// it is.
 const mintedFor = new Map();
 async function tokenForManager(managerId, operation) {
+  // A manager created in this run signed in and chose a password a moment ago,
+  // so their token is known good without asking.
   const theirs = sessions[operation];
-  if (managerId === null) {
-    return theirs ? { ok: true, token: theirs } : { ok: false, why: `no session for the ${operation} manager` };
-  }
-  if (managerFor[operation] && Number(managerFor[operation].id) === Number(managerId) && theirs) {
+  if (theirs && managerFor[operation] && Number(managerFor[operation].id) === Number(managerId)) {
     return { ok: true, token: theirs };
   }
   if (mintedFor.has(managerId)) return mintedFor.get(managerId);
   const token = jwt.sign({ id: Number(managerId) }, env.JWT_SECRET, { algorithm: 'HS256', expiresIn: '2h' });
   const who = await call('GET', '/api/auth/session', undefined, token);
+  const name = usernameOf.get(Number(managerId)) || `manager ${managerId}`;
+  // Nobody's password is reset to get past any of this. It belongs to a real
+  // person, and an import that chose one for them would hand their account to
+  // whoever reads this console.
+  const mustSignIn = `${name} has not signed in since their password was set, so they cannot record a day`
+    + ' -- they sign in once and choose their own first';
   let answer;
   if (who.status !== 200) {
-    answer = { ok: false, why: `the session for manager ${managerId} was refused (${who.status})` };
+    // Two refusals, one cause. PASSWORD_CHANGE_REQUIRED is the flag itself;
+    // PASSWORD_CHANGED is a token minted before `password_changed_at`, which is
+    // every minted token for an account reset more recently than this run
+    // started. Either way a person has to sign in, and reading back "401" told
+    // nobody that.
+    const code = who.body?.code || '';
+    answer = code === 'PASSWORD_CHANGE_REQUIRED' || code === 'PASSWORD_CHANGED'
+      ? { ok: false, why: mustSignIn }
+      : { ok: false, why: `the API refused a session for ${name} (${who.status}${code ? ` ${code}` : ''})` };
   } else if (who.body.user?.mustChangePassword) {
-    // Their password is NOT reset to get past this. It belongs to a real
-    // person, and an import that chose one for them would hand their account
-    // to whoever reads this console.
-    answer = { ok: false, why: `${who.body.user.username} has not chosen a password yet, so they cannot record a day -- they sign in once first` };
+    answer = { ok: false, why: mustSignIn };
   } else {
     answer = { ok: true, token };
   }
@@ -368,7 +399,9 @@ for (const plan of plans) {
         + `Read plan ${verdict.planId} before importing this month.`);
       continue;
     }
-    const session = await tokenForManager(verdict.managerId, plan.operation);
+    // A month assigned to nobody may be worked by any manager of its
+    // operation, so it falls to the one this import knows.
+    const session = await tokenForManager(verdict.managerId ?? manager.id, plan.operation);
     if (!session.ok) { problems.push(`${plan.operation}/${plan.month}: ${session.why}`); continue; }
     let filled = 0;
     let filledMoney = 0;
@@ -389,6 +422,16 @@ for (const plan of plans) {
     }
     console.log(`${OPERATION_NAME[plan.operation]} / ${plan.month}: was half recorded -- `
       + `added the ${filled} missing day(s), $${filledMoney.toFixed(2)}`);
+    continue;
+  }
+
+  // Whether this month's days can be recorded AT ALL is settled before the
+  // month is written, not after. A plan created for a manager who cannot post
+  // is an empty month somebody has to come back to, and the import that left
+  // one did so while printing a 403 per day rather than a reason.
+  const session = await tokenForManager(manager.id, plan.operation);
+  if (!session.ok) {
+    problems.push(`${plan.operation}/${plan.month}: not created -- ${session.why}`);
     continue;
   }
 
@@ -432,7 +475,7 @@ for (const plan of plans) {
     for (const day of objective.days) {
       const posted = await call('POST', `/api/monthly-plans/${created.body.id}/reports`, {
         date: day.date, objectiveId, quantityDone: day.quantityDone, cost: day.cost, notes: day.notes
-      }, sessions[plan.operation]);
+      }, session.token);
       if (posted.status !== 201 && posted.status !== 200) {
         problems.push(`${plan.operation}/${plan.month} ${day.date} "${objective.title}": ${posted.status} ${JSON.stringify(posted.body).slice(0, 220)}`);
         continue;
