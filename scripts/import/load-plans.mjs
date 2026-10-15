@@ -5,6 +5,7 @@
 //
 //   node scripts/import/load-plans.mjs plans.json                    # local
 //   node scripts/import/load-plans.mjs plans.json https://host       # a deployment
+//   node scripts/import/load-plans.mjs plans.json https://host --check   # writes nothing
 //
 // Nothing is written straight to the tables. Every row that lands has passed
 // the checks a live entry passes -- the budget ceiling under a FOR UPDATE lock,
@@ -22,10 +23,16 @@
 import jwt from 'jsonwebtoken';
 import { readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { blockers, compareMonth } from './compare.mjs';
 
-const [plansPath, apiArgument] = process.argv.slice(2);
+// --check reads the deployment and WRITES NOTHING: it says, month by month,
+// what is already in there and what this file would add. Run it before an
+// import that may have been run before, and after one that died half way.
+const argv = process.argv.slice(2);
+const CHECK_ONLY = argv.includes('--check');
+const [plansPath, apiArgument] = argv.filter((argument) => !argument.startsWith('--'));
 if (!plansPath) {
-  console.error('usage: node scripts/import/load-plans.mjs <plans.json> [api-base-url]');
+  console.error('usage: node scripts/import/load-plans.mjs <plans.json> [api-base-url] [--check]');
   process.exit(1);
 }
 const API = (apiArgument || process.env.API || 'http://localhost:5000').replace(/\/$/, '');
@@ -140,6 +147,19 @@ let directorPassword = null;
 // the thing to ask.
 if (session.status === 401 || session.status === 403 || session.body?.code === 'PASSWORD_CHANGE_REQUIRED'
   || session.body?.user?.mustChangePassword) {
+  // Choosing the Director's password is a write, and --check does not write.
+  // There is nothing to compare either: a deployment still holding the seeded
+  // password has never had an import run against it.
+  if (CHECK_ONLY) {
+    console.log(`${API} is a new deployment -- nothing has been imported into it yet.`);
+    console.log('every month in this file would be created in full:\n');
+    for (const plan of plans) {
+      const days = plan.objectives.reduce((sum, objective) => sum + objective.days.length, 0);
+      console.log(`  ${OPERATION_NAME[plan.operation]} / ${plan.month}: `
+        + `${plan.objectives.length} objectives, ${days} days, $${plan.approvedBudget.toFixed(2)}`);
+    }
+    process.exit(0);
+  }
   if (!env.ADMIN_PASSWORD) fail('the Director session (and no ADMIN_PASSWORD to sign in with)', session);
   const first = await call('POST', '/api/auth/login', { username: 'admin', password: env.ADMIN_PASSWORD });
   if (first.status !== 200) fail('the Director first sign-in', first);
@@ -156,6 +176,75 @@ if (session.body.user?.role !== 'super-admin') {
   throw new Error(`account ${process.env.ADMIN_ID || 1} is ${session.body.user?.role}, not the Director`);
 }
 console.log(`acting as the Director (${session.body.user.username}) on ${API}`);
+
+// ------------------------------------------- what is already in this database
+//
+// Every month in the file is read back before anything is written and compared
+// with it day by day, so the run adds only what is absent and nothing already
+// recorded is posted a second time. The comparison itself is in compare.mjs,
+// with a test that needs no database -- it is what decides whether a figure is
+// recorded twice.
+const verdicts = new Map();
+for (const plan of plans) {
+  const found = await call('GET',
+    `/api/monthly-plans?operation=${encodeURIComponent(plan.operation)}&month=${encodeURIComponent(plan.month)}`,
+    undefined, admin);
+  if (found.status !== 200) fail(`looking for ${plan.operation}/${plan.month}`, found);
+  const existing = (found.body || []).find((row) => row.month === plan.month && row.operation === plan.operation);
+  let detail = null;
+  if (existing) {
+    const read = await call('GET', `/api/monthly-plans/${existing.id}`, undefined, admin);
+    if (read.status !== 200) fail(`reading back ${plan.operation}/${plan.month}`, read);
+    detail = read.body;
+  }
+  verdicts.set(`${plan.operation}/${plan.month}`, compareMonth(plan, existing || null, detail));
+}
+
+if (CHECK_ONLY) {
+  console.log(`\nnothing was written. ${plans.length} months in this file, against ${API}:\n`);
+  let absent = 0;
+  let fillable = 0;
+  let settled = 0;
+  let held = 0;
+  for (const plan of plans) {
+    const verdict = verdicts.get(`${plan.operation}/${plan.month}`);
+    const head = `${OPERATION_NAME[plan.operation]} / ${plan.month}`;
+    if (verdict.state === 'absent') {
+      absent += 1;
+      console.log(`  ${head}: NOT THERE -- would be created with ${plan.objectives.length} objectives, `
+        + `${verdict.fileDays} days, $${verdict.fileMoney.toFixed(2)}`);
+      continue;
+    }
+    if (verdict.state === 'complete') {
+      settled += 1;
+      console.log(`  ${head}: all ${verdict.fileDays} days already recorded (plan ${verdict.planId}) -- nothing to add`);
+      continue;
+    }
+    const reasons = blockers(plan, verdict);
+    if (reasons.length) {
+      held += 1;
+      console.log(`  ${head}: NOT WHAT THIS FILE SAYS, SO LEFT ALONE (plan ${verdict.planId}, `
+        + `${verdict.recordedDays} days recorded, ${verdict.missing.length} of ${verdict.fileDays} missing)`);
+      for (const reason of reasons) console.log(`      it has ${reason}`);
+      continue;
+    }
+    fillable += 1;
+    console.log(`  ${head}: HALF RECORDED (plan ${verdict.planId}, ${verdict.recordedDays} days recorded) -- `
+      + `a run would add the ${verdict.missing.length} missing day(s), `
+      + `$${verdict.missing.reduce((sum, entry) => sum + Number(entry.day.cost || 0), 0).toFixed(2)}`);
+    const byObjective = new Map();
+    for (const entry of verdict.missing) {
+      if (!byObjective.has(entry.title)) byObjective.set(entry.title, []);
+      byObjective.get(entry.title).push(entry.day.date);
+    }
+    for (const [title, dates] of byObjective) {
+      console.log(`      ${title}: ${dates.join(', ')}`);
+    }
+  }
+  console.log(`\n${absent} month(s) to create, ${fillable} to fill in, ${settled} already complete, ${held} left alone`);
+  if (held) console.log('a month left alone has to be looked at by hand -- read the reasons above before importing it');
+  process.exit(0);
+}
 
 // ---------------------------------------------------------------- managers
 const people = await call('GET', '/api/users', undefined, admin);
@@ -200,6 +289,36 @@ for (const [operation, manager] of Object.entries(managerFor)) {
 }
 console.log(`managers ready: ${Object.entries(managerFor).map(([operation, manager]) => `${operation}=${manager.username}`).join(', ')}`);
 
+// A day is posted by the manager the month was ASSIGNED to: canWorkPlan reads
+// the plan's own manager_id, not whoever manages the operation today, so a
+// half-recorded month that was handed to somebody else is filled in as them.
+const mintedFor = new Map();
+async function tokenForManager(managerId, operation) {
+  const theirs = sessions[operation];
+  if (managerId === null) {
+    return theirs ? { ok: true, token: theirs } : { ok: false, why: `no session for the ${operation} manager` };
+  }
+  if (managerFor[operation] && Number(managerFor[operation].id) === Number(managerId) && theirs) {
+    return { ok: true, token: theirs };
+  }
+  if (mintedFor.has(managerId)) return mintedFor.get(managerId);
+  const token = jwt.sign({ id: Number(managerId) }, env.JWT_SECRET, { algorithm: 'HS256', expiresIn: '2h' });
+  const who = await call('GET', '/api/auth/session', undefined, token);
+  let answer;
+  if (who.status !== 200) {
+    answer = { ok: false, why: `the session for manager ${managerId} was refused (${who.status})` };
+  } else if (who.body.user?.mustChangePassword) {
+    // Their password is NOT reset to get past this. It belongs to a real
+    // person, and an import that chose one for them would hand their account
+    // to whoever reads this console.
+    answer = { ok: false, why: `${who.body.user.username} has not chosen a password yet, so they cannot record a day -- they sign in once first` };
+  } else {
+    answer = { ok: true, token };
+  }
+  mintedFor.set(managerId, answer);
+  return answer;
+}
+
 // ---------------------------------------------------------------- projects
 const existing = await call('GET', '/api/projects', undefined, admin);
 if (existing.status !== 200) fail('reading the projects', existing);
@@ -233,6 +352,45 @@ const problems = [];
 for (const plan of plans) {
   const manager = managerFor[plan.operation];
   if (!manager) { problems.push(`${plan.operation}/${plan.month}: no manager, skipped`); continue; }
+
+  // What the survey above found for this month. Only an absent month is
+  // created; a complete one is left exactly as it is, and a half-recorded one
+  // has its missing days added against the plan that is already there.
+  const verdict = verdicts.get(`${plan.operation}/${plan.month}`);
+  if (verdict.state === 'complete') {
+    console.log(`${OPERATION_NAME[plan.operation]} / ${plan.month}: already recorded in full -- nothing added`);
+    continue;
+  }
+  if (verdict.state === 'partial') {
+    const reasons = blockers(plan, verdict);
+    if (reasons.length) {
+      problems.push(`${plan.operation}/${plan.month}: left untouched -- it has ${reasons.join(', ')}. `
+        + `Read plan ${verdict.planId} before importing this month.`);
+      continue;
+    }
+    const session = await tokenForManager(verdict.managerId, plan.operation);
+    if (!session.ok) { problems.push(`${plan.operation}/${plan.month}: ${session.why}`); continue; }
+    let filled = 0;
+    let filledMoney = 0;
+    for (const entry of verdict.missing) {
+      const posted = await call('POST', `/api/monthly-plans/${verdict.planId}/reports`, {
+        date: entry.day.date, objectiveId: entry.objectiveId,
+        quantityDone: entry.day.quantityDone, cost: entry.day.cost, notes: entry.day.notes
+      }, session.token);
+      if (posted.status !== 201 && posted.status !== 200) {
+        problems.push(`${plan.operation}/${plan.month} ${entry.day.date} "${entry.title}": `
+          + `${posted.status} ${JSON.stringify(posted.body).slice(0, 220)}`);
+        continue;
+      }
+      filled += 1;
+      filledMoney += Number(entry.day.cost || 0);
+      daysMade += 1;
+      moneyMade += Number(entry.day.cost || 0);
+    }
+    console.log(`${OPERATION_NAME[plan.operation]} / ${plan.month}: was half recorded -- `
+      + `added the ${filled} missing day(s), $${filledMoney.toFixed(2)}`);
+    continue;
+  }
 
   const created = await call('POST', '/api/monthly-plans', {
     operation: plan.operation,

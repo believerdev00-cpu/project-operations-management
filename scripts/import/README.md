@@ -12,16 +12,50 @@ node scripts/import/plans-from-workbook.mjs "rubaya report.xlsx" /tmp/plans.json
 # 2. load them through the API             (needs the API running)
 node scripts/import/load-plans.mjs /tmp/plans.json
 node scripts/import/load-plans.mjs /tmp/plans.json https://your-deployment   # or a deployment
+node scripts/import/load-plans.mjs /tmp/plans.json https://your-deployment --check   # writes nothing; says what is already there
 ```
 
 Step 1 prints every plan it decided and every row it set aside. **Read that
 output before running step 2** -- it is the whole review surface, and the import
 is far easier to check there than in the database afterwards.
 
-Both steps are safe to re-run in the sense that nothing is overwritten: a month
-that already exists is refused by the API with 409 and reported as a problem at
-the end. There is no "update an imported month" path. To redo one, delete the
-plan first.
+## Running it again, and finishing an import that died
+
+Both steps are safe to re-run, and the second one is written for it: before it
+writes anything, `load-plans.mjs` reads every month in the file back off the
+deployment and compares it with the file day by day.
+
+```bash
+node scripts/import/load-plans.mjs /tmp/plans.json https://your-deployment --check
+```
+
+`--check` writes nothing at all. It prints, month by month, whether the month is
+**not there** (it would be created), **already recorded in full** (nothing to
+add) or **half recorded** -- and for that last one, the dates it is missing. A
+run then creates the absent months, leaves the complete ones exactly as they
+are, and adds only the missing days to a half-recorded one, against the plan
+that is already there.
+
+That last case is what this is for. The unique index on
+`monthly_plans(sector, month)` means a month that finished can never be written
+twice, so a re-run was never going to double one -- but a month the import was
+cut off in the middle of already has its plan, so the re-run was refused at
+creation with a 409 indistinguishable from the finished months', and its missing
+days were never recorded. There is no DELETE for a plan through the API either,
+so "delete it and start again" was never a path this script could offer.
+
+A month is **left untouched, with the reason printed**, when it is not the month
+the file describes: it holds days the file does not, its objectives differ, its
+approved budget differs, or its status (Draft, Closed) refuses a day. Those need
+a person to look at them.
+
+No day is ever posted twice. A day already recorded is matched on its objective,
+date, quantity and cost -- not its note, which the server trims, and which is no
+reason to record the same work again -- and identical days are counted rather
+than collapsed, so two genuine tanks of fuel at the same price on one date stay
+two. That comparison is `scripts/import/compare.mjs`, on its own and away from
+the HTTP, because it is what decides whether a figure is doubled;
+`tests/pure-logic.test.mjs` covers it and needs no database.
 
 ## What the scripts assume about the workbook
 
