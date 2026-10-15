@@ -13,3 +13,8 @@ server/uploads
 
 # Vercel CLI project linkage (org and project ids) -- local, never committed
 .vercel
+
+# Claude Code mirrors the vendored skills in .agents/ as symlinks here. On
+# Windows (core.symlinks=false) git records them as duplicate copies of the
+# same files, so the mirror is left out and .agents/ is the one tracked copy.
+.claude/skills
