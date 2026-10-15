@@ -71,12 +71,36 @@ const NEW_MANAGERS = {
 
 const password = () => `Gs${randomBytes(9).toString('base64url')}`;
 
-async function call(method, path, body, token) {
-  const response = await fetch(`${API}${path}`, {
-    method,
-    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-    body: body === undefined ? undefined : JSON.stringify(body)
-  });
+// A month of the workbook is several hundred round trips, and against a
+// deployment rather than localhost an ordinary connection drops one sooner or
+// later: this import died twice on UND_ERR_CONNECT_TIMEOUT, once before it had
+// written anything and once with four of the twelve months in, which is the
+// worst of the two because the rest then has to be worked out by hand.
+//
+// Only connect-phase failures are retried, and that distinction is the whole
+// point. A connection that was never established carries no request, so
+// sending it again cannot record a second day's work. A socket that dies with
+// the request already on its way might have been answered, and repeating a
+// POST on that guess is how an import quietly doubles a figure -- those are
+// left to fail loudly instead.
+const NEVER_ARRIVED = new Set(['UND_ERR_CONNECT_TIMEOUT', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
+
+async function call(method, path, body, token, attempt = 1) {
+  let response;
+  try {
+    response = await fetch(`${API}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+  } catch (networkError) {
+    const code = networkError.cause?.code || networkError.code;
+    if (!NEVER_ARRIVED.has(code) || attempt >= 5) throw networkError;
+    const pause = 500 * 2 ** (attempt - 1);
+    console.warn(`${method} ${path} never reached the server (${code}); trying again in ${pause}ms`);
+    await new Promise((resolve) => setTimeout(resolve, pause));
+    return call(method, path, body, token, attempt + 1);
+  }
   const text = await response.text();
   let parsed = null;
   try { parsed = text ? JSON.parse(text) : null; } catch { parsed = { raw: text.slice(0, 300) }; }
