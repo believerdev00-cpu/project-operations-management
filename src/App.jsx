@@ -225,7 +225,22 @@ function useApi(token, onExpired) {
 
   const download = useCallback(async (url, filename) => {
     const response = await request(url, {}, { json: false });
-    const blob = await response.blob();
+    let blob;
+    try {
+      blob = await response.blob();
+    } catch (bodyError) {
+      // A report or spreadsheet arrives in two parts: the headers, which
+      // `request` has already seen and judged healthy, and the file itself,
+      // which is still streaming when we get here. A connection that dies in
+      // between rejects *this* await, outside the guard in `request`, with the
+      // browser's own untranslated TypeError -- and the forty callers that
+      // show `error.message` as it stands put "Failed to fetch" on a
+      // Director's screen in English. A dropped download is the same event as
+      // any other dropped request, so it says the same sentence.
+      setOnline(false);
+      console.warn(`GET ${url} was cut off while the file was downloading:`, bodyError);
+      throw new Error(translator.current('app.offline'));
+    }
     const href = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = href;
