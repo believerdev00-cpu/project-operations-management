@@ -2904,9 +2904,27 @@ function ReportBody({ report, busy, sectorLabel, onExport, onPrint, onClose }) {
                 ? formatUsd(day.cost) : <span className="muted-cell">&mdash;</span>}</td>
               <td data-label={t('report.photos')}>{day.evidenceCount
                 || <span className="muted-cell">0</span>}</td>
-              {/* The manager's own sentence, whole and wrapped. */}
-              <td data-label={t('report.whatWasWritten')} className="report-note-cell">{day.notes
-                || <span className="muted-cell">&mdash;</span>}</td>
+              {/* The manager's own sentence, whole and wrapped.
+
+                  An imported day is a row out of the operations workbook, and its
+                  note holds that row's columns run together behind separators. Laid
+                  back out here in the order the sheet has them: what was done and
+                  where, the quantity exactly as it was typed, the figure in the
+                  currency it was actually paid in, and the sheet and row it can be
+                  checked against. The .xlsx gives these a column each; a table that
+                  has to fit a phone gives them a line each. */}
+              <td data-label={t('report.whatWasWritten')} className="report-note-cell">{day.workbook
+                ? <>
+                  <strong>{[day.workbook.activity, day.workbook.description].filter(Boolean).join(' — ')
+                    || <span className="muted-cell">&mdash;</span>}</strong>
+                  {day.workbook.location && <small className="muted-cell">{day.workbook.location}</small>}
+                  {day.workbook.quantityText && <small className="muted-cell">
+                    {t('field.quantity')}: {day.workbook.quantityText}</small>}
+                  {day.workbook.source && <small className="muted-cell">{day.workbook.source}</small>}
+                  <small className="muted-cell">
+                    {day.workbook.sheet} {t('report.rowWord')} {day.workbook.row}</small>
+                </>
+                : day.notes || <span className="muted-cell">&mdash;</span>}</td>
             </tr>)}</tbody>
           </table></div>
         </>}

@@ -11,6 +11,7 @@
 // the reason it has to be.
 import ExcelJS from 'exceljs';
 import { writeFileSync } from 'node:fs';
+import { formatWorkbookNote } from '../../shared/workbookNote.js';
 
 const [workbookPath, outPath] = process.argv.slice(2);
 if (!workbookPath || !outPath) {
@@ -323,12 +324,39 @@ for (const plan of [...plans.values()].sort((a, b) => a.operation.localeCompare(
     // A figure typed without its unit takes the unit of the rows beside it: the
     // coltan column reads "4kg", "8kg", "65kg", "24". Letting that one bare 24
     // disagree turned a month of 221kg of coltan into "12 entries", which is
-    // the one thing the Director cannot act on. A bucket whose rows genuinely
-    // disagree, or do not count at all, is targeted in entries instead.
-    const units = new Set(parsed.map((quantity) => quantity && quantity.unit).filter(Boolean));
-    const countable = parsed.every((quantity) => quantity) && units.size === 1;
-    const unit = countable ? [...units][0] : 'entries';
-    const target = countable ? parsed.reduce((sum, quantity) => sum + quantity.value, 0) : objective.days.length;
+    // the one thing the Director cannot act on.
+    //
+    // A row that states NO figure at all used to do the same damage, because
+    // the whole bucket had to parse: September's "Coltan transport and
+    // delivery" reads "60kgs Delivery", "66kgs", "20kgs", "51.7kgs", "52kgs"
+    // and then one row with nothing in the quantity column, and that one row
+    // turned 249.7kg of coltan moved into "6 entries". So the unit now stands
+    // on the rows that state one, as long as they are at least two thirds of
+    // them: a silent row is a row nobody wrote a figure on, not a
+    // contradiction of the five that agree.
+    //
+    // Two thirds and not half, which was tried first and is too generous. At
+    // half, two rows reading "1Tech,1Carp&1Helper" out of four made a month of
+    // roof renovation a target of "2 tech", and one row reading "2bottles" out
+    // of two made "Meals and drinks" a target of "2 bottles". A unit has to be
+    // what the work is actually measured in, and a bare majority of a short
+    // column is not evidence of that.
+    //
+    // Below that, the rows are not describing one countable thing (August's
+    // shopping reads "Posho(25kg),Torch,Rice(2kg)&2 Big fant"), and the
+    // objective counts the times it was done instead.
+    const stated = parsed.filter(Boolean);
+    const units = new Set(stated.map((quantity) => quantity.unit).filter(Boolean));
+    const countable = units.size === 1 && stated.length * 3 >= parsed.length * 2;
+    // "times" and not "entries": the Director reads these targets and then
+    // writes next month from what they read, so the word has to be one they
+    // would use themselves. "3 times" is how somebody says it; "3 entries" is
+    // the bookkeeping showing through, and it is the word the manager would
+    // then be asked to record against.
+    const unit = countable ? [...units][0] : 'times';
+    const target = countable
+      ? stated.reduce((sum, quantity) => sum + quantity.value, 0)
+      : objective.days.length;
     objectives.push({
       title: objective.title,
       supportsOperation: objective.supports,
@@ -336,16 +364,29 @@ for (const plan of [...plans.values()].sort((a, b) => a.operation.localeCompare(
       targetUnit: unit,
       days: objective.days.map((day) => ({
         date: day.date,
-        quantityDone: countable ? day.parsed.value : 1,
+        // Null where the row stated no figure: it still carries its cost, its
+        // note and its day, and contributes nothing to a target it never
+        // claimed. The server stores that as 0 and compare.mjs reads both the
+        // same way, so a re-run cannot post the day twice.
+        quantityDone: countable ? (day.parsed ? day.parsed.value : null) : 1,
         cost: day.usd,
         // The row as it was written, so the day keeps the words, the place, the
         // headcount and the figure in the currency it was actually paid in.
-        notes: [
-          [day.description, day.location].filter(Boolean).join(' @ '),
-          day.quantityText ? `Quantity: ${day.quantityText}` : '',
-          day.source,
-          `[${workbookPath.split(/[\\/]/).pop()} / ${day.sheet} row ${day.n}]`
-        ].filter(Boolean).join(' | ').slice(0, 4000)
+        // Built by shared/workbookNote.js, which the report reads back apart so
+        // it can print these as the workbook's own columns again. The activity
+        // column is carried from here on; days imported before it was stay as
+        // they are, because a re-run matches a recorded day on its objective,
+        // date, quantity and cost and never on its note.
+        notes: formatWorkbookNote({
+          activity: day.activity,
+          description: day.description,
+          location: day.location,
+          quantityText: day.quantityText,
+          source: day.source,
+          file: workbookPath.split(/[\/]/).pop(),
+          sheet: day.sheet,
+          row: day.n
+        })
       })).sort((a, b) => a.date.localeCompare(b.date))
     });
   }

@@ -19,6 +19,7 @@ import {
   objectiveProgress, planProgress, uncommitted
 } from '../server/lib/monthly.js';
 import { derive, validate } from '../server/lib/objectiveForm.js';
+import { FILLER_UNITS, UNIT_SUGGESTIONS, stepForUnit, unitClass } from '../shared/units.js';
 import {
   PRIMARY_OPERATION_IDS, TRIPS_OPERATION, isPrimaryOperation,
   isSupportOperation, runsTrips
@@ -30,6 +31,10 @@ import { formatDate, formatUsd, todayLocal } from '../src/format.js';
 // holds, against what the import file says. It lives next to the script that
 // reads it and needs no database, which is why it is checked here.
 import { blockers, compareMonth } from '../scripts/import/compare.mjs';
+// The note an imported day carries. The import writes it and the report reads
+// it back apart into the workbook's own columns, so the two have to agree on
+// the format exactly -- and neither ever calls the other.
+import { formatWorkbookNote, parseWorkbookNote } from '../shared/workbookNote.js';
 
 let passed = 0;
 let failed = 0;
@@ -134,6 +139,99 @@ check('the form derive() writes is one validate() accepts', () => {
   const objective = { title: 'Plant 200 trees', targetQuantity: 200, targetUnit: 'trees' };
   const checked = validate(derive(objective), objective);
   assert.ok(checked, 'validate rejected the form derive produced');
+});
+check('every unit the Director is offered is one the daily form understands', () => {
+  // The suggestion list and the classification are one file for this reason.
+  // A suggested word that classifies as filler would be offered to the Director
+  // and then dropped out of the manager's question; one that is spelled
+  // differently from what MEASURED_UNITS knows ("kilograms" offered, "kg"
+  // recognised) would step a weight in whole numbers.
+  for (const unit of UNIT_SUGGESTIONS) {
+    assert.ok(unitClass(unit), unit);
+    const step = stepForUnit(unit, 10);
+    assert.ok(step === 1 || step === 0.01, `${unit} steps by ${step}`);
+  }
+  const fillers = UNIT_SUGGESTIONS.filter((unit) => unitClass(unit) === 'count' && !FILLER_UNITS.includes(unit));
+  assert.deepEqual(fillers, [], `suggested but unclassifiable: ${fillers.join(', ')}`);
+});
+check('the weights and measures among them step finely', () => {
+  for (const unit of ['kg', 'litres', 'metres', 'tonnes', 'hectares']) {
+    assert.ok(UNIT_SUGGESTIONS.includes(unit), `${unit} is not offered`);
+    assert.equal(stepForUnit(unit, 10), 0.01, unit);
+  }
+  // The commonest unit in three months of this organisation's real work, and
+  // the one the suggestion list used to leave out altogether.
+  assert.ok(UNIT_SUGGESTIONS.includes('labourers'));
+  assert.equal(stepForUnit('labourers', 10), 1);
+});
+check('the question is a translation key and never an English sentence', () => {
+  // The client reads a stored label in preference to a translated one, so an
+  // English sentence here is an English label on the one field a manager has to
+  // type into -- on a screen whose every other word is in their language.
+  for (const objective of [
+    { title: 'Potato garden preparation', targetQuantity: 17, targetUnit: 'labourers' },
+    { title: 'Coltan purchases', targetQuantity: 313.7, targetUnit: 'kg' },
+    { title: 'Garden organisation', targetQuantity: 1, targetUnit: 'entries' },
+    { title: 'Something uncounted', targetQuantity: null, targetUnit: '' }
+  ]) {
+    const form = derive(objective);
+    assert.ok(form.amountKey, `no amountKey for ${objective.targetUnit}`);
+    assert.ok(form.amountKey.startsWith('form.ask.'), form.amountKey);
+    assert.equal(form.amountLabel, undefined, 'derive() stored a sentence');
+    assert.equal(form.amountHint, undefined, 'derive() stored a hint sentence');
+    // Left absent so the client falls back to plan.dayNotes and plan.dayProof,
+    // which are translated.
+    assert.equal(form.notesLabel, undefined);
+    assert.equal(form.evidenceLabel, undefined);
+  }
+});
+check('countable work steps by one, measured work by a hundredth', () => {
+  // This ran the other way round once: a list of 26 countable words stepped by
+  // one and everything else fell through to 0.01, which put 45 of the first
+  // real month's 61 objectives on a decimal spinner for whole things.
+  for (const unit of ['labourers', 'sacks', 'pieces', 'bottles', 'meals', 'trips', 'entries', 'people']) {
+    assert.equal(derive({ targetQuantity: 10, targetUnit: unit }).step, 1, unit);
+  }
+  for (const unit of ['kg', 'litres', 'metres', 'tonnes', 'ha']) {
+    assert.equal(derive({ targetQuantity: 10, targetUnit: unit }).step, 0.01, unit);
+  }
+});
+check('a fractional target stays reachable whatever its unit', () => {
+  // 2.5 on a step of 1 is a number the browser refuses, so the manager could
+  // not record the target their own month was set.
+  assert.equal(derive({ targetQuantity: 2.5, targetUnit: 'sacks' }).step, 0.01);
+  assert.equal(derive({ targetQuantity: 4.5, targetUnit: 'labourers' }).step, 0.01);
+});
+check('every counted objective offers one-tap amounts', () => {
+  // quickAmounts was hard-coded empty and only ever filled by the model, so the
+  // buttons were unreachable on any deployment without ANTHROPIC_API_KEY.
+  for (const target of [1, 2, 3, 17, 120, 313.7, 424]) {
+    const amounts = derive({ targetQuantity: target, targetUnit: 'kg' }).quickAmounts;
+    assert.ok(amounts.length > 0, `no amounts for a target of ${target}`);
+    assert.ok(amounts.length <= 3, `${amounts.length} amounts for ${target}`);
+    assert.ok(amounts.every((amount) => amount > 0 && amount <= target), JSON.stringify(amounts));
+    assert.deepEqual([...amounts].sort((a, b) => a - b), amounts, 'not sorted');
+  }
+});
+check('an objective with nothing to count offers none', () => {
+  assert.deepEqual(derive({ title: 'Keep the site in order', targetQuantity: null }).quickAmounts, []);
+});
+check('a model that answers nothing leaves the derived form standing', () => {
+  const objective = { title: 'Fuel bought', targetQuantity: 40, targetUnit: 'litres' };
+  const base = derive(objective);
+  const checked = validate({ quickAmounts: [] }, objective);
+  // The keys survive, so the question is still translated, and declining to
+  // suggest amounts is not an instruction to remove the buttons.
+  assert.equal(checked.amountKey, base.amountKey);
+  assert.deepEqual(checked.quickAmounts, base.quickAmounts);
+  assert.equal(checked.amountLabel, undefined);
+});
+check('a model that writes wording wins over the key', () => {
+  const objective = { title: 'Fuel bought', targetQuantity: 40, targetUnit: 'litres' };
+  const checked = validate({ amountLabel: 'Litres of fuel bought today', quickAmounts: [5, 10] }, objective);
+  assert.equal(checked.amountLabel, 'Litres of fuel bought today');
+  assert.equal(checked.amountKey, derive(objective).amountKey, 'the fallback key was dropped');
+  assert.deepEqual(checked.quickAmounts, [5, 10]);
 });
 check('validate() never throws on a malformed model answer', () => {
   // Every failure path has to leave the derived form standing, so this must
@@ -348,6 +446,59 @@ check('a support objective is matched by the operation it supports, not the titl
   assert.equal(verdict.missing.length, 1);
   assert.equal(verdict.missing[0].objectiveId, 22);
   assert.equal(verdict.extra, 0);
+});
+
+console.log('\n=== 9. the workbook row a day came from ===');
+check('what the import writes, the report reads back', () => {
+  const row = {
+    activity: 'Mining', description: 'Advance on coltan', location: 'Rubaya',
+    quantityText: '108kg', source: '$13500 as recorded',
+    file: 'rubaya report.xlsx', sheet: 'Mining Activities', row: 2
+  };
+  assert.deepEqual(parseWorkbookNote(formatWorkbookNote(row)), row);
+});
+check('the notes already imported still read, missing activity and all', () => {
+  // Written before the activity column was carried: that field comes back
+  // empty and every other one still lands. These are the rows that exist.
+  const parsed = parseWorkbookNote(
+    'Monthly internet packs @ Goma | Quantity: 1 month& 2sim cards | $33 as recorded'
+    + ' | [rubaya report.xlsx / OPS Related to mining row 2]'
+  );
+  assert.equal(parsed.activity, '');
+  assert.equal(parsed.description, 'Monthly internet packs');
+  assert.equal(parsed.location, 'Goma');
+  assert.equal(parsed.quantityText, '1 month& 2sim cards');
+  assert.equal(parsed.source, '$33 as recorded');
+  assert.equal(parsed.sheet, 'OPS Related to mining');
+  assert.equal(parsed.row, 2);
+});
+check('the figure in the original currency survives the separator', () => {
+  // The source tail has to swallow the "|" before it. Without that the last
+  // field arrives as "975200 FRW at 1470.6/USD |", matches neither money
+  // shape, and every converted figure in the report comes out blank.
+  const parsed = parseWorkbookNote(
+    'Trench fenching | Quantity: 424 meters | 975200 FRW at 1470.6/USD'
+    + ' | [rubaya report.xlsx / Gisuma Farm Activities row 3]'
+  );
+  assert.equal(parsed.source, '975200 FRW at 1470.6/USD');
+  assert.equal(parsed.description, 'Trench fenching');
+});
+check('a note a manager typed is not forced into columns', () => {
+  // The report shows these columns where they exist and the note as it stands
+  // everywhere else, so this has to answer null rather than guess.
+  for (const note of ['we cultivated', '', null, undefined, 'Quantity: 3 | nothing else']) {
+    assert.equal(parseWorkbookNote(note), null, JSON.stringify(note));
+  }
+});
+check('a workbook row with an empty description keeps its other columns', () => {
+  // Some rows state a quantity and a cost and nothing else. The description
+  // has to come back empty rather than taking the quantity in its place.
+  const parsed = parseWorkbookNote(
+    'Quantity: 7 days | $70 as recorded | [rubaya report.xlsx / OPS Related to mining row 9]'
+  );
+  assert.equal(parsed.description, '');
+  assert.equal(parsed.quantityText, '7 days');
+  assert.equal(parsed.source, '$70 as recorded');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

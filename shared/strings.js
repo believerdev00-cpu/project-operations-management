@@ -803,6 +803,17 @@ const STRINGS = {
   'plan.dailyReportHint': { en: 'One entry for each day you work on this month.', rw: 'Inyandiko imwe kuri buri munsi ukora kuri uku kwezi.', fr: 'Une entrée pour chaque jour travaillé ce mois-ci.', sw: 'Ingizo moja kwa kila siku unayofanya kazi mwezi huu.' },
   'plan.dayDate': { en: 'Day', rw: 'Umunsi', fr: 'Jour', sw: 'Siku' },
   'plan.doneToday': { en: 'Done today ({unit})', rw: 'Byakozwe uyu munsi ({unit})', fr: 'Fait aujourd\'hui ({unit})', sw: 'Imefanyika leo ({unit})' },
+  // The question the daily form asks. Picked by the objective's unit in
+  // server/lib/objectiveForm.js (ASK_KEYS) and translated here rather than
+  // written there, because a sentence stored on the objective is one language
+  // and this is four. Phrased as something a person would say out loud:
+  // "Labourers done today" is what the generator produced before, and it
+  // reads as though ten labourers had been finished off.
+  'form.ask.people': { en: 'How many people worked today?', rw: 'Abakozi bangahe bakoze uyu munsi?', fr: 'Combien de personnes ont travaillé aujourd\'hui ?', sw: 'Watu wangapi walifanya kazi leo?' },
+  'form.ask.trips': { en: 'How many trips today?', rw: 'Ingendo zingahe uyu munsi?', fr: 'Combien de trajets aujourd\'hui ?', sw: 'Safari ngapi leo?' },
+  'form.ask.unit': { en: 'How many {unit} today?', rw: '{unit} zingahe uyu munsi?', fr: 'Combien de {unit} aujourd\'hui ?', sw: '{unit} ngapi leo?' },
+  'form.ask.count': { en: 'How many today?', rw: 'Bingahe uyu munsi?', fr: 'Combien aujourd\'hui ?', sw: 'Ngapi leo?' },
+  'form.hint.onlyToday': { en: 'Only today\'s work, not the month\'s total.', rw: 'Ibyakozwe uyu munsi gusa, atari ibya ukwezi kwose.', fr: 'Seulement le travail d\'aujourd\'hui, pas le total du mois.', sw: 'Kazi ya leo tu, sio jumla ya mwezi.' },
   'plan.leftToDo': { en: '{amount} {unit} left to do', rw: '{amount} {unit} bisigaye', fr: '{amount} {unit} restants', sw: '{amount} {unit} zimebaki' },
   'plan.costToday': { en: 'Money spent today', rw: 'Amafaranga yakoreshejwe uyu munsi', fr: 'Argent dépensé aujourd\'hui', sw: 'Pesa iliyotumika leo' },
   'plan.costOptional': { en: 'Leave empty if the day cost nothing.', rw: 'Reka ubusa niba uwo munsi utagize icyo utwara.', fr: 'Laissez vide si la journée n\'a rien coûté.', sw: 'Acha wazi kama siku haikugharimu chochote.' },
@@ -1351,6 +1362,13 @@ const STRINGS = {
   'report.amount': { en: 'Amount', rw: 'Ingano', fr: 'Quantité', sw: 'Kiasi' },
   'report.photos': { en: 'Photos', rw: 'Amafoto', fr: 'Photos', sw: 'Picha' },
   'report.whatWasWritten': { en: 'What was written', rw: 'Ibyanditswe', fr: 'Ce qui a été écrit', sw: 'Kilichoandikwa' },
+  // The workbook columns the day-by-day record shows for an imported day: the
+  // figure in the currency the workbook stated it in, and the sheet and row it
+  // can be checked against. The other headers it needs -- activity,
+  // description, location, quantity -- are field.* keys that already existed.
+  'report.asRecorded': { en: 'As recorded', rw: 'Nk\'uko byanditswe', fr: 'Tel qu\'enregistré', sw: 'Kama ilivyoandikwa' },
+  'report.workbookRow': { en: 'Workbook row', rw: 'Umurongo w\'igitabo', fr: 'Ligne du classeur', sw: 'Mstari wa kitabu' },
+  'report.rowWord': { en: 'row', rw: 'umurongo', fr: 'ligne', sw: 'mstari' },
   'report.notLinked': { en: 'Not linked to a commitment', rw: 'Ntibifitanye isano n’icyemeranyijweho', fr: 'Non rattaché à un engagement', sw: 'Haihusiani na makubaliano' },
   'report.activitiesInDates': { en: 'Activities in these dates', rw: 'Ibikorwa byo muri izi tariki', fr: 'Activités sur ces dates', sw: 'Shughuli za tarehe hizi' },
   'report.nobodyGivenIt': { en: 'Nobody has been given it yet', rw: 'Ntiragihabwa umuntu', fr: 'Encore attribué à personne', sw: 'Bado haijapewa mtu' },

@@ -28,6 +28,10 @@
 // is what makes generating this safe at all.
 
 import Anthropic from '@anthropic-ai/sdk';
+// The unit lists and the step rule, shared with the Director's plan form so the
+// box the unit is typed into and the box it is recorded through cannot disagree
+// about whether half of one is a thing.
+import { stepForUnit, unitClass } from '../../shared/units.js';
 
 // Opus 5. The skill's rule is to use the most capable model unless the operator
 // asks for another, and this runs a handful of times a month per operation --
@@ -48,49 +52,68 @@ const TEXT_LIMITS = {
 
 // ---- the deterministic reading -------------------------------------------
 
-function titleCase(value) {
-  const text = String(value || '').trim();
-  if (!text) return '';
-  return text.charAt(0).toUpperCase() + text.slice(1);
+// The question is generated as a KEY, never as a sentence.
+//
+// shared/strings.js holds all four languages; a sentence written here would be
+// English, and the client reads a stored label in preference to a translated
+// one. That is exactly what went wrong: every label on the daily form was
+// translated except the one the manager typed into. Only improve() -- which a
+// deployment opts into by configuring a key -- stores wording of its own.
+const ASK_KEYS = {
+  people: 'form.ask.people',
+  trips: 'form.ask.trips',
+  unit: 'form.ask.unit',
+  count: 'form.ask.count'
+};
+
+// One-tap amounts, so an ordinary day is a button and not typing.
+//
+// Derived rather than left to the model, because without ANTHROPIC_API_KEY
+// improve() never runs and quickAmounts was hard-coded empty -- the buttons on
+// the daily form were unreachable code on every deployment that runs with no
+// external service, which is the deployment this is built for.
+//
+// Snapped to a round rung so the buttons read like amounts a person would say:
+// a quarter and a half of the month's target, plus 1 for the day that only
+// managed one of something.
+const LADDER = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
+
+function roundDown(value) {
+  let best = 0;
+  for (const rung of LADDER) if (rung <= value) best = rung;
+  return best;
 }
 
-// A step small enough for the unit. Counting things (inspections, trips, cases,
-// systems) steps by one, because half an inspection is not a thing anybody
-// records; measured quantities (hectares, tonnes) step by a hundredth.
-const WHOLE_UNITS = [
-  'inspection', 'inspections', 'trip', 'trips', 'case', 'cases', 'visit', 'visits',
-  'session', 'sessions', 'system', 'systems', 'machine', 'machines', 'activity',
-  'activities', 'report', 'reports', 'person', 'people', 'unit', 'units',
-  'delivery', 'deliveries', 'movement', 'movements', 'service', 'services'
-];
-
-function stepFor(unit) {
-  return WHOLE_UNITS.includes(String(unit || '').trim().toLowerCase()) ? 1 : 0.01;
+function quickAmountsFor(targetQuantity) {
+  const target = Number(targetQuantity);
+  if (!Number.isFinite(target) || target <= 0) return [];
+  return [...new Set([1, roundDown(target / 4), roundDown(target / 2)])]
+    .filter((amount) => amount > 0 && amount <= target)
+    .sort((left, right) => left - right)
+    .slice(0, 3);
 }
 
 // The form anybody gets without a model involved.
 //
-// Deliberately plain: it uses the Director's own unit and title rather than
-// inventing vocabulary, because a wrong guess reads worse than a neutral
-// question. Claude's job below is to do better than this, not to replace it.
+// It decides the shape of the question and leaves the words to the reader's own
+// language. Claude's job below is to do better than this, not to replace it.
 export function derive(objective) {
   const unit = String(objective?.targetUnit || '').trim();
-  const title = String(objective?.title || '').trim();
   const counted = objective?.targetQuantity !== null && objective?.targetQuantity !== undefined;
 
   return {
-    // "Hectares done today" / "Done today" when the month is not counted.
-    amountLabel: unit ? `${titleCase(unit)} done today` : 'Done today',
-    amountHint: counted && unit
-      ? `Only what was actually finished today, in ${unit}.`
-      : 'Only what was actually finished today.',
+    // Translated on the client, with {unit} filled in where the question needs
+    // it. No English sentence is stored.
+    amountKey: ASK_KEYS[unitClass(unit)],
+    amountHintKey: 'form.hint.onlyToday',
     placeholder: '0',
-    step: stepFor(unit),
-    notesLabel: 'What happened today?',
-    notesHint: title ? `Anything worth knowing about "${title}" today.` : 'Anything worth knowing about today.',
-    evidenceLabel: 'Photos',
+    step: stepForUnit(unit, objective?.targetQuantity),
+    // notesLabel, notesHint and evidenceLabel are deliberately absent. The
+    // client already falls back to plan.dayNotes, plan.dayNotesHint and
+    // plan.dayProof, which are translated, so storing an English copy of them
+    // here would only shadow four languages with one.
     evidenceExpected: false,
-    quickAmounts: []
+    quickAmounts: counted ? quickAmountsFor(objective.targetQuantity) : []
   };
 }
 
@@ -135,16 +158,31 @@ export function validate(candidate, objective) {
       .slice(0, 3)
     : [];
 
+  const amountHint = cleanText(candidate.amountHint, TEXT_LIMITS.amountHint);
+  const notesHint = cleanText(candidate.notesHint, TEXT_LIMITS.notesHint);
+  const evidenceLabel = cleanText(candidate.evidenceLabel, TEXT_LIMITS.evidenceLabel);
+
   return {
-    amountLabel: amountLabel || base.amountLabel,
-    amountHint: cleanText(candidate.amountHint, TEXT_LIMITS.amountHint) || base.amountHint,
+    // The derived keys always travel with the form. A model that returns
+    // nothing usable therefore leaves the manager a translated question rather
+    // than an empty label.
+    amountKey: base.amountKey,
+    amountHintKey: base.amountHintKey,
+    // A model's own wording wins over the key where it gave any -- that is what
+    // improve() is for. Each of these is written only when it is non-empty, so
+    // an absent one falls through to the translated string on the client
+    // instead of shadowing it with "".
+    ...(amountLabel ? { amountLabel } : {}),
+    ...(amountHint ? { amountHint } : {}),
+    ...(notesLabel ? { notesLabel } : {}),
+    ...(notesHint ? { notesHint } : {}),
+    ...(evidenceLabel ? { evidenceLabel } : {}),
     placeholder: cleanText(candidate.placeholder, TEXT_LIMITS.placeholder) || base.placeholder,
     step: safeStep,
-    notesLabel: notesLabel || base.notesLabel,
-    notesHint: cleanText(candidate.notesHint, TEXT_LIMITS.notesHint) || base.notesHint,
-    evidenceLabel: cleanText(candidate.evidenceLabel, TEXT_LIMITS.evidenceLabel) || base.evidenceLabel,
     evidenceExpected: candidate.evidenceExpected === true,
-    quickAmounts
+    // Offering none is a model declining to guess, not an instruction to take
+    // the buttons away: the derived amounts stand.
+    quickAmounts: quickAmounts.length ? quickAmounts : base.quickAmounts
   };
 }
 

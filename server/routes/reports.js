@@ -36,6 +36,12 @@ import { monthStart, objectiveProgress, planProgress } from '../lib/monthly.js';
 // that could not be read in Kinyarwanda, French or Kiswahili.
 import { fill, knownLanguage, translate } from '../../shared/strings.js';
 import { operationName } from '../../shared/businessOperations.js';
+// An imported day keeps the workbook row it came from inside its one notes
+// column -- the activity, the description, the place, the quantity as it was
+// typed and the figure in the currency it was paid in. Read back apart here so
+// the report can show them as the columns they were, in the words they were
+// written in. A note nobody imported parses to null and is shown as it stands.
+import { parseWorkbookNote } from '../../shared/workbookNote.js';
 
 const router = express.Router();
 
@@ -730,6 +736,10 @@ async function buildMonthlyWork(user, period, choice = null) {
       unit: row.target_unit || '',
       cost: round2(row.cost),
       notes: row.notes || '',
+      // The workbook row behind this day, where there was one. Null for a day
+      // a manager typed, and every reading has to cope with that rather than
+      // assume an import.
+      workbook: parseWorkbookNote(row.notes),
       evidenceCount: Number(row.evidence_count || 0)
     }))
   };
@@ -1096,27 +1106,54 @@ async function buildWorkbook(report, language = 'en') {
 
   if (work.days.length) {
     const daily = workbook.addWorksheet(sheetName(t('report.dayByDay')));
+    // THE WORKBOOK'S OWN COLUMNS FIRST, IN THE WORKBOOK'S OWN WORDS.
+    //
+    // These months are kept by hand in an Excel workbook whose sheets read
+    // Date | Activity | Description | Location | Quantity | Cost, and this is
+    // the sheet somebody opens to check the system against it. It used to
+    // print one "What was written" cell with the activity, the place, the
+    // quantity and the original figure run together inside it, which is every
+    // column of the source reduced to a paragraph nobody can sort or filter.
+    //
+    // So the row is laid out as it was typed, and the figures the system
+    // derived from it -- the counted amount, its unit, the objective it was
+    // grouped under -- follow after. A day a manager typed has no workbook row
+    // behind it: its own words go in the description column, where the reader
+    // is already looking for what was written.
     daily.columns = [
       { header: t('report.date'), key: 'date', width: 20 },
+      { header: t('field.activity'), key: 'activity', width: 20 },
+      { header: t('field.description'), key: 'description', width: 46 },
+      { header: t('field.location'), key: 'location', width: 18 },
+      { header: t('field.quantity'), key: 'quantityText', width: 30 },
+      { header: `${t('export.cost')} (USD)`, key: 'cost', width: 14 },
+      { header: t('report.asRecorded'), key: 'asRecorded', width: 26 },
       { header: t('report.operation'), key: 'operation', width: 24 },
       { header: t('report.commitment'), key: 'objective', width: 38 },
       { header: t('report.amount'), key: 'quantity', width: 12 },
       { header: t('export.unit'), key: 'unit', width: 14 },
-      { header: `${t('export.cost')} (USD)`, key: 'cost', width: 14 },
       { header: t('report.photos'), key: 'photos', width: 9 },
-      { header: t('report.whatWasWritten'), key: 'notes', width: 60 }
+      { header: t('report.workbookRow'), key: 'source', width: 34 }
     ];
     headerRow(daily, 1);
     for (const day of work.days) {
+      const sheet = day.workbook;
       daily.addRow({
         date: dayInWords(day.date, language),
+        activity: sheet?.activity || '',
+        // The workbook's description, or -- for a day nobody imported -- the
+        // note itself, so this column always holds what was actually written.
+        description: sheet ? sheet.description : day.notes,
+        location: sheet?.location || '',
+        quantityText: sheet?.quantityText || '',
+        cost: day.cost,
+        asRecorded: sheet?.source || '',
         operation: operation(day.operation),
         objective: day.objective || t('report.notLinked'),
         quantity: day.quantity,
         unit: day.unit,
-        cost: day.cost,
         photos: day.evidenceCount,
-        notes: day.notes
+        source: sheet ? `${sheet.sheet} ${t('report.rowWord')} ${sheet.row}` : ''
       });
       daily.getCell(`F${daily.rowCount}`).numFmt = MONEY;
     }
@@ -1486,9 +1523,27 @@ function writePdf(report, stream, language = 'en') {
       );
       // The manager's own words, left whole: wrapped, never clipped. These are
       // the sentences a report exists to carry.
-      if (entry.notes) {
+      //
+      // An imported day's note is a workbook row with its fields run together,
+      // so it is read back apart and laid out in a deliberate order -- what was
+      // done and where, then the quantity as it was typed, then the figure in
+      // the currency it was paid in, then the row it can be checked against.
+      // Same words, same order as the sheet. A page cannot hold the
+      // spreadsheet's thirteen columns, so this is the one line that carries
+      // them; the Day by day sheet in the .xlsx has them as columns.
+      const sheet = entry.workbook;
+      const written = sheet
+        ? [
+          [sheet.activity, sheet.description].filter(Boolean).join(' — ')
+            + (sheet.location ? ` @ ${sheet.location}` : ''),
+          sheet.quantityText ? `${t('field.quantity')}: ${sheet.quantityText}` : '',
+          sheet.source,
+          `${sheet.sheet} ${t('report.rowWord')} ${sheet.row}`
+        ].filter(Boolean).join('   ·   ')
+        : entry.notes;
+      if (written) {
         doc.font('Helvetica-Oblique').fontSize(8.5).fillColor(QUIET)
-          .text(entry.notes, left + 12, doc.y, { width: width - 12 });
+          .text(written, left + 12, doc.y, { width: width - 12 });
         doc.fillColor(INK);
       }
       doc.moveDown(0.35);

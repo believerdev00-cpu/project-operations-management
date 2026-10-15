@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BUSINESS_OPERATIONS, PRIMARY_OPERATIONS, isSupportOperation, operationName } from '../shared/businessOperations.js';
 import { OTHER_CATEGORY, categoriesForOperation } from '../shared/categories.js';
+// The units a month can be counted in, and how finely a box counting them
+// should step. Shared with server/lib/objectiveForm.js, which shapes the
+// manager's daily form from the same words -- so the unit the Director picks
+// here and the question asked against it downstream cannot drift apart.
+import { UNIT_SUGGESTIONS, stepForUnit } from '../shared/units.js';
 import { displayLanguage, fill, useI18n } from './i18n.js';
 import { EvidenceList, EvidenceUpload, categoryLabel, trailActionLabel } from './ActivityReview.jsx';
 import { DetailView, Fact, useBusy, useDialog } from './ui.jsx';
@@ -22,10 +27,6 @@ import { objectiveState, objectiveStateTone } from './Home.jsx';
 
 
 const PRIORITIES = ['High', 'Medium', 'Low'];
-const UNIT_SUGGESTIONS = [
-  'hectares', 'acres', 'square metres', 'kilograms', 'tonnes', 'bags', 'litres',
-  'trips', 'chickens', 'animals', 'trees', 'plants', 'people', 'visits', 'days'
-];
 
 // A month starts empty: the Director names the operation and the manager, states
 // the budget they are approving, and says what the month is for.
@@ -829,7 +830,13 @@ function ObjectiveEditor({ objectives, onChange, t, operation, language, month }
           onChange={(event) => update(index, { title: event.target.value })} />
       </label>
       <label className="form-field objective-target"><span>{t('plan.target')}</span>
-        <input type="number" inputMode="decimal" min="0" step="0.01" placeholder={t('plan.targetPlaceholder')}
+        {/* Stepped by the unit beside it: whole labourers and sacks, hundredths
+            of a kilogram. A fixed step of 0.01 put a hundredths spinner on every
+            countable thing the Director has ever typed. A target already written
+            as a fraction keeps the fine step, so nothing becomes unreachable
+            when the unit is typed after the number. */}
+        <input type="number" inputMode="decimal" min="0" placeholder={t('plan.targetPlaceholder')}
+          step={stepForUnit(row.targetUnit, row.targetQuantity)}
           value={row.targetQuantity ?? ''}
           onChange={(event) => update(index, { targetQuantity: event.target.value })} />
       </label>
@@ -994,6 +1001,18 @@ function MonthWorkspace({ plan, objectives = [], reports, t, language, busy, can
   // objective is chosen yet, so every read below falls back to the generic
   // wording rather than needing a guard of its own.
   const shape = chosen?.form || {};
+  // The question on the amount box, in the reader's own language.
+  //
+  // A derived form carries a KEY; a form a model wrote carries a literal
+  // label as well. The literal wins where there is one, the key next, and the
+  // generic plan.doneToday last. That order is the only one that keeps this
+  // field translated on a deployment with no model configured -- which is
+  // every deployment running with no external service at all. Before this the
+  // generated label was read first and unconditionally, so a manager reading
+  // Kinyarwanda met exactly one English label: the field they had to type in.
+  const dayQuestion = shape.amountLabel
+    || fill(t(shape.amountKey || 'plan.doneToday'), { unit: chosen?.targetUnit || '' });
+  const dayHint = shape.amountHint || (shape.amountHintKey ? t(shape.amountHintKey) : '');
   const nothingTyped = !form.quantityDone && !form.cost && !form.notes.trim();
 
   const submit = async (event) => {
@@ -1106,7 +1125,7 @@ function MonthWorkspace({ plan, objectives = [], reports, t, language, busy, can
             Falls back to the generic label whenever an objective has no form,
             which is only ever a month written before forms existed. */}
         {counted && <label className="form-field">
-          <span>{shape.amountLabel || fill(t('plan.doneToday'), { unit: chosen.targetUnit })}</span>
+          <span>{dayQuestion}</span>
           <input type="number" inputMode="decimal" min="0" step={shape.step || 0.01}
             placeholder={shape.placeholder || '0'}
             value={form.quantityDone}
@@ -1122,7 +1141,7 @@ function MonthWorkspace({ plan, objectives = [], reports, t, language, busy, can
               </button>)}
           </div>}
           <small className="field-hint">{fill(t('plan.leftToDo'), { amount: chosen.quantityRemaining, unit: chosen.targetUnit })}</small>
-          {shape.amountHint && <small className="field-hint">{shape.amountHint}</small>}
+          {dayHint && <small className="field-hint">{dayHint}</small>}
         </label>}
         <label className="form-field"><span>{t('plan.costToday')}</span>
           <input type="number" inputMode="decimal" min="0" step="0.01" placeholder="0"

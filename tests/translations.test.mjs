@@ -38,7 +38,9 @@ const sources = Object.fromEntries(FILES.map((file) => [path.basename(file), fs.
 // checks -- a key only the exports use would otherwise be reported as unused,
 // and a typo in one would be caught by nobody -- but NOT for the hard-coded
 // English check below, which is about JSX.
-const SERVER_FILES = ['routes/reports.js'].map((name) => path.join(root, 'server', name));
+// objectiveForm.js names the keys the generated daily form is translated through
+// (ASK_KEYS), so they are used even though nothing here calls t() on them.
+const SERVER_FILES = ['routes/reports.js', 'lib/objectiveForm.js'].map((name) => path.join(root, 'server', name));
 const serverSources = Object.fromEntries(
   SERVER_FILES.map((file) => [path.basename(file), fs.readFileSync(file, 'utf8')])
 );

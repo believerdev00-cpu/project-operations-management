@@ -96,10 +96,24 @@ wins; the row's own wording survives verbatim on the day.
 
 The target is the summed quantity from the sheet, with its unit, taken from a
 leading number ("10 Labours", "424 meters", "108kg"). A quantity with a number
-but no unit takes the unit of the rows beside it. A bucket whose rows genuinely
-disagree on what they count, or do not count at all, is targeted in `entries`,
-one per record. Either way the target equals what was actually done, so an
-imported month reads as complete -- which is true, the workbook marks it so.
+but no unit takes the unit of the rows beside it, and a row with no figure at
+all is allowed as long as **at least two thirds of the bucket's rows state the
+same unit** -- September's coltan deliveries read "60kgs", "66kgs", "20kgs",
+"51.7kgs", "52kgs" and then one blank, and that blank used to turn 249.7kg of
+coltan moved into "6 entries". Those rows keep their day, their cost and their
+note, and add nothing to a target they never claimed.
+
+Below two thirds, or where the rows disagree on the unit outright, the work is
+not one countable thing -- August's shopping reads "Posho(25kg),Torch,Rice(2kg)
+&2 Big fant" -- and the objective counts **the times it was done** instead.
+Half was tried before two thirds and is too generous: two rows reading
+"1Tech,1Carp&1Helper" out of four made a month of roof renovation a target of
+"2 tech". The word is `times` and not `entries` because the Director reads these
+targets and writes the next month from what they read, and the manager is then
+asked to record against that same word.
+
+Either way the target equals what was actually done, so an imported month reads
+as complete -- which is true, the workbook marks it so.
 
 ## How the data gets in
 

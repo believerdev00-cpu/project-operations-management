@@ -198,6 +198,19 @@ const statements = [
   `ALTER TABLE plan_objectives DROP CONSTRAINT IF EXISTS plan_objectives_form_source_check`,
   `ALTER TABLE plan_objectives ADD CONSTRAINT plan_objectives_form_source_check
      CHECK (form_source IS NULL OR form_source IN ('derived', 'ai'))`,
+  // A derived form written before the question was a translation key holds an
+  // English sentence ("Labourers done today") that the client reads in
+  // preference to the four translated ones. Clearing it is the whole fix: the
+  // plan payload re-derives a form whenever form_spec is NULL (see the
+  // objective mapper in routes/monthlyPlans.js), so these objectives pick up
+  // the translated question, the whole-number step and the one-tap amounts on
+  // the next read, with nothing to regenerate and nothing to backfill.
+  //
+  // Guarded on form_source so a form a model wrote is never thrown away, and
+  // on the absence of amountKey so this is a no-op the second time it runs.
+  `UPDATE plan_objectives SET form_spec = NULL
+  WHERE (form_source IS NULL OR form_source = 'derived')
+    AND form_spec IS NOT NULL AND NOT (form_spec ? 'amountKey')`,
 
   // ---- the manager's day, reported against the month ------------------------
   //
