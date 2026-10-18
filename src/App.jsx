@@ -894,7 +894,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // "Monthly plan" (every control hidden, the operation's budget on show) and
   // "Reports" (a whole-operation budget export). Four of their seven items led
   // nowhere. Each role now gets the pages it works in and nothing else.
-  const coversTrips = isDirector || runsTrips(user);
   let navItems;
   if (isDirector) {
     // The Director runs the whole organisation, so they do see every page --
@@ -922,15 +921,16 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     // of what they are actually doing. The two used to be "My month" and "All
     // work", which named the software's objects rather than the manager's two
     // questions.
+    //
+    // Now it is only that: the Director decided a manager sees their monthly
+    // plan and works on it, and Home shows the last day they recorded with an
+    // Edit -- nothing more. Approvals, the work register, trips, reports and
+    // requests are the Director's; every record stays in the database and in
+    // the Director's pages. A manager following an old link to one of them
+    // lands on Home (see `view` below).
     navItems = [
       ['dashboard', t('nav.home'), 0, 'main', t('nav.home')],
-      ['monthly', t('nav.myPlan'), 0, 'main', t('nav.shortMyPlan')],
-      ['approval-queue', t('nav.approvalQueue'), approvalCount, 'main', t('nav.shortApprovals')],
-      ['activities', t('nav.myWork'), 0, 'main', t('nav.myWork')],
-      ...(coversTrips ? [['movements', t('nav.trips'), 0, 'main', t('nav.shortTrips')]] : []),
-      ...(coversTrips ? [] : [['movements', t('nav.trips'), 0, 'more']]),
-      ['reports', t('nav.reports'), 0, 'more'],
-      ['approvals', t('nav.myRequests'), 0, 'more']
+      ['monthly', t('nav.myPlan'), 0, 'main', t('nav.shortMyPlan')]
     ];
   } else {
     // A team member has one job: the work they were given. Two pages, and the
@@ -946,7 +946,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const bottomNav = isDirector
     ? ['dashboard', 'approval-queue', 'monthly', 'activities']
     : isManager
-      ? ['dashboard', 'monthly', 'approval-queue', coversTrips ? 'movements' : 'activities']
+      ? ['dashboard', 'monthly']
       : ['dashboard', 'activities'];
   // An address naming a page this account does not have -- a manager following
   // a Director's link to #/users -- lands on the home page instead of a blank page.
@@ -2094,7 +2094,11 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
             const { categoryChoice, ...payload } = activityForm;
             return submit(
               event, '/api/activities',
-              { ...payload, costRwf: round2(usd * rate.rwfPerUsd), costCdf: round2(usd * rate.cdfPerUsd) },
+              // Work the Director hands out no longer waits for the manager to
+              // accept it: a manager has no approval page any more, so the
+              // acceptance would never come. The Director's assignment is the
+              // decision.
+              { ...payload, ...(isDirector ? { approvalRequired: false } : {}), costRwf: round2(usd * rate.rwfPerUsd), costCdf: round2(usd * rate.cdfPerUsd) },
               isDirector ? t('msg.activityAssigned') : t('msg.activitySubmitted'),
               (result) => { setActivityForm({ ...emptyActivity, projectId: result.projectId, sector: result.sector }); },
               (result) => navigate(buildHash('activities', result.id), { replace: true })

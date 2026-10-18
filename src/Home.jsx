@@ -221,7 +221,7 @@ export default function Home({
   // they are not left under the bell alone. Opening one marks it read.
   const alerts = isManager
     ? (notices?.items || []).filter((notice) => !notice.read
-      && ['plan_assigned', 'report_returned', 'work_returned', 'report_accepted', 'work_approved', 'plan_changed'].includes(notice.kind)).slice(0, 4)
+      && ['plan_assigned', 'report_returned', 'report_accepted', 'plan_changed'].includes(notice.kind)).slice(0, 4)
     : [];
 
   // The operations this account covers: all four for the Director or an
@@ -293,7 +293,7 @@ export default function Home({
           {canAddActivity && <button className="text-btn" type="button" onClick={onAddActivity}>{t('action.assignActivity')}</button>}
           {canAddMovement && <button className="text-btn" type="button" onClick={onAddMovement}>{t('home.newTrip')}</button>}
         </div>
-        : (canAddActivity || canAddMovement) && <div className="home-quick">
+        : !isManager && (canAddActivity || canAddMovement) && <div className="home-quick">
           {canAddActivity && <button className="primary-btn" type="button" onClick={onAddActivity}>{t('action.raiseActivity')}</button>}
           {canAddMovement && <button className="secondary-btn" type="button" onClick={onAddMovement}>{t('home.newTrip')}</button>}
         </div>}
@@ -320,6 +320,9 @@ export default function Home({
 
         The Director does not get this block: they monitor the four operations
         further down the page and do not record work at all. */}
+    {isManager && plans !== null && !myMonths.some((myMonth) => myMonth.objectives?.length > 0) && <div className="empty-state">
+      <strong>{t('home.noPlanForYou')}</strong>
+    </div>}
     {isManager && myMonths.filter((myMonth) => myMonth.objectives?.length > 0).map((myMonth) => {
       const states = myMonth.objectives.map((objective) => objectiveState(objective));
       const done = states.filter((state) => state === 'done').length;
@@ -394,26 +397,20 @@ export default function Home({
         : <p className="home-lead">{t('home.allClear')}</p>}
     </>}
 
-    <h3 className="home-heading">{t('home.todo')}</h3>
-    <div className="home-tiles">
+    {!isManager && <h3 className="home-heading">{t('home.todo')}</h3>}
+    {!isManager && <div className="home-tiles">
       {tiles.map((tile) => <button key={tile.id} type="button" className={`home-tile home-tile-${tile.tone}`} onClick={tile.onClick}>
         <span className="home-tile-count">{tile.count}</span>
         <span className="home-tile-text">{tile.title}</span>
       </button>)}
-    </div>
+    </div>}
 
-    {approves && approvalItems.length > 0 && <>
+    {isDirector && approvalItems.length > 0 && <>
       <h3 className="home-heading">{t('home.tileApprovals')}</h3>
       <DecisionList items={approvalItems.slice(0, 3)} onOpen={onOpenQueueItem} onDecide={onDecide} busy={busy} />
       {approvalItems.length > 3 && <button className="text-btn home-more" type="button" onClick={() => onGo('approval-queue')}>
         {fill(t('home.seeAll'), { count: approvalCount })} &rarr;
       </button>}
-    </>}
-
-    {!isDirector && myWork && myWork.length > 0 && <>
-      <h3 className="home-heading">{t('home.tileWork')}</h3>
-      <WorkList items={myWork.slice(0, 4)} user={user} t={t} language={language}
-        onOpen={onOpenActivity} onStart={onStartWork} busy={busy} />
     </>}
 
     {isDirector && finalChecks && finalChecks.length > 0 && <>
@@ -494,8 +491,11 @@ export default function Home({
       </div>
     </>}
 
-    <h3 className="home-heading">{isDirector ? `${t('home.sectorProgress')} · ${monthLabel(month, language)}` : fill(t('home.thisMonth'), { month: monthLabel(month, language) })}</h3>
-    <div className="home-operations">
+    {/* The operations at a glance are the Director's. A manager's Home is their
+        own month and their latest day, and nothing else: their plan above is
+        where they work. */}
+    {isDirector && <h3 className="home-heading">{`${t('home.sectorProgress')} · ${monthLabel(month, language)}`}</h3>}
+    {isDirector && <div className="home-operations">
       {operations.map((operation) => {
         const plan = planFor(operation.id);
         const row = rowFor(operation.id);
@@ -547,7 +547,7 @@ export default function Home({
           </div>
         </article>;
       })}
-    </div>
+    </div>}
   </div>;
 }
 

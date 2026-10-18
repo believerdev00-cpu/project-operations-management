@@ -1711,7 +1711,8 @@ function PlannedActivity({
       </div>
     </form>}
 
-    <a className="text-btn planned-open" href={`#/activities/${encodeURIComponent(item.id)}`}>{t('monthly.openFullRecord')}</a>
+    {/* The full record lives on the activities pages, which are the Director's. */}
+    {user?.role === 'super-admin' && <a className="text-btn planned-open" href={`#/activities/${encodeURIComponent(item.id)}`}>{t('monthly.openFullRecord')}</a>}
     {step.done && canAssign && !delegating && <button type="button" className="secondary-btn" onClick={() => setDelegating(true)}>
       {t('work.addDay')}
     </button>}
@@ -1727,10 +1728,10 @@ function PlanDetail({
   offPlanActivities = []
 }) {
   const { plan, activities, report } = detail;
-  // A manager reads the month's latest five changes; the Director reads all of
-  // them. Nothing is dropped -- the full history stays in the database and in
+  // The month's change history is the Director's to read. A manager works the
+  // month; nothing is dropped -- the full history stays in the database and in
   // the Director's view of this page.
-  const history = isDirector ? detail.history : (detail.history || []).slice(0, 5);
+  const history = isDirector ? detail.history || [] : [];
   const [explanations, setExplanations] = useState({
     unusedBalanceExplanation: '', budgetDifferenceExplanation: ''
   });
@@ -2190,8 +2191,8 @@ function PlanDetail({
       <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('monthend.submit')}</button></div>
     </form>}
 
-    <h3 className="form-section-title">{t('monthly.planHistory')}</h3>
-    {history.length ? <ul className="history-list">{history.map((entry) => <li key={entry.id}>
+    {isDirector && <h3 className="form-section-title">{t('monthly.planHistory')}</h3>}
+    {!isDirector ? null : history.length ? <ul className="history-list">{history.map((entry) => <li key={entry.id}>
       <strong>{trailActionLabel(entry.action, t)}</strong>
       {entry.field && <span> {planTrailValue(entry.field, entry.oldValue, t)} &rarr; {planTrailValue(entry.field, entry.newValue, t)}</span>}
       <small>{entry.actorName} · {new Date(entry.createdAt).toLocaleString(language)}</small>
