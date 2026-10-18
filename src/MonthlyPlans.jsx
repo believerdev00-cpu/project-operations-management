@@ -408,6 +408,19 @@ export default function MonthlyPlans({
     } catch (removeError) { onError(removeError.message); return false; }
   });
 
+  // The manager correcting their own latest day (PUT .../reports/:id), the
+  // same correction Home offers.
+  const correctDay = (report, changes) => run(async () => {
+    try {
+      await fetchJson(`/api/monthly-plans/${openPlanId}/reports/${report.id}`, {
+        method: 'PUT', body: JSON.stringify(changes)
+      });
+      onMessage(t('msg.saved'));
+      await reloadMonth();
+      return true;
+    } catch (correctError) { onError(correctError.message); return false; }
+  });
+
   const uploadDayProof = (report, files) => run(async () => {
     try {
       const data = new FormData();
@@ -757,6 +770,7 @@ export default function MonthlyPlans({
         onStartMonth={startMonth}
         onReportDay={reportDay}
         onRemoveDay={removeDay}
+        onCorrectDay={correctDay}
         onUploadDayProof={uploadDayProof}
         fetchJson={fetchJson}
         upload={upload}
@@ -965,14 +979,36 @@ function planTone(status) {
 //
 // The day is the record. What it cost is one of its fields and may be nothing:
 // a day of clearing by hand costs no money and is still a day's work.
-function MonthWorkspace({ plan, objectives = [], reports, t, language, busy, canWork, onStart, onReport, onRemoveReport, onUploadProof, onOpenFile }) {
+function MonthWorkspace({ plan, objectives = [], reports: allReports, t, language, busy, canWork, onStart, onReport, onRemoveReport, onCorrectReport, userId, reportStatus, onUploadProof, onOpenFile }) {
   const today = todayLocal();
   const blank = { date: inMonth(today, plan.month), objectiveId: '', quantityDone: '', cost: '', notes: '' };
   const [form, setForm] = useState(blank);
   const [proof, setProof] = useState([]);
+  const [editing, setEditing] = useState(null);
   const dialog = useDialog();
 
-  const started = plan.status === 'In Progress' || plan.status === 'Completed' || reports.length > 0;
+  // A manager sees only the last day they recorded -- the one they may still
+  // correct -- and the Director sees every day. The days arrive newest first.
+  // The rest are not deleted: they stay in the database, in the month's totals
+  // below, in the Director's view of this page and in Reports.
+  const managerView = Boolean(onCorrectReport);
+  const reports = managerView
+    ? allReports.filter((report) => report.submittedBy === userId).slice(0, 1)
+    : allReports;
+  // What PUT .../reports/:id accepts, so Edit is only offered where the save
+  // can land: the month open and its month-end report not with the Director.
+  const correctable = managerView && plan.status !== 'Closed' && !['Submitted', 'Accepted'].includes(reportStatus);
+  const saveCorrection = async (event) => {
+    event.preventDefault();
+    const saved = await onCorrectReport(editing.report, {
+      quantityDone: editing.quantityDone === '' ? 0 : Number(editing.quantityDone),
+      cost: editing.cost === '' ? 0 : Number(editing.cost),
+      notes: editing.notes
+    });
+    if (saved) setEditing(null);
+  };
+
+  const started = plan.status === 'In Progress' || plan.status === 'Completed' || allReports.length > 0;
   const open = plan.status !== 'Closed';
   const finished = plan.status === 'Completed';
 
@@ -1148,7 +1184,7 @@ function MonthWorkspace({ plan, objectives = [], reports, t, language, busy, can
     </form>}
 
     {/* Everything reported so far. */}
-    <h3 className="form-section-title">{t('plan.workHistory')}</h3>
+    <h3 className="form-section-title">{t(managerView ? 'home.myLatestUpdate' : 'plan.workHistory')}</h3>
     {reports.length ? <>
       <div className="table-wrap"><table className="card-table">
         <thead><tr>
@@ -1165,6 +1201,30 @@ function MonthWorkspace({ plan, objectives = [], reports, t, language, busy, can
             unit for the whole table would be wrong on most rows. */}
         <tbody>{reports.map((report) => {
           const against = objectives.find((objective) => objective.id === report.objectiveId) || null;
+          if (editing?.report.id === report.id) {
+            const unit = against?.targetUnit || plan.targetUnit;
+            return <tr key={report.id}><td colSpan={objectives.length > 0 ? 7 : 6}>
+              <form className="update-edit" onSubmit={saveCorrection}>
+                <strong>{formatDate(report.date, language)}{against && <> &middot; {against.title}</>}</strong>
+                <label className="form-field"><span>{t('plan.workDone')}{unit && ` (${unit})`}</span>
+                  <input type="number" min="0" step="any" inputMode="decimal" value={editing.quantityDone}
+                    onChange={(event) => setEditing({ ...editing, quantityDone: event.target.value })} />
+                </label>
+                <label className="form-field"><span>{t('plan.costToday')}</span>
+                  <input type="number" min="0" step="0.01" inputMode="decimal" value={editing.cost}
+                    onChange={(event) => setEditing({ ...editing, cost: event.target.value })} />
+                </label>
+                <label className="form-field form-field-wide"><span>{t('plan.dayNotes')}</span>
+                  <textarea rows="3" maxLength={4000} value={editing.notes}
+                    onChange={(event) => setEditing({ ...editing, notes: event.target.value })} />
+                </label>
+                <div className="button-row">
+                  <button className="primary-btn" type="submit" disabled={busy}>{t('action.saveCorrection')}</button>
+                  <button className="text-btn" type="button" disabled={busy} onClick={() => setEditing(null)}>{t('action.cancel')}</button>
+                </div>
+              </form>
+            </td></tr>;
+          }
           return <tr key={report.id}>
           <td className="card-title-cell"><strong>{formatDate(report.date, language)}</strong>
             <small>{report.submittedByName}</small></td>
@@ -1180,6 +1240,9 @@ function MonthWorkspace({ plan, objectives = [], reports, t, language, busy, can
               onClick={() => onOpenFile(file.path)}>{file.originalName}</button>)
             : <span className="muted-cell">&mdash;</span>}</td>
           <td className="card-actions">
+            {correctable && <button type="button" className="text-btn" disabled={busy} onClick={() => setEditing({
+              report, quantityDone: String(report.quantityDone || ''), cost: String(report.cost || ''), notes: report.notes || ''
+            })}>{t('action.correctDay')}</button>}
             {canWork && open && !finished && <UploadDayProof report={report} busy={busy} t={t} onUpload={onUploadProof} />}
             {onRemoveReport && open && <button type="button" className="text-btn" disabled={busy}
               onClick={() => remove(report)}>{t('action.remove')}</button>}
@@ -1658,12 +1721,16 @@ function PlannedActivity({
 function PlanDetail({
   detail, user, isDirector, language, t, busy, managers = [], people = [], rate = null, activityForm, setActivityForm,
   workForms = {}, setWorkForms, onAddWork, onStartWork, onOpenActivity,
-  onStartMonth, onReportDay, onRemoveDay, onUploadDayProof,
+  onStartMonth, onReportDay, onRemoveDay, onCorrectDay, onUploadDayProof,
   fetchJson, upload, onOpenFile, onReload, onError, onMessage,
   onAddActivity, onConfirm, onReopen, onSubmitReport, onDecideReport, onRequestChange, onClose, onAttach, onUpdatePlan,
   offPlanActivities = []
 }) {
-  const { plan, activities, history, report } = detail;
+  const { plan, activities, report } = detail;
+  // A manager reads the month's latest five changes; the Director reads all of
+  // them. Nothing is dropped -- the full history stays in the database and in
+  // the Director's view of this page.
+  const history = isDirector ? detail.history : (detail.history || []).slice(0, 5);
   const [explanations, setExplanations] = useState({
     unusedBalanceExplanation: '', budgetDifferenceExplanation: ''
   });
@@ -1844,6 +1911,9 @@ function PlanDetail({
       onStart={onStartMonth}
       onReport={onReportDay}
       onRemoveReport={isDirector ? onRemoveDay : null}
+      onCorrectReport={isDirector ? null : onCorrectDay}
+      userId={user?.id}
+      reportStatus={report?.status || null}
       onUploadProof={onUploadDayProof}
       onOpenFile={onOpenFile}
     />
