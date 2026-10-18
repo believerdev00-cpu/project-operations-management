@@ -2197,8 +2197,11 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         // longer describes what the pickers show, so it is cleared.
         onRangeChange={(changes) => { setReportRange((current) => ({ ...current, ...changes })); setReport(null); }}
         onGenerate={requestReport}
-        onExport={exportReport}
-        onPrint={() => window.print()}
+        // Taking a copy away -- a file or a printout -- is the Director's
+        // alone; a manager reads the report on screen. The export route
+        // refuses anyone else, so hiding the buttons is courtesy, not the rule.
+        onExport={isDirector ? exportReport : null}
+        onPrint={isDirector ? () => window.print() : null}
         onClose={() => setReport(null)}
       />
     </>;
@@ -2878,9 +2881,11 @@ function ReportBody({ report, busy, sectorLabel, onExport, onPrint, onClose }) {
         </span>
       </div>
       <div className="report-actions report-controls">
-        <button className="secondary-btn" type="button" disabled={busy} onClick={() => onExport('pdf')}>{t('action.exportPdf')}</button>
-        <button className="secondary-btn" type="button" disabled={busy} onClick={() => onExport('xlsx')}>{t('action.exportExcel')}</button>
-        <button className="secondary-btn" type="button" onClick={onPrint}>{t('action.print')}</button>
+        {onExport && <>
+          <button className="secondary-btn" type="button" disabled={busy} onClick={() => onExport('pdf')}>{t('action.exportPdf')}</button>
+          <button className="secondary-btn" type="button" disabled={busy} onClick={() => onExport('xlsx')}>{t('action.exportExcel')}</button>
+        </>}
+        {onPrint && <button className="secondary-btn" type="button" onClick={onPrint}>{t('action.print')}</button>}
         <button className="text-btn" type="button" onClick={onClose}>{t('action.close')}</button>
       </div>
     </div>

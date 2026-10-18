@@ -96,6 +96,8 @@ export default function Home({
   // What the managers have actually recorded lately, across every operation in
   // scope. The Director monitors rather than asks: this arrives with the page.
   const [updates, setUpdates] = useState([]);
+  // Bumped after a correction so the corrected figure is the one shown.
+  const [ownReload, setOwnReload] = useState(0);
   const latest = useRef(0);
 
   // Its own lists, reloaded whenever the workspace refreshes its data.
@@ -109,8 +111,11 @@ export default function Home({
       // losing the work the moment it is done.
       isWorker ? fetchJson('/api/activities?status=Completed&assignedTo=me&limit=3') : Promise.resolve([]),
       // The operational history, newest first. A team member has no month of
-      // their own to monitor, so they are not asked for it.
-      isWorker ? Promise.resolve({ updates: [] }) : fetchJson('/api/monthly-plans/updates?limit=12'),
+      // their own to monitor, so they are not asked for it. A manager gets only
+      // the last day they recorded themselves -- the one they may still
+      // correct; the rest of the record is in the month itself.
+      isWorker ? Promise.resolve({ updates: [] })
+        : fetchJson(isManager ? '/api/monthly-plans/updates?limit=1&mine=1' : '/api/monthly-plans/updates?limit=5'),
       isDirector ? fetchJson(`/api/activities?raisedBy=managers&limit=${LATEST_FROM_MANAGERS}`) : Promise.resolve([])
     ]).then(([planResult, workResult, checkResult, doneResult, updateResult, latestResult]) => {
       if (request !== latest.current) return;
@@ -123,7 +128,34 @@ export default function Home({
         : []);
       setFinalChecks(checkResult.status === 'fulfilled' ? checkResult.value : []);
     });
-  }, [fetchJson, isDirector, isWorker, month, reloadKey]);
+  }, [fetchJson, isDirector, isManager, isWorker, month, reloadKey, ownReload]);
+
+  // Correcting the last day, in place. Only the author's latest day on an open
+  // month carries `correctable`; PUT /reports/:id re-checks all of it.
+  const [editing, setEditing] = useState(null);
+  const [editError, setEditError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const startEdit = (update) => {
+    setEditError('');
+    setEditing({ id: update.id, planId: update.planId, quantityDone: String(update.quantityDone || ''), cost: String(update.cost || ''), notes: update.notes || '' });
+  };
+  const saveEdit = async (event) => {
+    event.preventDefault();
+    setSaving(true);
+    setEditError('');
+    try {
+      await fetchJson(`/api/monthly-plans/${editing.planId}/reports/${editing.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ quantityDone: Number(editing.quantityDone || 0), cost: Number(editing.cost || 0), notes: editing.notes })
+      });
+      setEditing(null);
+      setOwnReload((value) => value + 1);
+    } catch (error) {
+      setEditError(error.message);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const counts = summary || {};
   const tiles = [
@@ -403,9 +435,33 @@ export default function Home({
         list that pushed the rest of Home off the screen, and each plan still
         holds its full day-by-day record. */}
     {!isWorker && updates.length > 0 && <>
-      <h3 className="home-heading">{t('home.recentUpdates')}</h3>
+      <h3 className="home-heading">{t(isManager ? 'home.myLatestUpdate' : 'home.recentUpdates')}</h3>
       <ul className="update-feed">
-        {(isDirector ? updates.slice(0, 5) : updates).map((update) => <li key={update.id} className="update-row">
+        {updates.slice(0, isManager ? 1 : 5).map((update) => editing?.id === update.id
+          ? <li key={update.id} className="update-row">
+            <form className="update-edit" onSubmit={saveEdit}>
+              <strong>{formatDay(update.date, language)} &middot; {operationName(update.operation, language)}
+                {update.objectiveTitle && <> &middot; {update.objectiveTitle}</>}</strong>
+              <label className="form-field"><span>{t('plan.workDone')}{update.targetUnit && ` (${update.targetUnit})`}</span>
+                <input type="number" min="0" step="any" inputMode="decimal" value={editing.quantityDone}
+                  onChange={(event) => setEditing({ ...editing, quantityDone: event.target.value })} />
+              </label>
+              <label className="form-field"><span>{t('plan.costToday')}</span>
+                <input type="number" min="0" step="0.01" inputMode="decimal" value={editing.cost}
+                  onChange={(event) => setEditing({ ...editing, cost: event.target.value })} />
+              </label>
+              <label className="form-field form-field-wide"><span>{t('plan.dayNotes')}</span>
+                <textarea rows="3" maxLength={4000} value={editing.notes}
+                  onChange={(event) => setEditing({ ...editing, notes: event.target.value })} />
+              </label>
+              {editError && <p className="error-banner" role="alert">{editError}</p>}
+              <div className="button-row">
+                <button className="primary-btn" type="submit" disabled={saving}>{t('action.saveCorrection')}</button>
+                <button className="text-btn" type="button" disabled={saving} onClick={() => setEditing(null)}>{t('action.cancel')}</button>
+              </div>
+            </form>
+          </li>
+          : <li key={update.id} className="update-row">
           <button type="button" className="update-main" onClick={() => onOpenPlan(update.planId)}>
             <span className="update-when">{formatDay(update.date, language)}</span>
             <span className="update-what">
@@ -420,7 +476,9 @@ export default function Home({
             {update.objectivePercent !== null && update.objectivePercent !== undefined
               && <span className="update-percent">{update.objectivePercent}%</span>}
           </button>
-          <small className="update-by">{update.submittedByName}</small>
+          {isManager && update.correctable && update.submittedBy === user.id
+            ? <button className="secondary-btn update-edit-btn" type="button" onClick={() => startEdit(update)}>{t('action.correctDay')}</button>
+            : <small className="update-by">{update.submittedByName}</small>}
         </li>)}
       </ul>
     </>}

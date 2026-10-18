@@ -1003,6 +1003,12 @@ td .operation-checks { display: grid; gap: 0; }
 .update-detail { color: var(--muted); font-size: .85rem; }
 .update-percent { flex: none; color: var(--blue); font-size: .9rem; font-weight: 800; font-variant-numeric: tabular-nums; }
 .update-by { flex: none; color: var(--muted); font-size: .78rem; }
+/* A manager correcting their last day, in place of the row it corrects. */
+.update-edit { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; flex: 1; padding: 10px 6px; }
+.update-edit > strong, .update-edit .form-field-wide, .update-edit .error-banner, .update-edit .button-row { grid-column: 1 / -1; }
+.update-edit .error-banner { margin-top: 0; }
+.update-edit-btn { flex: none; }
+@media (max-width: 640px) { .update-edit { grid-template-columns: 1fr; } }
 
 /* Objective bars on the operation cards, so the Director reads the month's
    commitments at a glance without opening it. */

@@ -802,6 +802,12 @@ router.get('/updates', asyncRoute(async (req, res) => {
     values.push(month);
     scope += `${scope ? ' AND' : ' WHERE'} p.month = $${values.length}::date`;
   }
+  // ?mine=1 is the manager's Home: only the days they recorded themselves,
+  // because the one entry it shows is the one they may still correct.
+  if (req.query.mine === '1') {
+    values.push(req.user.id);
+    scope += `${scope ? ' AND' : ' WHERE'} r.submitted_by = $${values.length}`;
+  }
   values.push(limit);
 
   const updates = await pool.query(
@@ -811,7 +817,17 @@ router.get('/updates', asyncRoute(async (req, res) => {
             o.target_quantity, o.target_unit,
             COALESCE((SELECT SUM(d.quantity_done) FROM plan_daily_reports d
                        WHERE d.objective_id = o.id), 0) AS objective_done,
-            (SELECT COUNT(*) FROM plan_report_evidence e WHERE e.report_id = r.id)::int AS evidence_count
+            (SELECT COUNT(*) FROM plan_report_evidence e WHERE e.report_id = r.id)::int AS evidence_count,
+            r.submitted_by,
+            -- What PUT /:id/reports/:reportId would accept, so the button is
+            -- only drawn where the save can land: the author's latest day on an
+            -- open month whose month-end report is not with the Director.
+            (r.id = (SELECT d.id FROM plan_daily_reports d
+                      WHERE d.plan_id = r.plan_id AND d.submitted_by = r.submitted_by
+                      ORDER BY d.report_date DESC, d.id DESC LIMIT 1)
+              AND p.status <> 'Closed'
+              AND COALESCE((SELECT m.status FROM monthly_reports m WHERE m.plan_id = p.id), '') NOT IN ('Submitted', 'Accepted')
+            ) AS correctable
        FROM plan_daily_reports r
        JOIN monthly_plans p ON p.id = r.plan_id
        LEFT JOIN plan_objectives o ON o.id = r.objective_id
@@ -839,6 +855,8 @@ router.get('/updates', asyncRoute(async (req, res) => {
         cost: round2(Number(row.cost || 0)),
         notes: row.notes || '',
         submittedByName: row.submitted_by_name || '',
+        submittedBy: row.submitted_by ?? null,
+        correctable: Boolean(row.correctable),
         evidenceCount: Number(row.evidence_count || 0),
         objectivePercent: progress.percent,
         objectiveDone: progress.done,
@@ -2159,6 +2177,157 @@ router.get('/:id/reports/:reportId/evidence/:evidenceId/file', asyncRoute(async 
   res.setHeader('Cache-Control', 'private, no-store');
   file.once('error', () => (res.headersSent ? res.destroy() : res.status(500).json({ message: 'The stored file could not be read.' })));
   return file.pipe(res);
+}));
+
+// Correcting the last day recorded. A manager who typed 8 for 0.8 used to have
+// no way back but asking the Director to delete the day. Only the manager who
+// wrote it, only their most recent day on the month (it is the one their Home
+// shows them, and the one a slip is noticed on), and only while the month is
+// open and its month-end report is not with the Director -- once it is, the
+// figures under review must stay the figures that were sent. The date and the
+// objective stay as recorded: moving a day between objectives is a different
+// day. The same target and budget checks as recording it apply, with this
+// day's own old figures taken out of what is already counted.
+router.put('/:id/reports/:reportId', asyncRoute(async (req, res) => {
+  const plan = await loadPlan(req.params.id, req.user);
+  if (!canWorkPlan(req.user, plan) || isAdmin(req.user)) {
+    return res.status(403).json({ message: 'Only the manager who recorded this day can correct it.' });
+  }
+  if (!isPlanOpen(plan)) {
+    return res.status(400).json({ message: 'This month has been closed. Ask the Director to reopen it.' });
+  }
+  const reportId = parseId(req.params.reportId);
+  if (!reportId) return res.status(404).json({ message: 'That daily report was not found.' });
+
+  const payload = req.body || {};
+  if (!validNumber(payload.quantityDone ?? 0)) {
+    return res.status(400).json({ message: 'The work done must be a number that is not negative.' });
+  }
+  if (!validNumber(payload.cost ?? 0)) {
+    return res.status(400).json({ message: 'The cost must be a number that is not negative.' });
+  }
+  const quantityDone = round2(payload.quantityDone ?? 0);
+  const cost = round2(payload.cost ?? 0);
+  const notes = optionalText(payload.notes, 4000);
+  if (!quantityDone && !cost && !notes) {
+    return res.status(400).json({ message: 'Say what was done, what it cost, or leave a note -- an empty report records nothing.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // The month first, then the objective: the same order the report route
+    // locks in, so the two can never wait on each other.
+    const locked = await client.query(
+      `SELECT p.approved_budget, p.status,
+              COALESCE((SELECT SUM(r.cost) FROM plan_daily_reports r WHERE r.plan_id = p.id), 0) AS spent,
+              (SELECT status FROM monthly_reports m WHERE m.plan_id = p.id) AS report_status
+         FROM monthly_plans p WHERE p.id = $1 FOR UPDATE`,
+      [plan.id]
+    );
+    const month = locked.rows[0];
+    if (month.status === 'Closed') {
+      return await refuse(client, res, 400, { message: 'This month has been closed. Ask the Director to reopen it.' });
+    }
+    if (['Submitted', 'Accepted'].includes(month.report_status)) {
+      return await refuse(client, res, 409, { message: 'The month-end report has been sent to the Director, so its days can no longer be changed.' });
+    }
+    const found = await client.query(
+      `SELECT r.*, (r.id = (SELECT d.id FROM plan_daily_reports d
+                             WHERE d.plan_id = r.plan_id AND d.submitted_by = r.submitted_by
+                             ORDER BY d.report_date DESC, d.id DESC LIMIT 1)) AS is_latest
+         FROM plan_daily_reports r WHERE r.id = $1 AND r.plan_id = $2`,
+      [reportId, plan.id]
+    );
+    const day = found.rows[0];
+    if (!day) return await refuse(client, res, 404, { message: 'That daily report was not found.' });
+    if (day.submitted_by !== req.user.id) {
+      return await refuse(client, res, 403, { message: 'Only the manager who recorded this day can correct it.' });
+    }
+    if (!day.is_latest) {
+      return await refuse(client, res, 409, { message: 'Only your most recent day can be corrected.' });
+    }
+    const oldQuantity = round2(Number(day.quantity_done || 0));
+    const oldCost = round2(Number(day.cost || 0));
+
+    if (day.objective_id && quantityDone > oldQuantity) {
+      const lockedObjective = await client.query(
+        `SELECT o.title, o.target_quantity, o.target_unit,
+                COALESCE((SELECT SUM(r.quantity_done) FROM plan_daily_reports r
+                           WHERE r.objective_id = o.id), 0) AS done
+           FROM plan_objectives o WHERE o.id = $1 FOR UPDATE`,
+        [day.objective_id]
+      );
+      const objective = lockedObjective.rows[0];
+      if (objective?.target_quantity !== null && objective?.target_quantity !== undefined) {
+        const remaining = round2(round2(Number(objective.target_quantity)) - round2(Number(objective.done || 0)) + oldQuantity);
+        if (quantityDone > remaining) {
+          return await refuse(client, res, 400, {
+            message: `Only ${remaining} ${objective.target_unit} of "${objective.title}" is left. Reporting ${quantityDone} would take it past the target.`,
+            code: 'OVER_TARGET',
+            remaining
+          });
+        }
+      }
+    }
+    const approved = round2(Number(month.approved_budget || 0));
+    if (cost > oldCost && cents(approved) > 0) {
+      const spentWithout = round2(Number(month.spent || 0) - oldCost);
+      if (!fitsRemaining(cost, approved, spentWithout)) {
+        return await refuse(client, res, 400, {
+          message: OVER_BUDGET_MESSAGE,
+          approvedBudget: approved,
+          alreadySpent: spentWithout,
+          remaining: fromCents(cents(approved) - cents(spentWithout))
+        });
+      }
+    }
+
+    await client.query(
+      'UPDATE plan_daily_reports SET quantity_done = $2, cost = $3, notes = $4 WHERE id = $1',
+      [reportId, quantityDone, cost, notes]
+    );
+    await logPlanHistory(client, plan.id, req.user, [{
+      action: 'Day corrected', field: 'quantityDone',
+      oldValue: oldQuantity, newValue: quantityDone,
+      note: toDateOnly(day.report_date) + (cost !== oldCost ? ` · ${formatUsd(oldCost)} → ${formatUsd(cost)}` : '')
+    }]);
+
+    // A correction can finish a month or unfinish it. Same test as recording a
+    // day, read after the change so it sees the month as it now stands.
+    const totals = await client.query(
+      `SELECT COUNT(*) FILTER (WHERE o.target_quantity IS NOT NULL)::int AS countable,
+              COUNT(*) FILTER (
+                WHERE o.target_quantity IS NOT NULL
+                  AND COALESCE((SELECT SUM(r.quantity_done) FROM plan_daily_reports r
+                                 WHERE r.objective_id = o.id), 0) >= o.target_quantity
+              )::int AS met
+         FROM plan_objectives o WHERE o.plan_id = $1`,
+      [plan.id]
+    );
+    const counts = totals.rows[0];
+    const nextStatus = Number(counts.countable) > 0 && Number(counts.met) === Number(counts.countable) ? 'Completed' : 'In Progress';
+    if (month.status !== nextStatus) {
+      await client.query(
+        `UPDATE monthly_plans
+         SET status = $2::text, started_at = COALESCE(started_at, NOW()),
+             completed_at = CASE WHEN $2::text = 'Completed' THEN NOW() ELSE NULL END,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [plan.id, nextStatus]
+      );
+      await logPlanHistory(client, plan.id, req.user, [
+        { action: 'Status changed', field: 'status', oldValue: month.status, newValue: nextStatus }
+      ]);
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+  res.json(await planDetail(plan.id, req.user));
 }));
 
 // Removing a day is the Director's: it is a financial and a performance record,

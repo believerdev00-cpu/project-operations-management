@@ -793,6 +793,12 @@ router.get('/activities', asyncRoute(async (req, res) => {
 // export cannot show more than the screen does because both come through
 // buildReport.
 router.get('/activities/export', asyncRoute(async (req, res) => {
+  // A manager reads their reports on screen but does not take a copy away: the
+  // exported file is the one that leaves the building, and the Director decided
+  // only they hand it out. Checked before anything is built.
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ message: 'Only the Director can export a report.', code: 'EXPORT_DIRECTOR_ONLY' });
+  }
   const format = String(req.query.format || '').toLowerCase();
   if (!['xlsx', 'pdf'].includes(format)) {
     return res.status(400).json({ message: 'The export format must be xlsx or pdf.' });
