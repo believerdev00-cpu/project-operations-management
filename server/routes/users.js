@@ -288,7 +288,7 @@ router.patch('/:id/assignment', adminOnly('Only the Director can change an assig
 
   const target = existing.rows[0];
   if (target.role === 'super-admin') {
-    return res.status(403).json({ message: 'The Director oversees every area and reports to nobody.' });
+    return res.status(403).json({ message: 'The Director oversees every project and reports to nobody.' });
   }
   if (target.role === 'partner') {
     return res.status(403).json({ message: 'Change an external partner\'s project from External Partners.' });
@@ -332,7 +332,7 @@ router.patch('/:id/assignment', adminOnly('Only the Director can change an assig
     if (!manager.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
     if (!coversAll && !coversEvery(manager.rows[0], operations)) {
       return res.status(400).json({
-        message: 'That manager works in a different area. Move the user to the manager\'s area, or pick a manager from this one.'
+        message: 'That manager works in a different project. Move the user to the manager\'s project, or pick a manager from this one.'
       });
     }
     if (await createsReportingLoop(target.id, managerId)) {

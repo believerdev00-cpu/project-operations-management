@@ -267,7 +267,7 @@ function readObjectives(payload, operation) {
     if (supports) {
       if (!isSupportOperation(operation)) {
         return {
-          error: `"${title}": only a Movement & Facilitation objective says which operation it supports.`
+          error: `"${title}": only a Movement & Facilitation objective says which project it supports.`
         };
       }
       if (!isPrimaryOperation(supports)) {

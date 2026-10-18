@@ -427,7 +427,7 @@ router.post('/comments', asyncRoute(async (req, res) => {
     return res.status(403).json({ message: 'That project is not part of your access.' });
   }
   if (!COMMENT_SUBJECTS.includes(subjectType)) {
-    return res.status(400).json({ message: 'A comment is about the project, an activity or a movement.' });
+    return res.status(400).json({ message: 'A comment is about the project, an activity or a trip.' });
   }
   const subject = subjectType === 'operation' ? null : String(subjectId || '');
   if (subjectType !== 'operation' && (!subject || !(await canSeeSubject(operation, subjectType, subject)))) {

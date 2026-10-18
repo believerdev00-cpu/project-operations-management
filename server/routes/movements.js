@@ -738,7 +738,7 @@ function readRateOverride(body, user) {
 router.put('/:id', asyncRoute(async (req, res) => {
   const existing = await loadMovement(req.params.id, req.user);
   if (!canEdit(req.user, existing)) {
-    return res.status(403).json({ message: 'This movement can no longer be edited by your account.' });
+    return res.status(403).json({ message: 'This trip can no longer be edited by your account.' });
   }
   const payload = readMovementPayload(req.body || {});
   const overrideRate = readRateOverride(req.body, req.user);
@@ -747,7 +747,7 @@ router.put('/:id', asyncRoute(async (req, res) => {
   // Relabelling the currency under them would turn RWF 500,000 into USD 500,000.
   if (payload.currency !== existing.currency
     && (Number(existing.funds_released) > 0 || Number(existing.actual_expense) > 0)) {
-    return res.status(400).json({ message: 'The currency cannot change once funds or expenses are recorded against this movement.' });
+    return res.status(400).json({ message: 'The currency cannot change once funds or expenses are recorded against this trip.' });
   }
   // The estimate is the sum of the cost lines -- except once an approver has
   // decided a different figure. An edit that leaves the lines alone (a typo in
@@ -849,21 +849,21 @@ router.patch('/:id/approval', asyncRoute(async (req, res) => {
     return res.status(400).json({ message: 'The decision must be approve or reject.' });
   }
   if (!existing.approval_required) {
-    return res.status(400).json({ message: 'This movement does not require approval.' });
+    return res.status(400).json({ message: 'This trip does not require approval.' });
   }
   if (existing.approval_status !== 'pending') {
-    return res.status(409).json({ message: `This movement has already been ${existing.approval_status}.` });
+    return res.status(409).json({ message: `This trip has already been ${existing.approval_status}.` });
   }
   if (existing.status === 'Draft') {
-    return res.status(400).json({ message: 'This movement is still a draft and has not been submitted for approval.' });
+    return res.status(400).json({ message: 'This trip is still a draft and has not been submitted for approval.' });
   }
   if (!canApprove(req.user, existing)) {
-    return res.status(403).json({ message: 'Only the person this movement is waiting on can approve or reject it.' });
+    return res.status(403).json({ message: 'Only the person this trip is waiting on can approve or reject it.' });
   }
 
   const rejectionReason = optionalText(payload.rejectionReason ?? payload.reason, 2000);
   if (action === 'reject' && !rejectionReason) {
-    return res.status(400).json({ message: 'Say why this movement is being rejected.' });
+    return res.status(400).json({ message: 'Say why this trip is being rejected.' });
   }
 
   // The approver may revise the facilitation estimate as part of the decision;
@@ -873,7 +873,7 @@ router.patch('/:id/approval', asyncRoute(async (req, res) => {
   let estimatedTotal = round2(existing.cost);
   if (budgetGiven) {
     if (!isAdmin(req.user)) {
-      return res.status(403).json({ message: 'Only the Director can change the budget on a movement.' });
+      return res.status(403).json({ message: 'Only the Director can change the budget on a trip.' });
     }
     if (!validNumber(payload.approvedBudget)) {
       return res.status(400).json({ message: 'The approved budget must be a valid non-negative number.' });
@@ -907,7 +907,7 @@ router.patch('/:id/approval', asyncRoute(async (req, res) => {
     );
     if (!result.rowCount) {
       await safeRollback(client);
-      return res.status(409).json({ message: 'This movement was decided by somebody else a moment ago.' });
+      return res.status(409).json({ message: 'This trip was decided by somebody else a moment ago.' });
     }
     const entries = [];
     if (budgetGiven && estimatedTotal !== round2(existing.cost)) {
@@ -942,13 +942,13 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
   const existing = await loadMovement(req.params.id, req.user);
   const { status } = req.body || {};
   if (!MOVEMENT_STATUSES.includes(status)) {
-    return res.status(400).json({ message: 'Movement status is invalid.' });
+    return res.status(400).json({ message: 'Trip status is invalid.' });
   }
   if (status === existing.status) {
-    return res.status(400).json({ message: `This movement is already ${status}.` });
+    return res.status(400).json({ message: `This trip is already ${status}.` });
   }
   if (!(STATUS_FLOW[existing.status] || []).includes(status)) {
-    return res.status(400).json({ message: `A ${existing.status} movement cannot move straight to ${status}.` });
+    return res.status(400).json({ message: `A ${existing.status} trip cannot move straight to ${status}.` });
   }
 
   // The person who raised it may send, withdraw or reopen their own request.
@@ -966,13 +966,13 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
   if (['Approved', 'Rejected'].includes(status) && decisionOpen(existing)) {
     return res.status(409).json({
       code: 'DECISION_PENDING',
-      message: 'This movement is waiting for a decision. Approve or reject it with the decision buttons instead.'
+      message: 'This trip is waiting for a decision. Approve or reject it with the decision buttons instead.'
     });
   }
   // Refusing or cancelling has to say why, or the person who raised it has
   // nothing to act on.
   if (['Rejected', 'Cancelled'].includes(status) && !requiredText(req.body.reason)) {
-    return res.status(400).json({ message: 'Say why when you reject or cancel a movement.' });
+    return res.status(400).json({ message: 'Say why when you reject or cancel a trip.' });
   }
 
   const fields = ['status = $2', 'updated_at = NOW()'];
@@ -1038,7 +1038,7 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
     );
     if (!result.rowCount) {
       await safeRollback(client);
-      return res.status(409).json({ message: 'This movement changed a moment ago. Refresh and try again.' });
+      return res.status(409).json({ message: 'This trip changed a moment ago. Refresh and try again.' });
     }
     const after = result.rows[0];
     const entries = [{ action: 'Status changed', field: 'status', oldValue: existing.status, newValue: status }];
@@ -1078,7 +1078,7 @@ router.patch('/:id/visibility', asyncRoute(async (req, res) => {
   requireAdmin(req.user, 'change what external partners can see');
   const { externallyVisible } = req.body || {};
   if (typeof externallyVisible !== 'boolean') {
-    return res.status(400).json({ message: 'Say whether this movement should be visible to external partners.' });
+    return res.status(400).json({ message: 'Say whether this trip should be visible to external partners.' });
   }
 
   const client = await pool.connect();
@@ -1109,7 +1109,7 @@ router.patch('/:id/finance', asyncRoute(async (req, res) => {
   const existing = await loadMovement(req.params.id, req.user);
   requireAdmin(req.user, 'record funds and final expenditure');
   if (!FINANCE_STATUSES.includes(existing.status)) {
-    return res.status(409).json({ message: `Money can only be recorded on an approved movement, not a ${existing.status} one.` });
+    return res.status(409).json({ message: `Money can only be recorded on an approved trip, not a ${existing.status} one.` });
   }
 
   const fields = ['updated_at = NOW()'];
@@ -1167,13 +1167,13 @@ router.delete('/:id', asyncRoute(async (req, res) => {
   // Deleting took the whole trail with it by cascade, even on a completed trip
   // with money released against it.
   if (!DELETABLE_STATUSES.includes(existing.status) || Number(existing.funds_released) || Number(existing.actual_expense)) {
-    return res.status(409).json({ message: 'This movement is under way or has money recorded against it, so it cannot be deleted. Cancel it instead.' });
+    return res.status(409).json({ message: 'This trip is under way or has money recorded against it, so it cannot be deleted. Cancel it instead.' });
   }
 
   const files = await pool.query('SELECT stored_name FROM movement_evidence WHERE movement_id = $1', [existing.id]);
   const result = await pool.query('DELETE FROM movements WHERE id = $1 RETURNING *', [existing.id]);
   await Promise.all(files.rows.map((file) => deleteFile(EVIDENCE_FOLDER, file.stored_name)));
-  res.json({ message: 'Movement deleted successfully.', deletedMovement: mapMovement(result.rows[0]) });
+  res.json({ message: 'Trip deleted successfully.', deletedMovement: mapMovement(result.rows[0]) });
 }));
 
 // ---- Evidence (section 8) -------------------------------------------------
@@ -1189,7 +1189,7 @@ router.get('/:id/evidence', asyncRoute(async (req, res) => {
 const authorizeEvidenceUpload = asyncRoute(async (req, res, next) => {
   const existing = await loadMovement(req.params.id, req.user);
   if (!isAdmin(req.user) && !((hasFullScope(req.user) || worksIn(req.user, TRIPS_OPERATION)) && existing.created_by === req.user.id)) {
-    return res.status(403).json({ message: 'You cannot attach evidence to this movement.' });
+    return res.status(403).json({ message: 'You cannot attach evidence to this trip.' });
   }
   req.movement = existing;
   next();

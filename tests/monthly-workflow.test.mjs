@@ -569,7 +569,7 @@ try {
   });
   check('an expense over the remaining budget is blocked', overspend.status === 400, String(overspend.status));
   check('  with the exact message the specification asks for',
-    overspend.body.message === 'Expense exceeds the remaining approved budget. Submit a budget change request to Admin.',
+    overspend.body.message === 'Expense exceeds the remaining approved budget. Ask the Director for a budget change.',
     overspend.body.message);
   check('  and reports the remaining balance', overspend.body.remaining === 150, String(overspend.body.remaining));
 

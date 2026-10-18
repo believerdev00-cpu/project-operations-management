@@ -125,7 +125,7 @@ export function activityRemaining(approvedBudget, spent) {
 // Section 8. The message is the one the specification asks for, word for word,
 // because it is what tells the manager what to do next.
 export const OVER_BUDGET_MESSAGE =
-  'Expense exceeds the remaining approved budget. Submit a budget change request to Admin.';
+  'Expense exceeds the remaining approved budget. Ask the Director for a budget change.';
 
 // Whether a spend fits inside what is left on the activity. Everything is in
 // cents, so a spend of exactly the remaining budget is allowed and a spend one
