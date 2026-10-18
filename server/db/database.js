@@ -363,36 +363,28 @@ export async function initDatabase() {
         PRIMARY KEY (manager_id, sector)
       )
     `);
-    // Every manager that predates the table keeps exactly the operation it had.
-    await pool.query(`
-      INSERT INTO manager_operations (manager_id, sector)
-      SELECT id, sector FROM users WHERE role = 'manager' AND sector IS NOT NULL AND covers_all_sectors = FALSE
-      ON CONFLICT DO NOTHING
-    `);
     // The three-managers-per-operation limit counted users.sector alone, so a
     // fourth manager could join Mining as somebody's second operation. It now
-    // counts every manager holding the operation by either route, and the same
-    // function guards both tables.
+    // counts every manager holding the operation by either route.
+    //
+    // Each table has its OWN function. They used to share
+    // enforce_manager_sector_limit, but the first-boot block above rewrites that
+    // function in its users-only form on every migration, so on any database
+    // migrated before, the backfill below fired the manager_operations trigger
+    // with a body that reads NEW.role -- "record "new" has no field "role"" --
+    // and the Vercel build failed on the live data while an empty test
+    // database passed. Nothing earlier in this file touches the function below.
+    const countHolders = (idExpr, sectorExpr) => `
+      (SELECT COUNT(*) FROM users u
+        WHERE u.role = 'manager' AND u.id <> ${idExpr}
+          AND (u.sector = ${sectorExpr}
+               OR EXISTS (SELECT 1 FROM manager_operations mo
+                           WHERE mo.manager_id = u.id AND mo.sector = ${sectorExpr}))) >= 3`;
     await pool.query(`
-      CREATE OR REPLACE FUNCTION enforce_manager_sector_limit()
+      CREATE OR REPLACE FUNCTION enforce_manager_operations_limit()
       RETURNS trigger AS $$
-      DECLARE
-        target_id INTEGER;
-        target_sector VARCHAR(50);
       BEGIN
-        IF TG_TABLE_NAME = 'manager_operations' THEN
-          target_id := NEW.manager_id;
-          target_sector := NEW.sector;
-        ELSIF NEW.role = 'manager' THEN
-          target_id := COALESCE(NEW.id, 0);
-          target_sector := NEW.sector;
-        END IF;
-        IF target_sector IS NOT NULL AND
-          (SELECT COUNT(*) FROM users u
-            WHERE u.role = 'manager' AND u.id <> target_id
-              AND (u.sector = target_sector
-                   OR EXISTS (SELECT 1 FROM manager_operations mo
-                               WHERE mo.manager_id = u.id AND mo.sector = target_sector))) >= 3 THEN
+        IF ${countHolders('NEW.manager_id', 'NEW.sector')} THEN
           RAISE EXCEPTION 'A sector cannot have more than three managers';
         END IF;
         RETURN NEW;
@@ -401,7 +393,26 @@ export async function initDatabase() {
     `);
     await pool.query('DROP TRIGGER IF EXISTS manager_operations_limit ON manager_operations');
     await pool.query(`CREATE TRIGGER manager_operations_limit BEFORE INSERT OR UPDATE ON manager_operations
-      FOR EACH ROW EXECUTE FUNCTION enforce_manager_sector_limit()`);
+      FOR EACH ROW EXECUTE FUNCTION enforce_manager_operations_limit()`);
+    // Every manager that predates the table keeps exactly the operation it had.
+    // After the trigger, so a backfill row is checked like any other.
+    await pool.query(`
+      INSERT INTO manager_operations (manager_id, sector)
+      SELECT id, sector FROM users WHERE role = 'manager' AND sector IS NOT NULL AND covers_all_sectors = FALSE
+      ON CONFLICT DO NOTHING
+    `);
+    // The users trigger keeps its own function, now counting both routes.
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION enforce_manager_sector_limit()
+      RETURNS trigger AS $$
+      BEGIN
+        IF NEW.role = 'manager' AND NEW.sector IS NOT NULL AND ${countHolders('COALESCE(NEW.id, 0)', 'NEW.sector')} THEN
+          RAISE EXCEPTION 'A sector cannot have more than three managers';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
 
     // ---- a partner's comments to the Director ---------------------------------
     //
