@@ -398,11 +398,14 @@ export default function Home({
     {/* WHAT HAPPENED. The Director does not ask a manager how the month is
         going: every day a manager records appears here, newest first, with the
         objective it counted towards and where that objective now stands. A
-        manager sees the same feed for their own operation. */}
+        manager sees the same feed for their own operation. The Director gets
+        only the five newest: across every operation the feed ran to a long
+        list that pushed the rest of Home off the screen, and each plan still
+        holds its full day-by-day record. */}
     {!isWorker && updates.length > 0 && <>
       <h3 className="home-heading">{t('home.recentUpdates')}</h3>
       <ul className="update-feed">
-        {updates.map((update) => <li key={update.id} className="update-row">
+        {(isDirector ? updates.slice(0, 5) : updates).map((update) => <li key={update.id} className="update-row">
           <button type="button" className="update-main" onClick={() => onOpenPlan(update.planId)}>
             <span className="update-when">{formatDay(update.date, language)}</span>
             <span className="update-what">
