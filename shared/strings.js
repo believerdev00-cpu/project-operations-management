@@ -614,6 +614,8 @@ const STRINGS = {
   'portal.theWholeOperation': { en: 'The project as a whole', rw: 'Umushinga muri rusange', fr: 'Le projet dans son ensemble', sw: 'Mradi kwa ujumla' },
   'portal.yourComment': { en: 'Your comment', rw: 'Igitekerezo cyawe', fr: 'Votre commentaire', sw: 'Maoni yako' },
   'portal.sendToDirector': { en: 'Send to the Director', rw: 'Ohereza ku Muyobozi', fr: 'Envoyer au Directeur', sw: 'Tuma kwa Mkurugenzi' },
+  'portal.comment': { en: 'Comment', rw: 'Tanga igitekerezo', fr: 'Commenter', sw: 'Toa maoni' },
+  'portal.commentSent': { en: 'Sent to the Director. Their answer will appear under Messages.', rw: 'Byoherejwe ku Muyobozi Mukuru. Igisubizo cye kizagaragara muri Ubutumwa.', fr: 'Envoyé au Directeur. Sa réponse apparaîtra dans Messages.', sw: 'Imetumwa kwa Mkurugenzi. Jibu lake litaonekana kwenye Ujumbe.' },
   'portal.you': { en: 'You', rw: 'Wowe', fr: 'Vous', sw: 'Wewe' },
   'portal.replyPlaceholder': { en: 'Write a reply', rw: 'Andika igisubizo', fr: 'Écrire une réponse', sw: 'Andika jibu' },
   'portal.reply': { en: 'Reply', rw: 'Subiza', fr: 'Répondre', sw: 'Jibu' },

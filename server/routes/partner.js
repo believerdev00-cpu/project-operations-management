@@ -324,7 +324,7 @@ router.get('/updates', asyncRoute(async (req, res) => {
   values.push(safeLimit(req.query.limit, 25, 100));
 
   const result = await pool.query(
-    `SELECT h.id, h.action, h.new_value, h.created_at, a.activity, a.sector, a.status
+    `SELECT h.id, h.action, h.new_value, h.created_at, a.id AS activity_id, a.activity, a.sector, a.status
      FROM activity_history h
      JOIN activities a ON a.id = h.activity_id
      WHERE ${where}
@@ -336,6 +336,8 @@ router.get('/updates', asyncRoute(async (req, res) => {
 
   res.json(result.rows.map((row) => ({
     id: row.id,
+    // So the partner can comment on the activity the update is about.
+    activityId: row.activity_id,
     activity: row.activity,
     operation: row.sector,
     milestone: row.new_value,

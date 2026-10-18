@@ -343,6 +343,14 @@ td small.justification { max-width: 320px; color: #4a5c70; font-size: .72rem; wh
 .history-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
 .history-list li { padding: 12px 0; border-bottom: 1px solid var(--line); }
 .history-list li:last-child { border-bottom: 0; }
+/* A partner update with its own comment box (PartnerPortal UpdateItem). */
+.partner-update-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.partner-update-head > div { display: grid; gap: 2px; min-width: 0; }
+.partner-update-head > button { flex: none; }
+.partner-update-comment { margin-top: 10px; }
+.partner-update-comment textarea { width: 100%; }
+.partner-update-comment .button-row { margin-top: 8px; }
+.partner-update .field-hint { margin: 6px 0 0; }
 .history-list strong { display: block; color: var(--ink); font-size: .82rem; }
 .history-list span { display: block; margin-top: 3px; color: #34475a; font-size: .78rem; overflow-wrap: anywhere; }
 .history-list small { display: block; margin-top: 4px; color: var(--muted); font-size: .7rem; overflow-wrap: anywhere; }

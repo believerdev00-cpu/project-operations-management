@@ -232,11 +232,9 @@ export default function PartnerPortal({ user, fetchJson, language, t, tab = 'ove
     </>}
 
     {tab === 'updates' && <Panel title={t('portal.recentUpdates')} subtitle={operation}>
-      {updates.length ? <ul className="history-list">{updates.map((update) => <li key={update.id}>
-        <strong>{update.activity}</strong>
-        <span>{t('portal.milestone')}: {t(`status.${update.milestone}`)}</span>
-        <small>{formatDateTime(update.at, language)}</small>
-      </li>)}</ul> : <EmptyState t={t}>{t('portal.noUpdates')}</EmptyState>}
+      {updates.length ? <ul className="history-list">{updates.map((update) => <UpdateItem
+        key={update.id} update={update} language={language} t={t} onSend={sendComment} />)}</ul>
+        : <EmptyState t={t}>{t('portal.noUpdates')}</EmptyState>}
     </Panel>}
 
     {tab === 'messages' && <PartnerMessages
@@ -249,6 +247,47 @@ export default function PartnerPortal({ user, fetchJson, language, t, tab = 'ove
       onReply={sendReply}
     />}
   </>;
+}
+
+// One thing that happened, with a comment on it written where it was read. The
+// comment goes to the Director like any other (about this activity, which the
+// API re-checks the partner can see) and the answer comes back under Messages;
+// before this the only way to remark on an update was to go to Messages and
+// find the same activity again in a list.
+function UpdateItem({ update, language, t, onSend }) {
+  const [open, setOpen] = useState(false);
+  const [body, setBody] = useState('');
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (sending || !body.trim()) return;
+    setSending(true);
+    const saved = await onSend({ operation: update.operation, subjectType: 'activity', subjectId: update.activityId, body: body.trim() });
+    setSending(false);
+    if (saved) { setBody(''); setOpen(false); setSent(true); }
+  };
+
+  return <li className="partner-update">
+    <div className="partner-update-head">
+      <div>
+        <strong>{update.activity}</strong>
+        <span>{t('portal.milestone')}: {t(`status.${update.milestone}`)}</span>
+        <small>{operationName(update.operation, language)} · {formatDateTime(update.at, language)}</small>
+      </div>
+      {!open && update.activityId && <button className="secondary-btn" type="button" onClick={() => { setOpen(true); setSent(false); }}>{t('portal.comment')}</button>}
+    </div>
+    {sent && <p className="field-hint" role="status">{t('portal.commentSent')}</p>}
+    {open && <form className="partner-update-comment" onSubmit={submit}>
+      <textarea rows="3" maxLength={2000} aria-label={t('portal.yourComment')} placeholder={t('portal.yourComment')}
+        value={body} onChange={(event) => setBody(event.target.value)} autoFocus />
+      <div className="button-row">
+        <button className="primary-btn" type="submit" disabled={sending || !body.trim()}>{t('portal.sendToDirector')}</button>
+        <button className="text-btn" type="button" disabled={sending} onClick={() => setOpen(false)}>{t('action.cancel')}</button>
+      </div>
+    </form>}
+  </li>;
 }
 
 // Comments to the Director and the Director's answers. Addressed to the

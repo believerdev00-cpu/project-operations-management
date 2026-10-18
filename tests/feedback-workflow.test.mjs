@@ -239,6 +239,18 @@ try {
   const blank = await send(two.token, 'POST', '/api/partner/comments', { operation: 'mining', body: '   ' });
   check('an empty comment is refused', blank.status === 400, String(blank.status));
 
+  // A comment on what happened, from the update itself: the update names its
+  // activity, and that is what the comment is about.
+  await pool.query("UPDATE activities SET approval_status = 'approved', externally_visible = TRUE WHERE id = $1", [activityId]);
+  const partnerUpdates = await api(two.token, '/api/partner/updates?limit=100');
+  const happened = (partnerUpdates.body || []).find((update) => update.activityId === activityId);
+  check('a partner\'s update names the activity it is about', Boolean(happened), partnerUpdates.body);
+  const onUpdate = await send(two.token, 'POST', '/api/partner/comments', {
+    operation: happened?.operation, subjectType: 'activity', subjectId: happened?.activityId, body: 'ZZTEST How many loads are left?'
+  });
+  check('  and the partner comments on it', onUpdate.status === 201 && onUpdate.body.subjectId === activityId, onUpdate.body);
+  await pool.query('UPDATE activities SET externally_visible = FALSE WHERE id = $1', [activityId]);
+
   const inbox = await api(adminToken, '/api/partner-comments');
   const inInbox = (inbox.body.threads || []).find((thread) => thread.id === threadId);
   check('the Director sees it, unread', inbox.status === 200 && inInbox?.unreadByDirector === 1, inInbox);
