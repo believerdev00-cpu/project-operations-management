@@ -1147,9 +1147,17 @@ td .operation-checks { display: grid; gap: 0; }
 .objective-deadline { grid-column: 1 / -1; }
 
 @media (min-width: 761px) {
-  .objective-editor .objective-row { grid-template-columns: 28px minmax(0, 1fr) 90px 120px 170px auto; }
+  /* Target and unit are wide enough for their own placeholders ("How much",
+     "hectares, chickens, trips…"), which were cut off at 90px/120px. */
+  .objective-editor .objective-row { grid-template-columns: 28px minmax(0, 1fr) 110px 190px 170px auto; }
   .objective-deadline { grid-column: auto; }
-  .objective-editor .objective-row:has(.objective-supports) { grid-template-columns: 28px minmax(0, 1fr) 90px 120px 170px auto; }
+  .objective-editor .objective-row:has(.objective-supports) { grid-template-columns: 28px minmax(0, 1fr) 110px 190px 170px auto; }
+  /* Label, input and hint each get a shared row, so the inputs line up. Only the
+     deadline has a hint, and with the row aligned to its bottom edge that hint
+     pushed the deadline's box above every other box in the line. */
+  .objective-editor .objective-row { grid-template-rows: auto auto auto; row-gap: 0; align-items: start; }
+  .objective-editor .objective-row > .form-field { grid-row: span 3; grid-template-rows: subgrid; row-gap: 7px; }
+  .objective-editor .objective-index, .objective-editor .objective-remove { grid-row: 2; }
 }
 @media (max-width: 640px) {
   .manager-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
