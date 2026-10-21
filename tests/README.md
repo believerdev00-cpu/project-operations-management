@@ -54,6 +54,7 @@ The consequences are worth knowing:
   ```sql
   DELETE FROM monthly_plans WHERE month IN ('2099-09-01', '2096-09-01', '2095-04-01');
   DELETE FROM activities WHERE activity LIKE 'ZZTEST %' OR activity LIKE 'TEST %';
+  DELETE FROM notifications WHERE actor_id IN (SELECT id FROM users WHERE username LIKE 'zz-%');
   DELETE FROM users WHERE username LIKE 'zz-%';
   DELETE FROM projects WHERE id LIKE 'ZZ-PRJ-%';
   ```

@@ -71,8 +71,12 @@ async function cleanup() {
        WHERE created_by = $1 OR assigned_to = $1 OR approval_required_from = $1 OR approved_by = $1 OR reviewed_by = $1`,
       [id]
     );
-    // partner_operations, partner_comments and notifications go with the
-    // account (ON DELETE CASCADE).
+    // A partner's comment notifies the real Director, and that row belongs to
+    // the Director: deleting the partner only nulls its actor_id (ON DELETE SET
+    // NULL), so without this every run left two ZZTEST notices in the
+    // Director's bell. Removed by actor before the account goes.
+    await pool.query('DELETE FROM notifications WHERE actor_id = $1', [id]);
+    // partner_operations and partner_comments go with the account (ON DELETE CASCADE).
     await pool.query('DELETE FROM users WHERE id = $1', [id]);
   }
   await removeProject('mining');
