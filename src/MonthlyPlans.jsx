@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BUSINESS_OPERATIONS, PRIMARY_OPERATIONS, isSupportOperation, operationName, worksIn } from '../shared/businessOperations.js';
 import { OTHER_CATEGORY, categoriesForOperation } from '../shared/categories.js';
+import { DAY_COLUMNS } from '../shared/dailyReport.js';
 import { displayLanguage, fill, useI18n } from './i18n.js';
 import { EvidenceList, EvidenceUpload, categoryLabel, trailActionLabel } from './ActivityReview.jsx';
 import { DetailView, Fact, useBusy, useDialog } from './ui.jsx';
@@ -1124,31 +1125,39 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
     {started && canWork && open && !finished && <form className="decision-form day-form" onSubmit={submit}>
       <h3 className="form-section-title">{t('plan.dailyReport')}</h3>
       <p className="field-hint">{t('plan.dailyReportHint')}</p>
+      {/* The fields run in DAY_COLUMNS order under the same headers the plan's
+          day table, the report screen and the exports print (day.* keys), so
+          the sheet the Director downloads reads like the form it was typed
+          into. The wording generated for the objective (objectiveForm.js)
+          stays, as the hint and placeholder under each header rather than as
+          a header of its own. */}
       <div className="form-grid">
-        <label className="form-field"><span>{t('plan.dayDate')}</span>
+        <label className="form-field"><span>{t('day.date')}</span>
           <input required type="date" value={form.date}
             min={`${plan.month}-01`} max={monthEnd(plan.month)}
             onChange={(event) => setForm({ ...form, date: event.target.value })} />
         </label>
-        {/* Which commitment today's work counted towards. Hidden when the month
-            has only one, because there is then nothing to choose. */}
-        {objectives.length > 1 && <label className="form-field form-field-wide"><span>{t('plan.whichObjective')}</span>
-          <select required value={chosenId}
+        {/* Which commitment today's work counted towards. Shown even when the
+            month has only one -- pre-chosen -- so the Activity column is on the
+            form exactly as it is on the export. */}
+        {objectives.length > 0 && <label className="form-field form-field-wide"><span>{t('day.activity')}</span>
+          <select required value={chosenId} disabled={Boolean(only)}
             onChange={(event) => setForm({ ...form, objectiveId: event.target.value, quantityDone: '' })}>
-            <option value="">{t('plan.chooseObjective')}</option>
+            {!only && <option value="">{t('plan.chooseObjective')}</option>}
             {objectives.map((objective) => <option key={objective.id} value={objective.id}
               disabled={objective.complete}>
               {objective.title}{objective.percent === null ? '' : ` (${objective.percent}%)`}
             </option>)}
           </select>
         </label>}
-        {/* The question is the one generated for THIS objective -- "Tonnes
-            extracted today" on the ore, "Inspections completed today" on the
-            inspections -- rather than one wording stretched over every trade.
-            Falls back to the generic label whenever an objective has no form,
-            which is only ever a month written before forms existed. */}
+        <label className="form-field form-field-wide"><span>{t('day.description')}</span>
+          <textarea rows="2" placeholder={shape.notesHint || shape.notesLabel || t('plan.dayNotesHint')} value={form.notes}
+            onChange={(event) => setForm({ ...form, notes: event.target.value })} />
+        </label>
+        {/* The objective's own question -- "Tonnes extracted today" on the ore,
+            "Inspections completed today" on the inspections -- is the hint. */}
         {counted && <label className="form-field">
-          <span>{shape.amountLabel || fill(t('plan.doneToday'), { unit: chosen.targetUnit })}</span>
+          <span>{t('day.quantity')}{chosen.targetUnit && ` (${chosen.targetUnit})`}</span>
           <input type="number" inputMode="decimal" min="0" step={shape.step || 0.01}
             placeholder={shape.placeholder || '0'}
             value={form.quantityDone}
@@ -1163,10 +1172,11 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
                 {amount} {chosen.targetUnit}
               </button>)}
           </div>}
+          {shape.amountLabel && <small className="field-hint">{shape.amountLabel}</small>}
           <small className="field-hint">{fill(t('plan.leftToDo'), { amount: chosen.quantityRemaining, unit: chosen.targetUnit })}</small>
           {shape.amountHint && <small className="field-hint">{shape.amountHint}</small>}
         </label>}
-        <label className="form-field"><span>{t('plan.costToday')}</span>
+        <label className="form-field"><span>{t('day.cost')}</span>
           <input type="number" inputMode="decimal" min="0" step="0.01" placeholder="0"
             value={form.cost}
             onChange={(event) => setForm({ ...form, cost: event.target.value })} />
@@ -1174,22 +1184,19 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
               not cost anything and people expect a form to demand a figure. */}
           <small className="field-hint">{t('plan.costOptional')}</small>
         </label>
-        <label className="form-field form-field-wide"><span>{shape.notesLabel || t('plan.dayNotes')}</span>
-          <textarea rows="2" placeholder={shape.notesHint || t('plan.dayNotesHint')} value={form.notes}
-            onChange={(event) => setForm({ ...form, notes: event.target.value })} />
-        </label>
         {/* The manager's own word for where the work stands -- free text, never
             a list, and never an approval (server: readWorkStatus). */}
-        <label className="form-field"><span>{t('plan.dayStatus')}</span>
+        <label className="form-field"><span>{t('day.status')}</span>
           <input maxLength={100} placeholder={t('plan.dayStatusHint')} value={form.workStatus}
             onChange={(event) => setForm({ ...form, workStatus: event.target.value })} />
         </label>
-        <label className="form-field form-field-wide"><span>{t('plan.dayRemarks')}</span>
+        <label className="form-field form-field-wide"><span>{t('day.remarks')}</span>
           <textarea rows="2" maxLength={4000} placeholder={t('plan.dayRemarksHint')} value={form.remarks}
             onChange={(event) => setForm({ ...form, remarks: event.target.value })} />
         </label>
       </div>
-      <h4 className="form-section-title">{shape.evidenceLabel || t('plan.dayProof')}</h4>
+      <h4 className="form-section-title">{t('day.photos')}</h4>
+      {shape.evidenceLabel && <p className="field-hint">{shape.evidenceLabel}</p>}
       <FilePicker files={proof} onChange={setProof} disabled={busy} />
       <div className="form-submit-bar">
         {overTarget && <p className="form-missing">{fill(t('plan.overTarget'), { amount: chosen.quantityRemaining, unit: chosen.targetUnit })}</p>}
@@ -1203,14 +1210,10 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
     <h3 className="form-section-title">{t(managerView ? 'home.myLatestUpdate' : 'plan.workHistory')}</h3>
     {reports.length ? <>
       <div className="table-wrap"><table className="card-table">
+        {/* The same columns, in the same order, as the form above and the
+            exported report (DAY_COLUMNS). */}
         <thead><tr>
-          <th>{t('plan.dayDate')}</th>
-          {objectives.length > 0 && <th>{t('plan.objectiveColumn')}</th>}
-          <th>{t('plan.workDone')}</th>
-          <th>{t('plan.costToday')}</th>
-          <th>{t('plan.dayNotes')}</th>
-          <th>{t('plan.dayStatus')}</th>
-          <th>{t('plan.dayProof')}</th>
+          {DAY_COLUMNS.map((column) => <th key={column}>{t(`day.${column}`)}</th>)}
           <th>{t('table.actions')}</th>
         </tr></thead>
         {/* Each day shows the commitment it served and that objective's own
@@ -1220,26 +1223,28 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
           const against = objectives.find((objective) => objective.id === report.objectiveId) || null;
           if (editing?.report.id === report.id) {
             const unit = against?.targetUnit || plan.targetUnit;
-            return <tr key={report.id}><td colSpan={objectives.length > 0 ? 8 : 7}>
+            // The date and the activity are fixed once recorded (the route
+            // refuses to move them), so they head the correction, not inputs.
+            return <tr key={report.id}><td colSpan={DAY_COLUMNS.length + 1}>
               <form className="update-edit" onSubmit={saveCorrection}>
                 <strong>{formatDate(report.date, language)}{against && <> &middot; {against.title}</>}</strong>
-                <label className="form-field"><span>{t('plan.workDone')}{unit && ` (${unit})`}</span>
-                  <input type="number" min="0" step="any" inputMode="decimal" value={editing.quantityDone}
-                    onChange={(event) => setEditing({ ...editing, quantityDone: event.target.value })} />
-                </label>
-                <label className="form-field"><span>{t('plan.costToday')}</span>
-                  <input type="number" min="0" step="0.01" inputMode="decimal" value={editing.cost}
-                    onChange={(event) => setEditing({ ...editing, cost: event.target.value })} />
-                </label>
-                <label className="form-field form-field-wide"><span>{t('plan.dayNotes')}</span>
+                <label className="form-field form-field-wide"><span>{t('day.description')}</span>
                   <textarea rows="3" maxLength={4000} value={editing.notes}
                     onChange={(event) => setEditing({ ...editing, notes: event.target.value })} />
                 </label>
-                <label className="form-field"><span>{t('plan.dayStatus')}</span>
+                <label className="form-field"><span>{t('day.quantity')}{unit && ` (${unit})`}</span>
+                  <input type="number" min="0" step="any" inputMode="decimal" value={editing.quantityDone}
+                    onChange={(event) => setEditing({ ...editing, quantityDone: event.target.value })} />
+                </label>
+                <label className="form-field"><span>{t('day.cost')}</span>
+                  <input type="number" min="0" step="0.01" inputMode="decimal" value={editing.cost}
+                    onChange={(event) => setEditing({ ...editing, cost: event.target.value })} />
+                </label>
+                <label className="form-field"><span>{t('day.status')}</span>
                   <input maxLength={100} placeholder={t('plan.dayStatusHint')} value={editing.workStatus}
                     onChange={(event) => setEditing({ ...editing, workStatus: event.target.value })} />
                 </label>
-                <label className="form-field form-field-wide"><span>{t('plan.dayRemarks')}</span>
+                <label className="form-field form-field-wide"><span>{t('day.remarks')}</span>
                   <textarea rows="2" maxLength={4000} value={editing.remarks}
                     onChange={(event) => setEditing({ ...editing, remarks: event.target.value })} />
                 </label>
@@ -1250,22 +1255,24 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
               </form>
             </td></tr>;
           }
+          const none = <span className="muted-cell">&mdash;</span>;
+          const cell = {
+            date: <td key="date" className="card-title-cell"><strong>{formatDate(report.date, language)}</strong>
+              <small>{report.submittedByName}</small></td>,
+            activity: <td key="activity" data-label={t('day.activity')}>{against ? against.title : none}</td>,
+            description: <td key="description" data-label={t('day.description')}>{report.notes || none}</td>,
+            quantity: <td key="quantity" data-label={t('day.quantity')}>{report.quantityDone
+              ? <strong>{report.quantityDone} {against ? against.targetUnit : plan.targetUnit}</strong> : none}</td>,
+            cost: <td key="cost" data-label={t('day.cost')}>{report.cost ? formatUsd(report.cost) : <span className="muted-cell">{t('plan.noCost')}</span>}</td>,
+            status: <td key="status" data-label={t('day.status')}>{report.workStatus || none}</td>,
+            remarks: <td key="remarks" data-label={t('day.remarks')}>{report.remarks || none}</td>,
+            photos: <td key="photos" data-label={t('day.photos')}>{report.evidence?.length
+              ? report.evidence.map((file) => <button key={file.id} type="button" className="text-btn"
+                onClick={() => onOpenFile(file.path)}>{file.originalName}</button>)
+              : none}</td>
+          };
           return <tr key={report.id}>
-          <td className="card-title-cell"><strong>{formatDate(report.date, language)}</strong>
-            <small>{report.submittedByName}</small></td>
-          {objectives.length > 0 && <td data-label={t('plan.objectiveColumn')}>
-            {against ? against.title : <span className="muted-cell">&mdash;</span>}</td>}
-          <td data-label={t('plan.workDone')}>{report.quantityDone
-            ? <strong>{report.quantityDone} {against ? against.targetUnit : plan.targetUnit}</strong>
-            : <span className="muted-cell">&mdash;</span>}</td>
-          <td data-label={t('plan.costToday')}>{report.cost ? formatUsd(report.cost) : <span className="muted-cell">{t('plan.noCost')}</span>}</td>
-          <td data-label={t('plan.dayNotes')}>{report.notes || <span className="muted-cell">&mdash;</span>}
-            {report.remarks && <small className="muted-cell">{t('plan.dayRemarks')}: {report.remarks}</small>}</td>
-          <td data-label={t('plan.dayStatus')}>{report.workStatus || <span className="muted-cell">&mdash;</span>}</td>
-          <td data-label={t('plan.dayProof')}>{report.evidence?.length
-            ? report.evidence.map((file) => <button key={file.id} type="button" className="text-btn"
-              onClick={() => onOpenFile(file.path)}>{file.originalName}</button>)
-            : <span className="muted-cell">&mdash;</span>}</td>
+          {DAY_COLUMNS.map((column) => cell[column])}
           <td className="card-actions">
             {correctable && <button type="button" className="text-btn" disabled={busy} onClick={() => setEditing({
               report, quantityDone: String(report.quantityDone || ''), cost: String(report.cost || ''), notes: report.notes || '',

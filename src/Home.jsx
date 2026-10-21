@@ -441,23 +441,24 @@ export default function Home({
             <form className="update-edit" onSubmit={saveEdit}>
               <strong>{formatDay(update.date, language)} &middot; {operationName(update.operation, language)}
                 {update.objectiveTitle && <> &middot; {update.objectiveTitle}</>}</strong>
-              <label className="form-field"><span>{t('plan.workDone')}{update.targetUnit && ` (${update.targetUnit})`}</span>
-                <input type="number" min="0" step="any" inputMode="decimal" value={editing.quantityDone}
-                  onChange={(event) => setEditing({ ...editing, quantityDone: event.target.value })} />
-              </label>
-              <label className="form-field"><span>{t('plan.costToday')}</span>
-                <input type="number" min="0" step="0.01" inputMode="decimal" value={editing.cost}
-                  onChange={(event) => setEditing({ ...editing, cost: event.target.value })} />
-              </label>
-              <label className="form-field form-field-wide"><span>{t('plan.dayNotes')}</span>
+              {/* Same headers and order as the day form and the exports. */}
+              <label className="form-field form-field-wide"><span>{t('day.description')}</span>
                 <textarea rows="3" maxLength={4000} value={editing.notes}
                   onChange={(event) => setEditing({ ...editing, notes: event.target.value })} />
               </label>
-              <label className="form-field"><span>{t('plan.dayStatus')}</span>
+              <label className="form-field"><span>{t('day.quantity')}{update.targetUnit && ` (${update.targetUnit})`}</span>
+                <input type="number" min="0" step="any" inputMode="decimal" value={editing.quantityDone}
+                  onChange={(event) => setEditing({ ...editing, quantityDone: event.target.value })} />
+              </label>
+              <label className="form-field"><span>{t('day.cost')}</span>
+                <input type="number" min="0" step="0.01" inputMode="decimal" value={editing.cost}
+                  onChange={(event) => setEditing({ ...editing, cost: event.target.value })} />
+              </label>
+              <label className="form-field"><span>{t('day.status')}</span>
                 <input maxLength={100} placeholder={t('plan.dayStatusHint')} value={editing.workStatus}
                   onChange={(event) => setEditing({ ...editing, workStatus: event.target.value })} />
               </label>
-              <label className="form-field form-field-wide"><span>{t('plan.dayRemarks')}</span>
+              <label className="form-field form-field-wide"><span>{t('day.remarks')}</span>
                 <textarea rows="2" maxLength={4000} value={editing.remarks}
                   onChange={(event) => setEditing({ ...editing, remarks: event.target.value })} />
               </label>
@@ -478,7 +479,7 @@ export default function Home({
                 {update.quantityDone > 0
                   ? fill(t('home.updateDid'), { amount: update.quantityDone, unit: update.targetUnit })
                   : (update.notes || t('home.updateNoQuantity'))}
-                {update.workStatus && <> &middot; {t('plan.dayStatus')}: {update.workStatus}</>}
+                {update.workStatus && <> &middot; {t('day.status')}: {update.workStatus}</>}
               </span>
             </span>
             {update.objectivePercent !== null && update.objectivePercent !== undefined

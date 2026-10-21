@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 // layer over it and would pull React into this test for nothing.
 import * as i18n from '../shared/strings.js';
 import * as ops from '../shared/businessOperations.js';
+import { DAY_COLUMNS } from '../shared/dailyReport.js';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -78,6 +79,7 @@ const FAMILIES = {
   'cost.': ['transport', 'fuel', 'accommodation', 'meals', 'handling', 'other'],
   'pmethod.': ['Cash', 'Bank Transfer', 'Mobile Money', 'Cheque', 'Credit', 'Other'],
   'monthly.planStatus.': ['Draft', 'Confirmed', 'In Progress', 'Completed', 'Closed'],
+  'day.': DAY_COLUMNS,
   'monthend.status.': ['Submitted', 'Accepted', 'Returned'],
   // Every event the server can write a notification for (NOTIFICATION_KINDS in
   // server/db/monthlySchema.js) needs a sentence in every language.

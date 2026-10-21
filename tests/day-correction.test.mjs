@@ -7,13 +7,17 @@
 //      and budget checks as recording it, and the month follows the new figure;
 //   3. an older day, somebody else's day, and the Director are refused;
 //   4. once the month-end report is with the Director the day is fixed;
-//   5. a manager cannot export a report; the Director can.
+//   5. a manager cannot export a report; the Director can, and the exported
+//      day sheet carries the day form's own headers in the form's order.
 //
 // Drives the live API against a real database and removes what it creates.
 
 import bcrypt from 'bcryptjs';
 import { pool } from '../server/db/database.js';
 import { directorSession } from './director.mjs';
+import ExcelJS from 'exceljs';
+import { DAY_COLUMNS } from '../shared/dailyReport.js';
+import { translate } from '../shared/strings.js';
 
 const API = process.env.API || 'http://localhost:5000';
 const MONTH = '2097-03';
@@ -127,6 +131,8 @@ try {
   check('  a day with only a status is not empty', statusOnly.status === 200, statusOnly.body);
   const restored = await put(managerA.token, dayPath(second.body.day.id), { quantityDone: 3, cost: 240, workStatus: '', remarks: '' });
   check('  and clearing them is allowed while figures remain', restored.status === 200, restored.body);
+  // Left with a status, for the export check in section 5.
+  await put(managerA.token, dayPath(second.body.day.id), { quantityDone: 3, cost: 240, workStatus: 'Ongoing' });
 
   section('3. Not an older day, not someone else\'s, not the Director');
   const older = await put(managerA.token, dayPath(first.body.day.id), { quantityDone: 1 });
@@ -156,6 +162,19 @@ try {
   }
   const directorExport = await fetch(`${API}/api/reports/activities/export?${query}&format=xlsx`, { headers: { Authorization: `Bearer ${admin}` } });
   check('the Director can', directorExport.status === 200, String(directorExport.status));
+
+  // The exported day sheet has the day form's columns, in its order, under its
+  // headers -- the same DAY_COLUMNS the form and the screens are drawn from.
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(Buffer.from(await directorExport.arrayBuffer()));
+  const daySheet = workbook.getWorksheet(translate('en', 'report.dayByDay'));
+  const headers = daySheet ? daySheet.getRow(1).values.slice(1) : [];
+  const expected = DAY_COLUMNS.map((column) => translate('en', `day.${column}`));
+  check('  the day sheet has the form\'s headers, in order', JSON.stringify(headers) === JSON.stringify(expected), headers);
+  const statusColumn = DAY_COLUMNS.indexOf('status') + 1;
+  const statuses = [];
+  daySheet?.eachRow((row, number) => { if (number > 1) statuses.push(row.getCell(statusColumn).value); });
+  check('  and the manager\'s status is in the Status column', statuses.includes('Ongoing'), statuses);
 } catch (error) {
   failed += 1;
   console.log(`  FAIL  unexpected error -- ${error.stack || error.message}`);

@@ -20,6 +20,7 @@ const MonthlyPlans = lazy(() => import('./MonthlyPlans.jsx'));
 import { LANGUAGES, LanguageContext, displayLanguage, fill, setDisplayLanguage, useI18n, useLanguage, useT } from './i18n.js';
 import { BUSINESS_OPERATIONS, operationName, operationsOf, runsTrips, worksIn } from '../shared/businessOperations.js';
 import { OPERATIONS_WITH_CATEGORIES, OTHER_CATEGORY } from '../shared/categories.js';
+import { DAY_COLUMNS } from '../shared/dailyReport.js';
 import ActivityReview, {
   ACTIVITY_STATUSES, MIN_CORRECTION_NOTE, approvalTone, approverName, categoryLabel,
   deadlineNote, formatDate, statusTone
@@ -3002,29 +3003,29 @@ function ReportBody({ report, busy, sectorLabel, onExport, onPrint, onClose }) {
         {work.days.length > 0 && <>
           <h3 className="form-section-title">{t('report.dayByDay')}</h3>
           <div className="table-wrap"><table className="card-table">
+            {/* The columns and headers of the form the manager typed the day
+                into (DAY_COLUMNS), so the report reads like the form. */}
             <thead><tr>
-              <th>{t('report.date')}</th><th>{t('report.commitment')}</th><th>{t('report.amount')}</th>
-              <th>{t('field.spent')}</th><th>{t('report.photos')}</th><th>{t('report.whatWasWritten')}</th>
-              <th>{t('plan.dayStatus')}</th>
+              {DAY_COLUMNS.map((column) => <th key={column}>{t(`day.${column}`)}</th>)}
             </tr></thead>
-            <tbody>{work.days.map((day) => <tr key={day.id}>
-              <td className="card-title-cell"><strong>{formatDate(day.date)}</strong>
-                {manyMonths && <small className="muted-cell">{sectorLabel(day.operation)}</small>}</td>
-              <td data-label={t('report.commitment')}>{day.objective
-                || <span className="muted-cell">{t('report.notLinked')}</span>}</td>
-              <td data-label={t('report.amount')}>{day.quantity} {day.unit}</td>
-              <td data-label={t('field.spent')}>{day.cost > 0
-                ? formatUsd(day.cost) : <span className="muted-cell">&mdash;</span>}</td>
-              <td data-label={t('report.photos')}>{day.evidenceCount
-                || <span className="muted-cell">0</span>}</td>
-              {/* The manager's own sentence, whole and wrapped. */}
-              <td data-label={t('report.whatWasWritten')} className="report-note-cell">{day.notes
-                || <span className="muted-cell">&mdash;</span>}
-                {day.remarks && <small className="muted-cell">{t('plan.dayRemarks')}: {day.remarks}</small>}</td>
-              {/* The manager's own word, never the Director's decision. */}
-              <td data-label={t('plan.dayStatus')}>{day.workStatus
-                || <span className="muted-cell">&mdash;</span>}</td>
-            </tr>)}</tbody>
+            <tbody>{work.days.map((day) => {
+              const none = <span className="muted-cell">&mdash;</span>;
+              const cell = {
+                date: <td key="date" className="card-title-cell"><strong>{formatDate(day.date)}</strong>
+                  {manyMonths && <small className="muted-cell">{sectorLabel(day.operation)}</small>}</td>,
+                activity: <td key="activity" data-label={t('day.activity')}>{day.objective
+                  || <span className="muted-cell">{t('report.notLinked')}</span>}</td>,
+                // The manager's own sentence, whole and wrapped.
+                description: <td key="description" data-label={t('day.description')} className="report-note-cell">{day.notes || none}</td>,
+                quantity: <td key="quantity" data-label={t('day.quantity')}>{day.quantity} {day.unit}</td>,
+                cost: <td key="cost" data-label={t('day.cost')}>{day.cost > 0 ? formatUsd(day.cost) : none}</td>,
+                // The manager's own word, never the Director's decision.
+                status: <td key="status" data-label={t('day.status')}>{day.workStatus || none}</td>,
+                remarks: <td key="remarks" data-label={t('day.remarks')} className="report-note-cell">{day.remarks || none}</td>,
+                photos: <td key="photos" data-label={t('day.photos')}>{day.evidenceCount || <span className="muted-cell">0</span>}</td>
+              };
+              return <tr key={day.id}>{DAY_COLUMNS.map((column) => cell[column])}</tr>;
+            })}</tbody>
           </table></div>
         </>}
 

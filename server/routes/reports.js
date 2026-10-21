@@ -36,6 +36,7 @@ import { monthStart, objectiveProgress, planProgress } from '../lib/monthly.js';
 // that could not be read in Kinyarwanda, French or Kiswahili.
 import { fill, knownLanguage, translate } from '../../shared/strings.js';
 import { operationName } from '../../shared/businessOperations.js';
+import { DAY_COLUMNS } from '../../shared/dailyReport.js';
 
 const router = express.Router();
 
@@ -1116,33 +1117,34 @@ async function buildWorkbook(report, language = 'en') {
 
   if (work.days.length) {
     const daily = workbook.addWorksheet(sheetName(t('report.dayByDay')));
-    daily.columns = [
-      { header: t('report.date'), key: 'date', width: 20 },
-      { header: t('report.operation'), key: 'operation', width: 24 },
-      { header: t('report.commitment'), key: 'objective', width: 38 },
-      { header: t('report.amount'), key: 'quantity', width: 12 },
-      { header: t('export.unit'), key: 'unit', width: 14 },
-      { header: `${t('export.cost')} (USD)`, key: 'cost', width: 14 },
-      { header: t('report.photos'), key: 'photos', width: 9 },
-      { header: t('report.whatWasWritten'), key: 'notes', width: 60 },
-      { header: t('plan.dayStatus'), key: 'workStatus', width: 24 },
-      { header: t('plan.dayRemarks'), key: 'remarks', width: 40 }
-    ];
+    // The columns of the day form, in its order and under its headers
+    // (DAY_COLUMNS, `day.*`), so the sheet reads like the form the manager
+    // typed into. Quantity stays a number -- the unit is in its cell format,
+    // not in the value -- so the column can still be summed.
+    const SHEET_COLUMN = {
+      date: { width: 22 }, activity: { width: 38 }, description: { width: 60 }, quantity: { width: 16 },
+      cost: { width: 14 }, status: { width: 24 }, remarks: { width: 40 }, photos: { width: 9 }
+    };
+    daily.columns = DAY_COLUMNS.map((column) => ({ header: t(`day.${column}`), key: column, ...SHEET_COLUMN[column] }));
     headerRow(daily, 1);
+    const many = work.months.length > 1;
     for (const day of work.days) {
-      daily.addRow({
+      const row = daily.addRow({
         date: dayInWords(day.date, language),
-        operation: operation(day.operation),
-        objective: day.objective || t('report.notLinked'),
+        // Across several operations the activity says whose it was, as the PDF does.
+        activity: `${many ? `${operation(day.operation)} — ` : ''}${day.objective || t('report.notLinked')}`,
+        description: day.notes,
         quantity: day.quantity,
-        unit: day.unit,
         cost: day.cost,
-        photos: day.evidenceCount,
-        notes: day.notes,
-        workStatus: day.workStatus,
-        remarks: day.remarks
+        status: day.workStatus,
+        remarks: day.remarks,
+        photos: day.evidenceCount
       });
-      daily.getCell(`F${daily.rowCount}`).numFmt = MONEY;
+      row.getCell('cost').numFmt = MONEY;
+      if (day.unit) row.getCell('quantity').numFmt = `#,##0.## "${day.unit.replace(/"/g, '')}"`;
+      for (const key of ['activity', 'description', 'remarks']) {
+        row.getCell(key).alignment = { wrapText: true, vertical: 'top' };
+      }
     }
   }
 
@@ -1487,43 +1489,57 @@ function writePdf(report, stream, language = 'en') {
 
   // ---- the day-by-day record ----------------------------------------------
   //
-  // What the managers actually wrote down, in date order, grouped under each
-  // day so one date is read once instead of once per line.
+  // What the managers actually wrote down, in date order, as a table with the
+  // day form's own columns and headers (DAY_COLUMNS) -- so the printed page
+  // reads like the form the day was typed into. Every cell wraps: nothing is
+  // clipped or ellipsed, because these sentences are what a report exists to
+  // carry. A row too tall for what is left of the page starts a new page, and
+  // the header row is drawn again at the top of it.
   if (work.days.length) {
     section(t('report.dayByDay'));
-    let currentDate = null;
+    const share = { date: 60, activity: 74, description: 104, quantity: 46, cost: 50, status: 52, remarks: 77, photos: 40 };
+    const scale = width / DAY_COLUMNS.reduce((sum, column) => sum + share[column], 0);
+    const columns = DAY_COLUMNS.map((column) => ({ column, width: share[column] * scale }));
+    const PAD = 3;
+    const many = work.months.length > 1;
+    const drawRow = (cells, { bold = false, fill = null } = {}) => {
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(7.5);
+      const height = Math.max(...columns.map(({ column, width: cellWidth }) =>
+        doc.heightOfString(cells[column] || ' ', { width: cellWidth - PAD * 2 }))) + PAD * 2;
+      const top = doc.y;
+      if (fill) doc.rect(left, top, width, height).fillColor(fill).fill();
+      let x = left;
+      for (const { column, width: cellWidth } of columns) {
+        doc.fillColor(INK)
+          .text(cells[column] || '', x + PAD, top + PAD, { width: cellWidth - PAD * 2 });
+        x += cellWidth;
+      }
+      doc.moveTo(left, top + height).lineTo(left + width, top + height).strokeColor('#dfe7ef').lineWidth(0.5).stroke();
+      doc.y = top + height;
+      return height;
+    };
+    const headers = Object.fromEntries(DAY_COLUMNS.map((column) => [column, t(`day.${column}`)]));
+    const header = () => drawRow(headers, { bold: true, fill: '#eef3f8' });
+    header();
     for (const entry of work.days) {
-      room(40);
-      if (entry.date !== currentDate) {
-        currentDate = entry.date;
-        doc.moveDown(0.25);
-        doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK).text(day(entry.date), left, doc.y, { width });
-        doc.moveDown(0.15);
-      }
-      const what = [`${entry.quantity} ${entry.unit}`.trim()];
-      if (entry.cost > 0) what.push(usd(entry.cost));
-      if (entry.evidenceCount) what.push(w('report.photosCount', { count: entry.evidenceCount }));
-      // The manager's typed status, labelled so it never reads as a decision.
-      if (entry.workStatus) what.push(`${t('plan.dayStatus')}: ${entry.workStatus}`);
-      doc.font('Helvetica').fontSize(9).fillColor(INK).text(
-        `${work.months.length > 1 ? `${operation(entry.operation)} — ` : ''}${entry.objective || t('report.notLinked')}`
-        + `   ·   ${what.join('   ·   ')}`,
-        left + 12, doc.y, { width: width - 12 }
-      );
-      // The manager's own words, left whole: wrapped, never clipped. These are
-      // the sentences a report exists to carry.
-      if (entry.notes) {
-        doc.font('Helvetica-Oblique').fontSize(8.5).fillColor(QUIET)
-          .text(entry.notes, left + 12, doc.y, { width: width - 12 });
-        doc.fillColor(INK);
-      }
-      if (entry.remarks) {
-        doc.font('Helvetica-Oblique').fontSize(8.5).fillColor(QUIET)
-          .text(`${t('plan.dayRemarks')}: ${entry.remarks}`, left + 12, doc.y, { width: width - 12 });
-        doc.fillColor(INK);
-      }
-      doc.moveDown(0.35);
+      const cells = {
+        date: day(entry.date),
+        activity: `${many ? `${operation(entry.operation)} — ` : ''}${entry.objective || t('report.notLinked')}`,
+        description: entry.notes,
+        quantity: `${entry.quantity} ${entry.unit}`.trim(),
+        cost: entry.cost > 0 ? usd(entry.cost) : '—',
+        status: entry.workStatus,
+        remarks: entry.remarks,
+        photos: String(entry.evidenceCount || 0)
+      };
+      doc.font('Helvetica').fontSize(7.5);
+      const needed = Math.max(...columns.map(({ column, width: cellWidth }) =>
+        doc.heightOfString(cells[column] || ' ', { width: cellWidth - PAD * 2 }))) + PAD * 2;
+      if (doc.y + needed > bottom) { doc.addPage(); header(); }
+      drawRow(cells);
     }
+    doc.font('Helvetica').fontSize(9.5).fillColor(INK);
+    doc.x = left;
   }
 
   // ---- the activity register, when there is one ---------------------------
