@@ -107,6 +107,27 @@ try {
   const empty = await put(managerA.token, dayPath(second.body.day.id), { quantityDone: 0, cost: 0, notes: '' });
   check('an empty correction is refused', empty.status === 400, empty.body);
 
+  // Status and remarks: the manager's own words, saved with the day, and left
+  // alone by a correction that does not send them (a page opened before the
+  // fields existed must not blank them).
+  const withStatus = await put(managerA.token, dayPath(second.body.day.id), {
+    quantityDone: 3, cost: 240, workStatus: '  Waiting\nfor the truck ', remarks: 'Road closed by rain.'
+  });
+  check('a correction saves status and remarks', withStatus.status === 200, withStatus.body);
+  const feedStatus = await api(managerA.token, '/api/monthly-plans/updates?limit=1&mine=1');
+  const latest = feedStatus.body.updates?.[0] || {};
+  check('  status is one line, trimmed', latest.workStatus === 'Waiting for the truck', latest);
+  check('  remarks come back as written', latest.remarks === 'Road closed by rain.', latest);
+  const keepsStatus = await put(managerA.token, dayPath(second.body.day.id), { quantityDone: 3, cost: 240 });
+  const feedKept = await api(managerA.token, '/api/monthly-plans/updates?limit=1&mine=1');
+  check('  a correction that omits them keeps them', keepsStatus.status === 200
+    && feedKept.body.updates?.[0]?.workStatus === 'Waiting for the truck'
+    && feedKept.body.updates?.[0]?.remarks === 'Road closed by rain.', feedKept.body.updates);
+  const statusOnly = await put(managerA.token, dayPath(second.body.day.id), { quantityDone: 0, cost: 0, notes: '' });
+  check('  a day with only a status is not empty', statusOnly.status === 200, statusOnly.body);
+  const restored = await put(managerA.token, dayPath(second.body.day.id), { quantityDone: 3, cost: 240, workStatus: '', remarks: '' });
+  check('  and clearing them is allowed while figures remain', restored.status === 200, restored.body);
+
   section('3. Not an older day, not someone else\'s, not the Director');
   const older = await put(managerA.token, dayPath(first.body.day.id), { quantityDone: 1 });
   check('an older day is refused', older.status === 409, older.body);

@@ -137,7 +137,8 @@ export default function Home({
   const [saving, setSaving] = useState(false);
   const startEdit = (update) => {
     setEditError('');
-    setEditing({ id: update.id, planId: update.planId, quantityDone: String(update.quantityDone || ''), cost: String(update.cost || ''), notes: update.notes || '' });
+    setEditing({ id: update.id, planId: update.planId, quantityDone: String(update.quantityDone || ''), cost: String(update.cost || ''), notes: update.notes || '',
+      workStatus: update.workStatus || '', remarks: update.remarks || '' });
   };
   const saveEdit = async (event) => {
     event.preventDefault();
@@ -146,7 +147,8 @@ export default function Home({
     try {
       await fetchJson(`/api/monthly-plans/${editing.planId}/reports/${editing.id}`, {
         method: 'PUT',
-        body: JSON.stringify({ quantityDone: Number(editing.quantityDone || 0), cost: Number(editing.cost || 0), notes: editing.notes })
+        body: JSON.stringify({ quantityDone: Number(editing.quantityDone || 0), cost: Number(editing.cost || 0), notes: editing.notes,
+          workStatus: editing.workStatus, remarks: editing.remarks })
       });
       setEditing(null);
       setOwnReload((value) => value + 1);
@@ -451,6 +453,14 @@ export default function Home({
                 <textarea rows="3" maxLength={4000} value={editing.notes}
                   onChange={(event) => setEditing({ ...editing, notes: event.target.value })} />
               </label>
+              <label className="form-field"><span>{t('plan.dayStatus')}</span>
+                <input maxLength={100} placeholder={t('plan.dayStatusHint')} value={editing.workStatus}
+                  onChange={(event) => setEditing({ ...editing, workStatus: event.target.value })} />
+              </label>
+              <label className="form-field form-field-wide"><span>{t('plan.dayRemarks')}</span>
+                <textarea rows="2" maxLength={4000} value={editing.remarks}
+                  onChange={(event) => setEditing({ ...editing, remarks: event.target.value })} />
+              </label>
               {editError && <p className="error-banner" role="alert">{editError}</p>}
               <div className="button-row">
                 <button className="primary-btn" type="submit" disabled={saving}>{t('action.saveCorrection')}</button>
@@ -468,6 +478,7 @@ export default function Home({
                 {update.quantityDone > 0
                   ? fill(t('home.updateDid'), { amount: update.quantityDone, unit: update.targetUnit })
                   : (update.notes || t('home.updateNoQuantity'))}
+                {update.workStatus && <> &middot; {t('plan.dayStatus')}: {update.workStatus}</>}
               </span>
             </span>
             {update.objectivePercent !== null && update.objectivePercent !== undefined

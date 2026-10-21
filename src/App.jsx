@@ -3005,6 +3005,7 @@ function ReportBody({ report, busy, sectorLabel, onExport, onPrint, onClose }) {
             <thead><tr>
               <th>{t('report.date')}</th><th>{t('report.commitment')}</th><th>{t('report.amount')}</th>
               <th>{t('field.spent')}</th><th>{t('report.photos')}</th><th>{t('report.whatWasWritten')}</th>
+              <th>{t('plan.dayStatus')}</th>
             </tr></thead>
             <tbody>{work.days.map((day) => <tr key={day.id}>
               <td className="card-title-cell"><strong>{formatDate(day.date)}</strong>
@@ -3018,6 +3019,10 @@ function ReportBody({ report, busy, sectorLabel, onExport, onPrint, onClose }) {
                 || <span className="muted-cell">0</span>}</td>
               {/* The manager's own sentence, whole and wrapped. */}
               <td data-label={t('report.whatWasWritten')} className="report-note-cell">{day.notes
+                || <span className="muted-cell">&mdash;</span>}
+                {day.remarks && <small className="muted-cell">{t('plan.dayRemarks')}: {day.remarks}</small>}</td>
+              {/* The manager's own word, never the Director's decision. */}
+              <td data-label={t('plan.dayStatus')}>{day.workStatus
                 || <span className="muted-cell">&mdash;</span>}</td>
             </tr>)}</tbody>
           </table></div>

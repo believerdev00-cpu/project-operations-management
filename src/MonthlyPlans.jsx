@@ -981,7 +981,7 @@ function planTone(status) {
 // a day of clearing by hand costs no money and is still a day's work.
 function MonthWorkspace({ plan, objectives = [], reports: allReports, t, language, busy, canWork, onStart, onReport, onRemoveReport, onCorrectReport, userId, reportStatus, onUploadProof, onOpenFile }) {
   const today = todayLocal();
-  const blank = { date: inMonth(today, plan.month), objectiveId: '', quantityDone: '', cost: '', notes: '' };
+  const blank = { date: inMonth(today, plan.month), objectiveId: '', quantityDone: '', cost: '', notes: '', workStatus: '', remarks: '' };
   const [form, setForm] = useState(blank);
   const [proof, setProof] = useState([]);
   const [editing, setEditing] = useState(null);
@@ -1003,7 +1003,9 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
     const saved = await onCorrectReport(editing.report, {
       quantityDone: editing.quantityDone === '' ? 0 : Number(editing.quantityDone),
       cost: editing.cost === '' ? 0 : Number(editing.cost),
-      notes: editing.notes
+      notes: editing.notes,
+      workStatus: editing.workStatus,
+      remarks: editing.remarks
     });
     if (saved) setEditing(null);
   };
@@ -1030,7 +1032,9 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
   // objective is chosen yet, so every read below falls back to the generic
   // wording rather than needing a guard of its own.
   const shape = chosen?.form || {};
-  const nothingTyped = !form.quantityDone && !form.cost && !form.notes.trim();
+  // Same test as the server's empty-day refusal: any one field is a day.
+  const nothingTyped = !form.quantityDone && !form.cost && !form.notes.trim()
+    && !form.workStatus.trim() && !form.remarks.trim();
 
   const submit = async (event) => {
     event.preventDefault();
@@ -1039,7 +1043,9 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
       objectiveId: chosen ? chosen.id : undefined,
       quantityDone: form.quantityDone === '' ? 0 : Number(form.quantityDone),
       cost: form.cost === '' ? 0 : Number(form.cost),
-      notes: form.notes
+      notes: form.notes,
+      workStatus: form.workStatus,
+      remarks: form.remarks
     }, proof);
     // The date and the objective are kept: a manager writing up several days at
     // once is usually still on the same commitment.
@@ -1172,6 +1178,16 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
           <textarea rows="2" placeholder={shape.notesHint || t('plan.dayNotesHint')} value={form.notes}
             onChange={(event) => setForm({ ...form, notes: event.target.value })} />
         </label>
+        {/* The manager's own word for where the work stands -- free text, never
+            a list, and never an approval (server: readWorkStatus). */}
+        <label className="form-field"><span>{t('plan.dayStatus')}</span>
+          <input maxLength={100} placeholder={t('plan.dayStatusHint')} value={form.workStatus}
+            onChange={(event) => setForm({ ...form, workStatus: event.target.value })} />
+        </label>
+        <label className="form-field form-field-wide"><span>{t('plan.dayRemarks')}</span>
+          <textarea rows="2" maxLength={4000} placeholder={t('plan.dayRemarksHint')} value={form.remarks}
+            onChange={(event) => setForm({ ...form, remarks: event.target.value })} />
+        </label>
       </div>
       <h4 className="form-section-title">{shape.evidenceLabel || t('plan.dayProof')}</h4>
       <FilePicker files={proof} onChange={setProof} disabled={busy} />
@@ -1193,6 +1209,7 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
           <th>{t('plan.workDone')}</th>
           <th>{t('plan.costToday')}</th>
           <th>{t('plan.dayNotes')}</th>
+          <th>{t('plan.dayStatus')}</th>
           <th>{t('plan.dayProof')}</th>
           <th>{t('table.actions')}</th>
         </tr></thead>
@@ -1203,7 +1220,7 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
           const against = objectives.find((objective) => objective.id === report.objectiveId) || null;
           if (editing?.report.id === report.id) {
             const unit = against?.targetUnit || plan.targetUnit;
-            return <tr key={report.id}><td colSpan={objectives.length > 0 ? 7 : 6}>
+            return <tr key={report.id}><td colSpan={objectives.length > 0 ? 8 : 7}>
               <form className="update-edit" onSubmit={saveCorrection}>
                 <strong>{formatDate(report.date, language)}{against && <> &middot; {against.title}</>}</strong>
                 <label className="form-field"><span>{t('plan.workDone')}{unit && ` (${unit})`}</span>
@@ -1217,6 +1234,14 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
                 <label className="form-field form-field-wide"><span>{t('plan.dayNotes')}</span>
                   <textarea rows="3" maxLength={4000} value={editing.notes}
                     onChange={(event) => setEditing({ ...editing, notes: event.target.value })} />
+                </label>
+                <label className="form-field"><span>{t('plan.dayStatus')}</span>
+                  <input maxLength={100} placeholder={t('plan.dayStatusHint')} value={editing.workStatus}
+                    onChange={(event) => setEditing({ ...editing, workStatus: event.target.value })} />
+                </label>
+                <label className="form-field form-field-wide"><span>{t('plan.dayRemarks')}</span>
+                  <textarea rows="2" maxLength={4000} value={editing.remarks}
+                    onChange={(event) => setEditing({ ...editing, remarks: event.target.value })} />
                 </label>
                 <div className="button-row">
                   <button className="primary-btn" type="submit" disabled={busy}>{t('action.saveCorrection')}</button>
@@ -1234,14 +1259,17 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
             ? <strong>{report.quantityDone} {against ? against.targetUnit : plan.targetUnit}</strong>
             : <span className="muted-cell">&mdash;</span>}</td>
           <td data-label={t('plan.costToday')}>{report.cost ? formatUsd(report.cost) : <span className="muted-cell">{t('plan.noCost')}</span>}</td>
-          <td data-label={t('plan.dayNotes')}>{report.notes || <span className="muted-cell">&mdash;</span>}</td>
+          <td data-label={t('plan.dayNotes')}>{report.notes || <span className="muted-cell">&mdash;</span>}
+            {report.remarks && <small className="muted-cell">{t('plan.dayRemarks')}: {report.remarks}</small>}</td>
+          <td data-label={t('plan.dayStatus')}>{report.workStatus || <span className="muted-cell">&mdash;</span>}</td>
           <td data-label={t('plan.dayProof')}>{report.evidence?.length
             ? report.evidence.map((file) => <button key={file.id} type="button" className="text-btn"
               onClick={() => onOpenFile(file.path)}>{file.originalName}</button>)
             : <span className="muted-cell">&mdash;</span>}</td>
           <td className="card-actions">
             {correctable && <button type="button" className="text-btn" disabled={busy} onClick={() => setEditing({
-              report, quantityDone: String(report.quantityDone || ''), cost: String(report.cost || ''), notes: report.notes || ''
+              report, quantityDone: String(report.quantityDone || ''), cost: String(report.cost || ''), notes: report.notes || '',
+              workStatus: report.workStatus || '', remarks: report.remarks || ''
             })}>{t('action.correctDay')}</button>}
             {canWork && open && !finished && <UploadDayProof report={report} busy={busy} t={t} onUpload={onUploadProof} />}
             {onRemoveReport && open && <button type="button" className="text-btn" disabled={busy}

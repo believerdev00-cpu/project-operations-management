@@ -239,6 +239,16 @@ const statements = [
      REFERENCES plan_objectives(id) ON DELETE CASCADE`,
   `CREATE INDEX IF NOT EXISTS plan_daily_reports_objective_idx ON plan_daily_reports(objective_id)`,
 
+  // The daily form reads: date, activity (the objective), description (`notes`,
+  // which always held "what happened today"), quantity, cost, status, remarks.
+  // `work_status` is the manager's own words about where the work stands --
+  // free text, typed, never a list -- and is deliberately NOT called `status`
+  // and NOT tied to any approval column: it is what the manager says, never
+  // what the Director decided. Both are additive with a constant default, so
+  // every day already recorded keeps its figures and simply reads blank here.
+  `ALTER TABLE plan_daily_reports ADD COLUMN IF NOT EXISTS work_status VARCHAR(100) NOT NULL DEFAULT ''`,
+  `ALTER TABLE plan_daily_reports ADD COLUMN IF NOT EXISTS remarks TEXT NOT NULL DEFAULT ''`,
+
   // Backfill: every month written when a plan had a single target becomes a
   // month with a single objective, so nothing written before this reads as an
   // empty plan. Idempotent by the NOT EXISTS guard -- a plan that already has

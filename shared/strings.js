@@ -332,7 +332,7 @@ const STRINGS = {
   'projects.doneOf': { en: '{done} of {total} done', rw: '{done} kuri {total} byarangiye', fr: '{done} sur {total} terminés', sw: '{done} kati ya {total} zimekamilika' },
   'projects.figuresAutomatic': { en: 'Budget, spending and progress fill in by themselves from the work package’s activities and expenses.', rw: 'Ingengo y’imari, ibyakoreshejwe n’aho bigeze byiyuzuza bishingiye ku bikorwa n’amafaranga yakoreshejwe muri iki gice cy’umushinga.', fr: 'Le budget, les dépenses et l’avancement se remplissent d’eux-mêmes à partir des activités et dépenses du lot de travaux.', sw: 'Bajeti, matumizi na maendeleo hujaza zenyewe kutoka kwa shughuli na matumizi ya kifurushi cha kazi.' },
   'app.quickNavigation': { en: 'Main pages', rw: 'Paji z’ingenzi', fr: 'Pages principales', sw: 'Kurasa kuu' },
-  'home.todo': { en: 'Needs attention', rw: 'Bikeneye kwitabwaho', fr: 'À traiter', sw: 'Inahitaji kushughulikiwa' },
+  'home.todo': { en: 'At a glance', rw: 'Incamake', fr: 'En un coup d’œil', sw: 'Kwa muhtasari' },
   'home.tileApprovals': { en: 'Needs your approval', rw: 'Bikeneye kwemezwa nawe', fr: 'Attend votre approbation', sw: 'Inahitaji idhini yako' },
   'home.tileWork': { en: 'Your work', rw: 'Imirimo yawe', fr: 'Votre travail', sw: 'Kazi yako' },
   'home.oneToDo': { en: 'You have 1 activity to work on.', rw: 'Ufite igikorwa 1 ugomba gukora.', fr: 'Vous avez 1 activité à faire.', sw: 'Una shughuli 1 ya kufanya.' },
@@ -682,7 +682,7 @@ const STRINGS = {
   'form.amountNeeded': { en: 'Enter the amount needed', rw: 'Andika amafaranga akenewe', fr: 'Saisissez le montant nécessaire', sw: 'Weka kiasi kinachohitajika' },
   'form.signed': { en: 'A signed paper copy was received', rw: 'Kopi y’impapuro isinyiye yakiriwe', fr: 'Une copie papier signée a été reçue', sw: 'Nakala ya karatasi iliyosainiwa imepokelewa' },
   'form.submitForReview': { en: 'Send for approval', rw: 'Ohereza kwemezwa', fr: 'Envoyer pour approbation', sw: 'Tuma kwa idhini' },
-  'form.noManagerCovers': { en: 'No manager covers this project yet. Add one under User management first.', rw: 'Nta muyobozi urahabwa uyu mushinga. Banza wongereho umwe muri Gucunga abakoresha.', fr: 'Aucun responsable ne couvre encore ce projet. Ajoutez-en un dans Gestion des utilisateurs.', sw: 'Hakuna meneja anayeshughulikia mradi huu bado. Ongeza mmoja katika Usimamizi wa watumiaji.' },
+  'form.noManagerCovers': { en: 'No manager covers this project yet. Add one under “People” first.', rw: 'Nta muyobozi urahabwa uyu mushinga. Banza wongereho umwe muri “Abakozi”.', fr: 'Aucun responsable ne couvre encore ce projet. Ajoutez-en un dans « Personnes ».', sw: 'Hakuna meneja anayeshughulikia mradi huu bado. Ongeza mmoja katika “Watu”.' },
 
   // ---- reports screen ------------------------------------------------------
   'report.blurb': { en: 'See what was done, what it cost and what is left, for any dates you choose.', rw: 'Reba ibyakozwe, ibyo byatwaye n’ibisigaye, ku matariki uhitamo.', fr: 'Voyez ce qui a été fait, ce que cela a coûté et ce qui reste, pour les dates de votre choix.', sw: 'Ona kilichofanyika, kilichogharimu na kilichobaki, kwa tarehe unazochagua.' },
@@ -700,7 +700,7 @@ const STRINGS = {
   'review.sentBackBy': { en: 'Sent back by {name} · {date}', rw: 'Byagaruwe na {name} · {date}', fr: 'Renvoyé par {name} · {date}', sw: 'Imerudishwa na {name} · {date}' },
   'review.whatYouChanged': { en: 'What you changed', rw: 'Ibyo wahinduye', fr: 'Ce que vous avez modifié', sw: 'Ulichobadilisha' },
   'review.correctionMoneyLocked': { en: 'The budget stays as it was decided. To change it, ask for a budget change.', rw: 'Ingengo y’imari iguma uko yemejwe. Kugira ngo uyihindure, saba ihinduka ry’ingengo y’imari.', fr: 'Le budget reste tel qu’il a été décidé. Pour le modifier, demandez un changement de budget.', sw: 'Bajeti inabaki kama ilivyoamuliwa. Ili kuibadilisha, omba mabadiliko ya bajeti.' },
-  'review.noManagerCoversArea': { en: 'No manager covers this project yet. Add one under User management before handing this work over.', rw: 'Nta muyobozi urahabwa uyu mushinga. Banza wongereho umwe muri Gucunga abakoresha mbere yo guha undi aka kazi.', fr: 'Aucun responsable ne couvre encore ce projet. Ajoutez-en un dans Gestion des utilisateurs avant de confier ce travail.', sw: 'Hakuna meneja anayeshughulikia mradi huu bado. Ongeza mmoja katika Usimamizi wa watumiaji kabla ya kukabidhi kazi hii.' },
+  'review.noManagerCoversArea': { en: 'No manager covers this project yet. Add one under “People” before handing this work over.', rw: 'Nta muyobozi urahabwa uyu mushinga. Banza wongereho umwe muri “Abakozi” mbere yo guha undi aka kazi.', fr: 'Aucun responsable ne couvre encore ce projet. Ajoutez-en un dans « Personnes » avant de confier ce travail.', sw: 'Hakuna meneja anayeshughulikia mradi huu bado. Ongeza mmoja katika “Watu” kabla ya kukabidhi kazi hii.' },
   'review.directorAdmin': { en: 'Director', rw: 'Umuyobozi Mukuru', fr: 'Directeur', sw: 'Mkurugenzi' },
 
   // ---- deadline flags ------------------------------------------------------
@@ -835,8 +835,12 @@ const STRINGS = {
   'plan.leftToDo': { en: '{amount} {unit} left to do', rw: '{amount} {unit} bisigaye', fr: '{amount} {unit} restants', sw: '{amount} {unit} zimebaki' },
   'plan.costToday': { en: 'Money spent today', rw: 'Amafaranga yakoreshejwe uyu munsi', fr: 'Argent dépensé aujourd\'hui', sw: 'Pesa iliyotumika leo' },
   'plan.costOptional': { en: 'Leave empty if the day cost nothing.', rw: 'Reka ubusa niba uwo munsi utagize icyo utwara.', fr: 'Laissez vide si la journée n\'a rien coûté.', sw: 'Acha wazi kama siku haikugharimu chochote.' },
-  'plan.dayNotes': { en: 'Notes', rw: 'Inyandiko', fr: 'Remarques', sw: 'Maelezo' },
+  'plan.dayNotes': { en: 'Description', rw: 'Ibisobanuro', fr: 'Description', sw: 'Maelezo' },
   'plan.dayNotesHint': { en: 'What happened, or why nothing did', rw: 'Ibyabaye, cyangwa impamvu nta cyabaye', fr: 'Ce qui s\'est passé, ou pourquoi rien ne s\'est passé', sw: 'Kilichotokea, au kwa nini hakuna kilichotokea' },
+  'plan.dayStatus': { en: 'Status', rw: 'Uko bihagaze', fr: 'État', sw: 'Hali' },
+  'plan.dayStatusHint': { en: 'In your own words, e.g. ongoing, finished, waiting for the truck', rw: 'Mu magambo yawe, urugero: birakomeje, byarangiye, dutegereje imodoka', fr: 'Avec vos mots, p. ex. en cours, terminé, en attente du camion', sw: 'Kwa maneno yako, mfano: inaendelea, imekamilika, tunasubiri lori' },
+  'plan.dayRemarks': { en: 'Remarks', rw: 'Icyitonderwa', fr: 'Observations', sw: 'Maoni' },
+  'plan.dayRemarksHint': { en: 'Anything else the Director should know', rw: 'Ikindi cyose Umuyobozi Mukuru akwiye kumenya', fr: 'Tout ce que le Directeur devrait savoir d’autre', sw: 'Chochote kingine Mkurugenzi anapaswa kujua' },
   'plan.dayProof': { en: 'Photos', rw: 'Amafoto', fr: 'Photos', sw: 'Picha' },
   'plan.saveDay': { en: 'Save today\'s work', rw: 'Bika akazi k\'uyu munsi', fr: 'Enregistrer le travail du jour', sw: 'Hifadhi kazi ya leo' },
   'plan.daySaved': { en: 'Today\'s work saved.', rw: 'Akazi k\'uyu munsi kabitswe.', fr: 'Travail du jour enregistré.', sw: 'Kazi ya leo imehifadhiwa.' },

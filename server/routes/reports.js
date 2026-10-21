@@ -624,7 +624,7 @@ async function buildMonthlyWork(user, period, choice = null) {
       range
     ),
     pool.query(
-      `SELECT r.id, r.report_date, r.quantity_done, r.cost, r.notes,
+      `SELECT r.id, r.report_date, r.quantity_done, r.cost, r.notes, r.work_status, r.remarks,
               p.id AS plan_id, p.sector, to_char(p.month, 'YYYY-MM') AS plan_month,
               o.id AS objective_id, o.title AS objective_title, o.target_unit,
               (SELECT COUNT(*) FROM plan_report_evidence e WHERE e.report_id = r.id)::int AS evidence_count
@@ -742,6 +742,8 @@ async function buildMonthlyWork(user, period, choice = null) {
       unit: row.target_unit || '',
       cost: round2(row.cost),
       notes: row.notes || '',
+      workStatus: row.work_status || '',
+      remarks: row.remarks || '',
       evidenceCount: Number(row.evidence_count || 0)
     }))
   };
@@ -1122,7 +1124,9 @@ async function buildWorkbook(report, language = 'en') {
       { header: t('export.unit'), key: 'unit', width: 14 },
       { header: `${t('export.cost')} (USD)`, key: 'cost', width: 14 },
       { header: t('report.photos'), key: 'photos', width: 9 },
-      { header: t('report.whatWasWritten'), key: 'notes', width: 60 }
+      { header: t('report.whatWasWritten'), key: 'notes', width: 60 },
+      { header: t('plan.dayStatus'), key: 'workStatus', width: 24 },
+      { header: t('plan.dayRemarks'), key: 'remarks', width: 40 }
     ];
     headerRow(daily, 1);
     for (const day of work.days) {
@@ -1134,7 +1138,9 @@ async function buildWorkbook(report, language = 'en') {
         unit: day.unit,
         cost: day.cost,
         photos: day.evidenceCount,
-        notes: day.notes
+        notes: day.notes,
+        workStatus: day.workStatus,
+        remarks: day.remarks
       });
       daily.getCell(`F${daily.rowCount}`).numFmt = MONEY;
     }
@@ -1497,6 +1503,8 @@ function writePdf(report, stream, language = 'en') {
       const what = [`${entry.quantity} ${entry.unit}`.trim()];
       if (entry.cost > 0) what.push(usd(entry.cost));
       if (entry.evidenceCount) what.push(w('report.photosCount', { count: entry.evidenceCount }));
+      // The manager's typed status, labelled so it never reads as a decision.
+      if (entry.workStatus) what.push(`${t('plan.dayStatus')}: ${entry.workStatus}`);
       doc.font('Helvetica').fontSize(9).fillColor(INK).text(
         `${work.months.length > 1 ? `${operation(entry.operation)} — ` : ''}${entry.objective || t('report.notLinked')}`
         + `   ·   ${what.join('   ·   ')}`,
@@ -1507,6 +1515,11 @@ function writePdf(report, stream, language = 'en') {
       if (entry.notes) {
         doc.font('Helvetica-Oblique').fontSize(8.5).fillColor(QUIET)
           .text(entry.notes, left + 12, doc.y, { width: width - 12 });
+        doc.fillColor(INK);
+      }
+      if (entry.remarks) {
+        doc.font('Helvetica-Oblique').fontSize(8.5).fillColor(QUIET)
+          .text(`${t('plan.dayRemarks')}: ${entry.remarks}`, left + 12, doc.y, { width: width - 12 });
         doc.fillColor(INK);
       }
       doc.moveDown(0.35);

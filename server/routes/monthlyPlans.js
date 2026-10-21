@@ -102,6 +102,18 @@ function optionalText(value, limit) {
   return typeof value === 'string' ? value.trim().slice(0, limit) : '';
 }
 
+// The status a manager types on a day ("Ongoing", "Waiting for the truck").
+// Free text by design -- no list, because the words that describe a mining day
+// and a farming day are not the same words. It is one line in a table cell, so
+// any run of whitespace (a pasted newline) becomes one space; blank is allowed
+// and stored as '', the same rule as every other optional field here. 100 is
+// the column's width. Never confused with an approval: it is the manager's
+// statement, stored in its own column, and nothing reads it to decide anything.
+const WORK_STATUS_MAX = 100;
+function readWorkStatus(value) {
+  return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, WORK_STATUS_MAX) : '';
+}
+
 // Roll the transaction back and answer, in one line, so a refusal inside a
 // locked block cannot leave the connection holding the lock.
 async function refuse(client, res, status, body) {
@@ -159,7 +171,10 @@ function mapDailyReport(row) {
     date: toDateOnly(row.report_date),
     quantityDone: round2(Number(row.quantity_done || 0)),
     cost: round2(Number(row.cost || 0)),
+    // On screen `notes` is the day's Description; the API keeps its old name.
     notes: row.notes || '',
+    workStatus: row.work_status || '',
+    remarks: row.remarks || '',
     submittedBy: row.submitted_by ?? null,
     submittedByName: row.submitted_by_name || '',
     evidenceCount: row.evidence_count === undefined ? undefined : Number(row.evidence_count),
@@ -811,7 +826,7 @@ router.get('/updates', asyncRoute(async (req, res) => {
   values.push(limit);
 
   const updates = await pool.query(
-    `SELECT r.id, r.report_date, r.quantity_done, r.cost, r.notes, r.submitted_by_name, r.created_at,
+    `SELECT r.id, r.report_date, r.quantity_done, r.cost, r.notes, r.work_status, r.remarks, r.submitted_by_name, r.created_at,
             p.id AS plan_id, p.sector, p.month,
             o.id AS objective_id, o.title AS objective_title,
             o.target_quantity, o.target_unit,
@@ -854,6 +869,8 @@ router.get('/updates', asyncRoute(async (req, res) => {
         quantityDone: round2(Number(row.quantity_done || 0)),
         cost: round2(Number(row.cost || 0)),
         notes: row.notes || '',
+        workStatus: row.work_status || '',
+        remarks: row.remarks || '',
         submittedByName: row.submitted_by_name || '',
         submittedBy: row.submitted_by ?? null,
         correctable: Boolean(row.correctable),
@@ -1959,8 +1976,11 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
     return res.status(400).json({ message: 'The cost must be a number that is not negative.' });
   }
   const cost = round2(payload.cost ?? 0);
+  // `notes` is the Description on the form.
   const notes = optionalText(payload.notes, 4000);
-  if (!quantityDone && !cost && !notes) {
+  const workStatus = readWorkStatus(payload.workStatus);
+  const remarks = optionalText(payload.remarks, 4000);
+  if (!quantityDone && !cost && !notes && !workStatus && !remarks) {
     return res.status(400).json({ message: 'Say what was done, what it cost, or leave a note -- an empty report records nothing.' });
   }
 
@@ -2029,9 +2049,9 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
     }
 
     const inserted = await client.query(
-      `INSERT INTO plan_daily_reports (plan_id, objective_id, report_date, quantity_done, cost, notes, submitted_by, submitted_by_name)
-       VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8) RETURNING *`,
-      [plan.id, objectiveId, reportDate, quantityDone, cost, notes, req.user.id, req.user.name]
+      `INSERT INTO plan_daily_reports (plan_id, objective_id, report_date, quantity_done, cost, notes, work_status, remarks, submitted_by, submitted_by_name)
+       VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [plan.id, objectiveId, reportDate, quantityDone, cost, notes, workStatus, remarks, req.user.id, req.user.name]
     );
     created = inserted.rows[0];
 
@@ -2079,7 +2099,8 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
     await logPlanHistory(client, plan.id, req.user, [{
       action: 'Day reported', field: 'quantityDone',
       oldValue: round2(nowDone - quantityDone), newValue: nowDone,
-      note: reportDate + (cost ? ' · ' + formatUsd(cost) : '') + (notes ? ' · ' + notes.slice(0, 200) : '')
+      note: reportDate + (cost ? ' · ' + formatUsd(cost) : '') + (workStatus ? ' · ' + workStatus : '')
+        + (notes ? ' · ' + notes.slice(0, 200) : '')
     }]);
     await client.query('COMMIT');
   } catch (error) {
@@ -2209,9 +2230,11 @@ router.put('/:id/reports/:reportId', asyncRoute(async (req, res) => {
   const quantityDone = round2(payload.quantityDone ?? 0);
   const cost = round2(payload.cost ?? 0);
   const notes = optionalText(payload.notes, 4000);
-  if (!quantityDone && !cost && !notes) {
-    return res.status(400).json({ message: 'Say what was done, what it cost, or leave a note -- an empty report records nothing.' });
-  }
+  // Status and remarks are only changed when the correction sends them: a page
+  // opened before these fields existed sends neither, and must not blank what
+  // the manager wrote. The empty-day test below runs once the day is read.
+  const statusGiven = Object.prototype.hasOwnProperty.call(payload, 'workStatus');
+  const remarksGiven = Object.prototype.hasOwnProperty.call(payload, 'remarks');
 
   const client = await pool.connect();
   try {
@@ -2246,6 +2269,11 @@ router.put('/:id/reports/:reportId', asyncRoute(async (req, res) => {
     }
     if (!day.is_latest) {
       return await refuse(client, res, 409, { message: 'Only your most recent day can be corrected.' });
+    }
+    const workStatus = statusGiven ? readWorkStatus(payload.workStatus) : (day.work_status || '');
+    const remarks = remarksGiven ? optionalText(payload.remarks, 4000) : (day.remarks || '');
+    if (!quantityDone && !cost && !notes && !workStatus && !remarks) {
+      return await refuse(client, res, 400, { message: 'Say what was done, what it cost, or leave a note -- an empty report records nothing.' });
     }
     const oldQuantity = round2(Number(day.quantity_done || 0));
     const oldCost = round2(Number(day.cost || 0));
@@ -2284,13 +2312,16 @@ router.put('/:id/reports/:reportId', asyncRoute(async (req, res) => {
     }
 
     await client.query(
-      'UPDATE plan_daily_reports SET quantity_done = $2, cost = $3, notes = $4 WHERE id = $1',
-      [reportId, quantityDone, cost, notes]
+      `UPDATE plan_daily_reports SET quantity_done = $2, cost = $3, notes = $4, work_status = $5, remarks = $6
+        WHERE id = $1`,
+      [reportId, quantityDone, cost, notes, workStatus, remarks]
     );
+    const oldStatus = day.work_status || '';
     await logPlanHistory(client, plan.id, req.user, [{
       action: 'Day corrected', field: 'quantityDone',
       oldValue: oldQuantity, newValue: quantityDone,
       note: toDateOnly(day.report_date) + (cost !== oldCost ? ` · ${formatUsd(oldCost)} → ${formatUsd(cost)}` : '')
+        + (workStatus !== oldStatus ? ` · ${oldStatus || '—'} → ${workStatus || '—'}` : '')
     }]);
 
     // A correction can finish a month or unfinish it. Same test as recording a
