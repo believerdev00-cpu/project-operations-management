@@ -1163,3 +1163,92 @@ td .operation-checks { display: grid; gap: 0; }
   .manager-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .home-quick-director .primary-btn, .home-quick-director .secondary-btn { flex: 1 1 calc(50% - 4px); }
 }
+
+/* ---- the organisation chart --------------------------------------------------
+   Top to bottom, never sideways: the Director, then two branches -- the
+   internal line and the external partners -- side by side on a wide screen and
+   stacked on a phone. Every level wraps, so no number of managers, teams or
+   partners can push the page into a horizontal scroll. */
+
+.organization { display: grid; gap: 18px; }
+.org-chart { display: grid; gap: 18px; padding: 18px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.org-level { display: grid; gap: 8px; justify-items: center; }
+.org-row { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
+.org-level-label { color: var(--muted); font-size: .7rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.org-branches { position: relative; display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 18px; padding-top: 18px; border-top: 2px solid var(--line); }
+.org-branches-single { grid-template-columns: minmax(0, 1fr); }
+.org-branch { display: grid; align-content: start; gap: 14px; min-width: 0; padding: 14px; border-radius: 6px; }
+.org-internal { background: #f6f9fc; border: 1px solid #d9e6f2; }
+.org-external { background: #fbf8f2; border: 1px dashed #d8c39a; }
+.org-branch-title { margin: 0; color: var(--navy); font-size: .95rem; }
+.org-branch-note { margin: 0; color: var(--muted); font-size: .78rem; line-height: 1.45; }
+.org-group { display: grid; gap: 10px; min-width: 0; }
+.org-children { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; padding-left: 14px; border-left: 2px solid #d9e6f2; }
+.org-external .org-children { grid-template-columns: minmax(0, 1fr); border-left-color: #e8d9b8; }
+.org-node { display: grid; align-content: start; gap: 8px; min-width: 0; }
+.org-card { display: grid; gap: 3px; min-width: 0; padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--blue); border-radius: 6px; overflow-wrap: anywhere; }
+.org-card strong { color: var(--navy); font-size: .92rem; }
+.org-card small { color: var(--muted); font-size: .74rem; line-height: 1.4; }
+.org-card-top { min-width: 220px; border-left-color: var(--navy); }
+.org-card-general { border-left-color: #6a4fb3; }
+.org-card-manager { border-left-color: var(--blue); }
+.org-card-partner { border-left-color: #b8862f; }
+.org-role { color: var(--blue); font-size: .66rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.org-card-general .org-role { color: #6a4fb3; }
+.org-line-select { margin-top: 6px; }
+.org-teams { display: grid; gap: 6px; margin: 0; padding: 0 0 0 12px; list-style: none; border-left: 2px dotted #c8d8e8; }
+.org-team-chip { display: grid; gap: 2px; width: 100%; padding: 8px 10px; color: var(--ink); text-align: left; background: #fff; border: 1px solid var(--line); border-radius: 5px; }
+.org-team-chip:hover { border-color: #b9cfe4; background: #fbfdff; }
+.org-team-chip small { color: var(--muted); font-size: .72rem; }
+
+.team-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+.team-card { display: grid; align-content: start; gap: 10px; min-width: 0; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
+.team-card-open { border-color: #b9cfe4; box-shadow: var(--shadow); }
+.team-card-archived { opacity: .7; }
+.team-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.team-card-head h3 { margin: 4px 0 2px; color: var(--navy); font-size: 1rem; overflow-wrap: anywhere; }
+.team-card-head small { color: var(--muted); font-size: .76rem; }
+.team-card-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+.team-description { margin: 0; color: #34475a; font-size: .84rem; line-height: 1.5; }
+.team-members { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.team-members li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: .86rem; }
+.team-members li:last-child { border-bottom: 0; }
+.team-member-actions { display: flex; gap: 6px; margin-left: auto; }
+.team-manage { display: grid; gap: 12px; padding-top: 6px; border-top: 1px solid var(--line); }
+.team-manage .inline-form { grid-template-columns: minmax(0, 2fr) auto auto; margin-top: 0; }
+.team-manage .button-row { margin-top: 0; }
+.danger-text { color: var(--red); }
+
+/* ---- issues that climb the line ---------------------------------------------- */
+
+.escalation-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.escalation-open { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 12px 14px; color: var(--ink); text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
+.escalation-open:hover { border-color: #b9cfe4; background: #fbfdff; }
+.escalation-row.row-selected .escalation-open { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(21, 101, 192, .12); }
+.escalation-main { display: grid; gap: 3px; min-width: 0; }
+.escalation-main strong { overflow-wrap: anywhere; }
+.escalation-main small { color: var(--muted); font-size: .76rem; }
+.escalation-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+.escalation-meta small { color: var(--muted); font-size: .74rem; }
+.priority-high { color: var(--red); background: #fdecec; }
+.priority-low { color: var(--muted); background: #eef2f6; }
+.escalation-detail .history-list p { margin: 4px 0 0; color: var(--ink); font-size: .84rem; line-height: 1.5; white-space: pre-wrap; }
+.home-alert-escalation { border-left-color: var(--red); }
+
+.sharing-row td { background: #f7fafc; }
+.partner-sharing { display: grid; gap: 4px; padding: 6px 0; }
+
+@media (max-width: 900px) {
+  .org-branches { grid-template-columns: minmax(0, 1fr); }
+  .org-chart { padding: 14px; }
+}
+
+@media (max-width: 640px) {
+  .org-children { grid-template-columns: minmax(0, 1fr); padding-left: 10px; }
+  .org-card-top { min-width: 0; width: 100%; }
+  .team-grid { grid-template-columns: minmax(0, 1fr); }
+  .team-manage .inline-form { grid-template-columns: minmax(0, 1fr); }
+  .escalation-open { flex-direction: column; align-items: stretch; }
+  .escalation-meta { justify-content: flex-start; }
+  .sharing-row td { display: block; }
+}

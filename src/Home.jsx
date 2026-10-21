@@ -19,6 +19,18 @@ const LATEST_FROM_MANAGERS = 5;
 // Every count comes from /api/summary, built from the same SQL as the list its
 // tile opens, and every button is drawn only for the roles the API allows.
 
+// The organisation's notices worth a card on Home rather than only a line
+// under the bell.
+const ORGANIZATION_ALERTS = ['team_added', 'escalation_raised', 'escalation_escalated', 'escalation_resolved', 'escalation_rejected'];
+
+// What the button on a Home alert card says: where it takes the reader.
+function alertButton(kind, t) {
+  if (kind === 'plan_assigned' || kind === 'plan_changed') return t('home.viewPlan');
+  if (kind === 'team_added') return t('home.openTeam');
+  if (kind.startsWith('escalation_')) return t('home.openIssue');
+  return t('home.openRecord');
+}
+
 function thisMonth() {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -203,6 +215,12 @@ export default function Home({
       id: 'overdue', count: counts.overdueWork || 0, tone: counts.overdueWork ? 'urgent' : 'calm',
       title: t('home.tileOverdue'),
       onClick: () => onGo('monthly')
+    },
+    // Issues that climbed the whole line and now wait on the Director's office.
+    isDirector && {
+      id: 'issues', count: counts.escalationsAwaitingMe || 0, tone: counts.escalationsAwaitingMe ? 'urgent' : 'calm',
+      title: t('home.tileIssues'),
+      onClick: () => onGo('escalations')
     }
   ].filter(Boolean);
 
@@ -213,6 +231,7 @@ export default function Home({
     counts.finalChecksWaiting > 0 && { id: 'checks', text: fill(t('home.attentionChecks'), { count: counts.finalChecksWaiting }), go: () => onGo('activities', 'final-check') },
     approvalCount > 0 && { id: 'approvals', text: fill(t('home.attentionApprovals'), { count: approvalCount }), go: () => onGo('approval-queue') },
     counts.overdueWork > 0 && { id: 'overdue', text: fill(t('home.attentionOverdue'), { count: counts.overdueWork }), go: () => onGo('monthly') },
+    counts.escalationsAwaitingMe > 0 && { id: 'issues', text: fill(t('home.attentionIssues'), { count: counts.escalationsAwaitingMe }), go: () => onGo('escalations') },
     counts.budgetChangesPending > 0 && { id: 'budget', text: fill(t('home.attentionBudget'), { count: counts.budgetChangesPending }), go: () => onGo('activities') },
     counts.activePlans > 0 && { id: 'active', text: fill(t('home.attentionActive'), { count: counts.activePlans }), go: () => onGo('monthly') }
   ].filter(Boolean) : [];
@@ -221,10 +240,17 @@ export default function Home({
   // cards at the top of their home: a new plan, work returned, a report
   // returned. These are the events that change what they should do next, so
   // they are not left under the bell alone. Opening one marks it read.
-  const alerts = isManager
-    ? (notices?.items || []).filter((notice) => !notice.read
-      && ['plan_assigned', 'report_returned', 'report_accepted', 'plan_changed'].includes(notice.kind)).slice(0, 4)
-    : [];
+  //
+  // The organisation's events join them, for a manager and a team member
+  // alike: being put on a team, an issue arriving, and the answer to one they
+  // raised. Each opens where it happened (the team page, or the issue).
+  const alertKinds = [
+    ...(isManager ? ['plan_assigned', 'report_returned', 'report_accepted', 'plan_changed'] : []),
+    ...(isManager || isWorker ? ORGANIZATION_ALERTS : [])
+  ];
+  const alerts = (notices?.items || []).filter((notice) => !notice.read && alertKinds.includes(notice.kind)).slice(0, 4);
+  // How many issues are waiting on a manager to settle or pass up.
+  const issuesWaiting = isManager ? counts.escalationsAwaitingMe || 0 : 0;
 
   // The operations this account covers: all four for the Director or an
   // all-operations manager, otherwise each one they work in -- a manager may
@@ -251,7 +277,17 @@ export default function Home({
           <h2>{t('nav.myWork')}</h2>
           <p>{operationsOf(user).map((id) => operationName(id, language)).join(' · ')} · {todayLabel(language)}</p>
         </div>
+        <div className="home-quick">
+          <button className="secondary-btn" type="button" onClick={() => onGo('escalations')}>{t('nav.reportIssue')}</button>
+        </div>
       </section>
+
+      {alerts.length > 0 && <ul className="home-alerts">
+        {alerts.map((notice) => <li key={notice.id} className={`home-alert home-alert-${notice.kind}`}>
+          <span>{noticeSentence(notice, t, language)}</span>
+          <button type="button" className="primary-btn compact" onClick={() => onOpenNotice?.(notice)}>{alertButton(notice.kind, t)}</button>
+        </li>)}
+      </ul>}
 
       {!waiting && (myWork.length > 0
         ? <>
@@ -308,10 +344,15 @@ export default function Home({
       {alerts.map((notice) => <li key={notice.id} className={`home-alert home-alert-${notice.kind}`}>
         <span>{noticeSentence(notice, t, language)}</span>
         <button type="button" className="primary-btn compact" onClick={() => onOpenNotice?.(notice)}>
-          {notice.kind === 'plan_assigned' || notice.kind === 'plan_changed' ? t('home.viewPlan') : t('home.openRecord')}
+          {alertButton(notice.kind, t)}
         </button>
       </li>)}
     </ul>}
+
+    {issuesWaiting > 0 && <div className="home-alerts"><div className="home-alert home-alert-escalation">
+      <span>{fill(t('home.attentionIssues'), { count: issuesWaiting })}</span>
+      <button type="button" className="primary-btn compact" onClick={() => onGo('escalations')}>{t('home.openIssues')}</button>
+    </div></div>}
 
     {/* THE MANAGER'S DASHBOARD (section 10 of the brief): the month in one
         line -- how many objectives, how many done, in progress, not started --
@@ -586,7 +627,11 @@ export function noticeSentence(notice, t, language) {
     detail,
     name: params.managerName || notice.actorName || '',
     reason: params.reason || '',
-    activity: params.activity || ''
+    activity: params.activity || '',
+    // The organisation's events: a team, its project, an issue's title.
+    team: params.team || '',
+    project: params.project || '',
+    title: params.title || ''
   });
 }
 

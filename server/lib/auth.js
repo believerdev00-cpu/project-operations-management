@@ -28,8 +28,14 @@ export const JWT_ALGORITHMS = ['HS256'];
 // The partner router writes exactly one thing: a comment addressed to the
 // Director, into partner_comments. A partner has no path to any other write
 // anywhere in the system -- no record, approval, note or account.
+//
+// /api/notifications is on the list so a partner can read the notices written
+// to them (a project newly shared with them). Every query in that router is
+// WHERE user_id = the signed-in account, so it carries nothing but their own
+// rows, and nothing internal is ever written to a partner's account.
 const PARTNER_ALLOWED_PATHS = [
   /^\/api\/partner(\/|$)/,
+  /^\/api\/notifications(\/|$)/,
   /^\/api\/auth\/session$/,
   /^\/api\/auth\/password$/,
   /^\/api\/sectors$/,

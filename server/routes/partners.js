@@ -15,6 +15,8 @@ import { pool, safeRollback } from '../db/database.js';
 import { asyncRoute, isAdmin, parseId, requiredText, sectorIds } from '../lib/http.js';
 import { hashPassword, passwordProblem } from '../lib/passwords.js';
 import { TRIPS_OPERATION, operationById } from '../../shared/businessOperations.js';
+import { partnerProjectSql, recordOrganization } from '../lib/organization.js';
+import { notify } from '../lib/notifications.js';
 
 const router = express.Router();
 
@@ -43,6 +45,14 @@ function mapPartner(row) {
     name: row.name,
     username: row.username,
     email: row.email || '',
+    // The organisation the partner speaks for, and the member of staff who
+    // looks after the relationship.
+    organization: row.organization || '',
+    contactId: row.partner_contact_id ?? null,
+    contactName: row.contact_name || null,
+    // Projects shared one by one. Empty means every operation they hold is
+    // shared whole, exactly as before project sharing existed.
+    projects: row.projects || [],
     // The partner's first operation, for the callers that read one, and
     // `operations`: everything they may follow. Named as well as keyed, so the
     // register never shows a bare id.
@@ -73,15 +83,20 @@ const PARTNER_GRANTS = `COALESCE((SELECT array_agg(po.sector::text ORDER BY po.s
 // count left out the unlinked trips they can in fact read.
 const PARTNER_SELECT = `
   SELECT u.id, u.username, u.name, u.email, u.sector, u.status, u.access_level,
-         u.created_at, u.password_changed_at,
+         u.created_at, u.password_changed_at, u.organization, u.partner_contact_id,
+         (SELECT c.name FROM users c WHERE c.id = u.partner_contact_id) AS contact_name,
          ${PARTNER_GRANTS} AS operations,
+         COALESCE((SELECT json_agg(json_build_object('id', p.id, 'name', p.name, 'sector', p.sector) ORDER BY p.name)
+                     FROM partner_projects pp JOIN projects p ON p.id = pp.project_id WHERE pp.partner_id = u.id), '[]'::json) AS projects,
          (SELECT COUNT(*) FROM activities a
-           WHERE a.sector = ANY(${PARTNER_GRANTS}) AND a.approval_status = 'approved'
+           WHERE a.sector = ANY(${PARTNER_GRANTS}) AND ${partnerProjectSql('u.id', 'a.sector', 'a.project_id')}
+             AND a.approval_status = 'approved'
              AND a.externally_visible = TRUE
              AND a.status NOT IN ('Draft', 'Cancelled', 'Rejected'))::int AS visible_activities,
          (SELECT COUNT(*) FROM movements m
            WHERE (m.related_area = ANY(${PARTNER_GRANTS})
                   OR (m.related_area IS NULL AND '${TRIPS_OPERATION}' = ANY(${PARTNER_GRANTS})))
+             AND ${partnerProjectSql('u.id', `COALESCE(m.related_area, '${TRIPS_OPERATION}')`, 'm.project_id')}
              AND m.approval_status = 'approved' AND m.externally_visible = TRUE
              AND m.status NOT IN ('Draft', 'Cancelled', 'Rejected'))::int AS visible_movements
   FROM users u
@@ -122,6 +137,13 @@ async function setGrants(client, partnerId, operations, grantedBy) {
      SELECT $1, UNNEST($2::text[]), $3
      ON CONFLICT DO NOTHING`,
     [partnerId, operations, grantedBy]
+  );
+  // A project shared in an operation the partner no longer holds is not
+  // shared any more: the operation grant is the outer fence.
+  await client.query(
+    `DELETE FROM partner_projects pp USING projects p
+      WHERE pp.partner_id = $1 AND p.id = pp.project_id AND NOT (p.sector = ANY($2::text[]))`,
+    [partnerId, operations]
   );
 }
 
@@ -228,6 +250,101 @@ router.patch('/:id/operation', asyncRoute(async (req, res) => {
 
   const partner = await loadPartner(req.params.id);
   res.json({ ...partner, message: `${partner.name} now sees ${partner.operationName} only.` });
+}));
+
+// The partner as an organisation: who they speak for, and which member of
+// staff looks after them. The contact must be an active internal account --
+// a partner is never another partner's contact.
+router.patch('/:id/profile', asyncRoute(async (req, res) => {
+  const payload = req.body || {};
+  const partner = await loadPartner(req.params.id);
+  if (!partner) return res.status(404).json({ message: 'External partner not found.' });
+  const organization = payload.organization === undefined
+    ? partner.organization
+    : String(payload.organization || '').trim().slice(0, 200);
+  let contactId = partner.contactId;
+  if (payload.contactId !== undefined) {
+    contactId = payload.contactId === null || payload.contactId === '' ? null : parseId(payload.contactId);
+    if (payload.contactId !== null && payload.contactId !== '' && !contactId) {
+      return res.status(400).json({ message: 'Choose an active member of staff as the contact.' });
+    }
+    if (contactId) {
+      const contact = await pool.query(
+        "SELECT id FROM users WHERE id = $1 AND status = 'active' AND role IN ('super-admin', 'general-manager', 'manager')",
+        [contactId]
+      );
+      if (!contact.rowCount) return res.status(400).json({ message: 'Choose an active member of staff as the contact.' });
+    }
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      "UPDATE users SET organization = $2, partner_contact_id = $3 WHERE id = $1 AND role = 'partner'",
+      [partner.id, organization, contactId]
+    );
+    await recordOrganization(client, req.user, 'partner_profile_changed', {
+      subjectUserId: partner.id, subjectName: partner.name, detail: { organization, contactId }
+    });
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+  res.json(await loadPartner(partner.id));
+}));
+
+// Share particular projects with a partner: the whole set at once. Each must
+// sit in an operation the partner already holds -- sharing a project narrows
+// what an operation grant shows, and is never a back door into an operation
+// they were not given. An empty list goes back to the whole operations.
+router.put('/:id/projects', asyncRoute(async (req, res) => {
+  const list = Array.isArray(req.body?.projectIds) ? req.body.projectIds : null;
+  if (!list || !list.every((id) => typeof id === 'string' && id)) {
+    return res.status(400).json({ message: 'Send the projects to share as a list.' });
+  }
+  const partner = await loadPartner(req.params.id);
+  if (!partner) return res.status(404).json({ message: 'External partner not found.' });
+  const wanted = [...new Set(list)];
+  const found = wanted.length
+    ? await pool.query('SELECT id, name, sector FROM projects WHERE id = ANY($1::text[])', [wanted])
+    : { rows: [] };
+  if (found.rows.length !== wanted.length) return res.status(400).json({ message: 'One of those projects does not exist.' });
+  if (found.rows.some((project) => !partner.operations.includes(project.sector))) {
+    return res.status(400).json({ message: 'A project can be shared only in an operation the partner already follows.' });
+  }
+  const before = new Set(partner.projects.map((project) => project.id));
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM partner_projects WHERE partner_id = $1 AND NOT (project_id = ANY($2::text[]))', [partner.id, wanted]);
+    if (wanted.length) {
+      await client.query(
+        `INSERT INTO partner_projects (partner_id, project_id, granted_by)
+         SELECT $1, UNNEST($2::text[]), $3 ON CONFLICT DO NOTHING`,
+        [partner.id, wanted, req.user.id]
+      );
+    }
+    await recordOrganization(client, req.user, 'partner_projects_changed', {
+      subjectUserId: partner.id, subjectName: partner.name, detail: { projectIds: wanted }
+    });
+    // The partner is told about each project newly shared with them, under
+    // the bell in their own portal. Nothing is said about one taken away.
+    for (const project of found.rows.filter((row) => !before.has(row.id))) {
+      await notify(client, {
+        userId: partner.id, kind: 'partner_shared', params: { project: project.name }, link: '#/overview', actor: req.user
+      });
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+  res.json(await loadPartner(partner.id));
 }));
 
 // Suspend, restore, or revoke. authMiddleware reads the status from the row on

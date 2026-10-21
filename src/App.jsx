@@ -17,6 +17,9 @@ const MovementModule = lazy(() => import('./MovementModule.jsx'));
 const PartnerPortal = lazy(() => import('./PartnerPortal.jsx'));
 const ExternalPartners = lazy(() => import('./ExternalPartners.jsx'));
 const MonthlyPlans = lazy(() => import('./MonthlyPlans.jsx'));
+const OrganizationPage = lazy(() => import('./Organization.jsx'));
+const GeneralManagerHome = lazy(() => import('./Organization.jsx').then((module) => ({ default: module.GeneralManagerHome })));
+const EscalationsPage = lazy(() => import('./Escalations.jsx'));
 import { LANGUAGES, LanguageContext, displayLanguage, fill, setDisplayLanguage, useI18n, useLanguage, useT } from './i18n.js';
 import { BUSINESS_OPERATIONS, operationName, operationsOf, runsTrips, worksIn } from '../shared/businessOperations.js';
 import { OPERATIONS_WITH_CATEGORIES, OTHER_CATEGORY } from '../shared/categories.js';
@@ -75,6 +78,8 @@ const emptyAccount = { username: '', name: '', password: '', role: 'manager', se
 
 function accountPayload(form) {
   const { sector, sectors: chosen, ...rest } = form;
+  // A General Manager oversees every operation by role and carries none.
+  if (form.role === 'general-manager') return { ...rest, managerId: form.managerId || null };
   return { ...rest, managerId: form.managerId || null, ...(form.role === 'manager' ? { sectors: chosen } : { sector }) };
 }
 const emptyRegister = { total: 0, roleCounts: {}, unassigned: 0, users: [] };
@@ -506,7 +511,11 @@ const NAV_ICON_PATHS = {
   reports: 'M5 20V10m7 10V4m7 16v-7',
   more: 'M5 12h.01M12 12h.01M19 12h.01',
   users: 'M16 19v-1a4 4 0 0 0-8 0v1M12 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7 8v-1a3 3 0 0 0-2-2.8M17 5.2a3 3 0 0 1 0 5.6',
-  partners: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm-9 9h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9Z'
+  partners: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm-9 9h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9Z',
+  // A box at the top, a line down, and three below it: the chart itself.
+  organization: 'M9 3h6v4H9V3ZM3 17h6v4H3v-4Zm6 0h6v4H9v-4Zm6 0h6v4h-6v-4ZM12 7v5M6 17v-5h12v5',
+  // An arrow going up: something passed up the line.
+  escalations: 'M12 20V5M6 11l6-6 6 6M5 20h14'
 };
 
 function NavIcon({ id }) {
@@ -523,8 +532,9 @@ function NavIcon({ id }) {
 // and params in the reader's language (the server stores no sentence), and
 // opening a line marks it read and goes where the event happened.
 //
-// It is shown only when there is somewhere to put the events, i.e. for the
-// internal workspace; the partner portal has no notifications.
+// A partner gets the bell too, for the one event written to them: a project
+// the Director shared with them. /api/notifications only ever returns the
+// reader's own rows.
 function NotificationBell({ notices, onOpen, onMarkAll, compact = false }) {
   const { language, t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -744,6 +754,29 @@ function PartnerWorkspace({ token, user, onLogout, onExpired, onSessionRenewed, 
   const changeOwnPassword = useOwnPasswordChange(fetchJson, onSessionRenewed);
   const [reloadKey, setReloadKey] = useState(0);
   const tab = PARTNER_TABS.includes(route.view) ? route.view : 'overview';
+  // What the Director has told this partner (a project shared with them).
+  const [notices, setNotices] = useState({ items: [], unread: 0 });
+  useEffect(() => {
+    let cancelled = false;
+    fetchJson('/api/notifications?limit=20')
+      .then((value) => { if (!cancelled) setNotices(value); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [fetchJson, reloadKey]);
+  const openNotice = useCallback((notice) => {
+    if (!notice.read) {
+      setNotices((current) => ({
+        items: current.items.map((item) => (item.id === notice.id ? { ...item, read: true } : item)),
+        unread: Math.max(0, current.unread - 1)
+      }));
+      fetchJson(`/api/notifications/${notice.id}/read`, { method: 'PATCH' }).catch(() => {});
+    }
+    if (notice.link) navigate(notice.link);
+  }, [fetchJson, navigate]);
+  const markAllNotices = useCallback(() => {
+    setNotices((current) => ({ items: current.items.map((item) => ({ ...item, read: true })), unread: 0 }));
+    fetchJson('/api/notifications/read-all', { method: 'POST' }).catch((markError) => setError(markError.message));
+  }, [fetchJson]);
 
   useEffect(() => {
     if (route.view !== tab) navigate(buildHash(tab), { replace: true });
@@ -772,6 +805,9 @@ function PartnerWorkspace({ token, user, onLogout, onExpired, onSessionRenewed, 
     onRefresh={() => setReloadKey((key) => key + 1)}
     onLogout={onLogout}
     onChangePassword={() => changeOwnPassword().catch((changeError) => setError(changeError.message))}
+    notices={notices}
+    onOpenNotice={openNotice}
+    onMarkAllNotices={markAllNotices}
     accountLines={[t('role.partner'), t('partners.viewOnly')]}
   >
     <Banners message={message} error={error} onDismissError={clearError} onDismissMessage={() => setMessage('')} />
@@ -802,6 +838,10 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const changeOwnPassword = useOwnPasswordChange(fetchJson, onSessionRenewed);
   const isDirector = user.role === 'super-admin';
   const isManager = user.role === 'manager';
+  // The General Manager reads the whole internal organisation and settles the
+  // issues that reach them, but assigns, approves and raises nothing the
+  // Director alone does -- every page they get is a reading page or theirs.
+  const isGeneral = user.role === 'general-manager';
   // Work is assigned by the Director and asked for by a manager. A team member
   // follows their operation's work but raises nothing; the API refuses them too.
   const canAddActivity = isDirector || isManager;
@@ -884,6 +924,8 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // comes from the API's own count of the same predicate the queue runs, so the
   // two can never drift apart.
   const approvalCount = summary.summary?.approvalsAwaitingMe ?? approvalQueue.total ?? 0;
+  // Issues waiting on this account to settle or pass up the line.
+  const escalationCount = summary.summary?.escalationsAwaitingMe ?? 0;
   // Five things people use every day, and the rest under "More". Nine items at
   // one level, with two of them both called some form of "approvals", was the
   // first thing the client found confusing. Only people who approve anything --
@@ -911,9 +953,24 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       ['movements', t('nav.trips'), 0, 'main', t('nav.shortTrips')],
       ['reports', t('nav.reports'), 0, 'review'],
       ['approvals', t('nav.approvals'), 0, 'review'],
+      ['escalations', t('nav.escalations'), escalationCount, 'review'],
       ['projects', t('nav.projects'), 0, 'manage'],
+      ['organization', t('nav.organization'), 0, 'manage'],
       ['users', t('nav.users'), 0, 'manage'],
       ['partners', t('nav.partners'), partnerInbox.unread, 'manage']
+    ];
+  } else if (isGeneral) {
+    // The General Manager: second in the line. Their job is the internal
+    // organisation -- the issues coming up it, the chart, the months and the
+    // reports -- so those are their pages. Approvals, Other requests, Projects,
+    // People and Partners are the Director's and are not offered.
+    navItems = [
+      ['dashboard', t('nav.home'), 0, 'main', t('nav.home')],
+      ['escalations', t('nav.escalations'), escalationCount, 'main', t('nav.shortIssues')],
+      ['organization', t('nav.organization'), 0, 'main', t('nav.shortOrganization')],
+      ['monthly', t('nav.monthlyPlans'), 0, 'main', t('nav.shortBudget')],
+      ['activities', t('nav.activities'), 0, 'review'],
+      ['reports', t('nav.reports'), 0, 'review']
     ];
   } else if (isManager) {
     // A manager's job is the month they were given: the plan is the front door,
@@ -932,16 +989,27 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     // requests are the Director's; every record stays in the database and in
     // the Director's pages. A manager following an old link to one of them
     // lands on Home (see `view` below).
+    //
+    // The organisation added two pages that are also the manager's job: their
+    // teams (who works on their projects) and the issues their teams raise to
+    // them, which they settle or pass up to the General Manager.
     navItems = [
       ['dashboard', t('nav.home'), 0, 'main', t('nav.home')],
-      ['monthly', t('nav.myPlan'), 0, 'main', t('nav.shortMyPlan')]
+      ['monthly', t('nav.myPlan'), 0, 'main', t('nav.shortMyPlan')],
+      ['organization', t('nav.myTeams'), 0, 'main', t('nav.shortTeams')],
+      ['escalations', t('nav.escalations'), escalationCount, 'main', t('nav.shortIssues')]
     ];
   } else {
     // A team member has one job: the work they were given. Two pages, and the
     // first one is the list of it.
+    //
+    // Plus the team they are on, and somewhere to raise a problem -- which
+    // goes to their project manager, not into a void.
     navItems = [
       ['dashboard', t('nav.myWork'), 0, 'main', t('nav.myWork')],
-      ['activities', t('nav.myActivities'), 0, 'main', t('nav.myActivities')]
+      ['activities', t('nav.myActivities'), 0, 'main', t('nav.myActivities')],
+      ['organization', t('nav.myTeam'), 0, 'main', t('nav.shortTeams')],
+      ['escalations', t('nav.reportIssue'), escalationCount, 'main', t('nav.shortIssues')]
     ];
   }
   // The bar along the bottom of a phone. Someone who works in Movements &
@@ -949,9 +1017,11 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // no "More" pile behind them.
   const bottomNav = isDirector
     ? ['dashboard', 'approval-queue', 'monthly', 'activities']
-    : isManager
-      ? ['dashboard', 'monthly']
-      : ['dashboard', 'activities'];
+    : isGeneral
+      ? ['dashboard', 'escalations', 'organization', 'monthly']
+      : isManager
+        ? ['dashboard', 'monthly', 'organization', 'escalations']
+        : ['dashboard', 'activities', 'organization', 'escalations'];
   // An address naming a page this account does not have -- a manager following
   // a Director's link to #/users -- lands on the home page instead of a blank page.
   const view = navItems.some(([id]) => id === route.view) ? route.view : 'dashboard';
@@ -1782,6 +1852,29 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     await loadData();
   });
 
+  // The partner as an organisation, and what they are shown project by
+  // project. Two requests, profile then projects, and only what changed: the
+  // project list narrows everything the partner reads, so it is only sent when
+  // it actually moved.
+  const savePartnerSharing = (partner, { organization, contactId, projectIds }) => runAction(async () => {
+    setError('');
+    try {
+      if (organization !== partner.organization || (contactId || null) !== (partner.contactId || null)) {
+        await fetchJson(`/api/partners/${partner.id}/profile`, { method: 'PATCH', body: JSON.stringify({ organization, contactId: contactId || null }) });
+      }
+      const before = (partner.projects || []).map((project) => project.id).sort().join(',');
+      if ([...projectIds].sort().join(',') !== before) {
+        await fetchJson(`/api/partners/${partner.id}/projects`, { method: 'PUT', body: JSON.stringify({ projectIds }) });
+      }
+      notify(t('msg.saved'));
+      await loadData();
+      return true;
+    } catch (saveError) {
+      fail(saveError.message);
+      return false;
+    }
+  });
+
   const changePartnerStatus = act(async (partner, status) => {
     if (status !== 'active') {
       const confirmed = await dialog.confirm({
@@ -2009,6 +2102,8 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const closePlanRoute = useCallback(() => navigate(buildHash('monthly')), [navigate]);
   const openMovementRoute = useCallback((movementId) => navigate(buildHash('movements', movementId)), [navigate]);
   const closeMovementRoute = useCallback(() => navigate(buildHash('movements')), [navigate]);
+  const openEscalationRoute = useCallback((id) => navigate(buildHash('escalations', id)), [navigate]);
+  const closeEscalationRoute = useCallback(() => navigate(buildHash('escalations')), [navigate]);
   const openQueueItem = (item) => (item.ref ? navigate(buildHash('movements', item.id)) : openActivity(item.id));
   const onModuleChanged = useCallback(() => { loadData(); }, [loadData]);
 
@@ -2040,6 +2135,36 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       <strong>{t('app.loadFailed')}</strong>
       <button className="primary-btn" type="button" onClick={() => { setLoadState('loading'); loadData(); }}>{t('action.retry')}</button>
     </div>;
+  } else if (view === 'dashboard' && isGeneral) {
+    content = <GeneralManagerHome
+      user={user}
+      summary={summary.summary}
+      sectorRows={summary.sectorBreakdown}
+      fetchJson={fetchJson}
+      reloadKey={summary}
+      onGo={go}
+      onOpenEscalation={openEscalationRoute}
+    />;
+  } else if (view === 'organization') {
+    content = <OrganizationPage
+      user={user}
+      fetchJson={fetchJson}
+      onMessage={notify}
+      onError={fail}
+      onChanged={onModuleChanged}
+    />;
+  } else if (view === 'escalations') {
+    content = <EscalationsPage
+      user={user}
+      fetchJson={fetchJson}
+      projects={projects}
+      openId={routeId}
+      onOpen={openEscalationRoute}
+      onClose={closeEscalationRoute}
+      onChanged={onModuleChanged}
+      onMessage={notify}
+      onError={fail}
+    />;
   } else if (view === 'dashboard') {
     content = <Home
       user={user}
@@ -2116,8 +2241,8 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         {/* Each role is told what this page is FOR them. A team member used to be
             shown the manager's description of it. */}
         <div><span className="eyebrow">{t('activities.eyebrow')}</span>
-          <h2>{isDirector || isManager ? t('activities.title') : t('nav.myActivities')}</h2>
-          <p>{isDirector ? t('activities.directorBlurb') : isManager ? t('activities.managerBlurb') : t('activities.staffBlurb')}</p></div>
+          <h2>{isDirector || isManager || isGeneral ? t('activities.title') : t('nav.myActivities')}</h2>
+          <p>{isDirector ? t('activities.directorBlurb') : isGeneral ? t('activities.generalBlurb') : isManager ? t('activities.managerBlurb') : t('activities.staffBlurb')}</p></div>
         {canAddActivity && <button className="primary-btn" type="button" onClick={addActivity}>{isDirector ? t('action.assignActivity') : t('action.raiseActivity')}</button>}
       </section>
 
@@ -2180,10 +2305,10 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         <label className="sr-only" htmlFor="activity-status-filter">{t('table.status')}</label>
         <select id="activity-status-filter" value={activityStatusFilter} onChange={(event) => setActivityStatusFilter(event.target.value)}>
           <option value="All">{t('form.allStatuses')}</option>
-          {!isDirector && <option value="My work">{t('home.tileWork')}</option>}
+          {!isDirector && !isGeneral && <option value="My work">{t('home.tileWork')}</option>}
           <option value="Final check">{t('home.tileChecks')}</option>
           <option value="Awaiting review">{t('activities.awaitingReview')}</option>
-          {!isDirector && <option value="Assigned to me">{t('activities.assignedToMe')}</option>}
+          {!isDirector && !isGeneral && <option value="Assigned to me">{t('activities.assignedToMe')}</option>}
           {ACTIVITY_STATUSES.map((status) => <option key={status} value={status}>{t(`status.${status}`)}</option>)}
         </select>
         <label className="sr-only" htmlFor="activity-project-filter">{t('field.project')}</label>
@@ -2276,6 +2401,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         <select id="user-role-filter" value={userRoleFilter} onChange={(event) => setUserRoleFilter(event.target.value)}>
           <option value="All">{t('form.allRoles')}</option>
           <option value="super-admin">{t('role.super-admin')}</option>
+          <option value="general-manager">{t('role.general-manager')}</option>
           <option value="manager">{t('role.manager')}</option>
           <option value="staff">{t('role.staff')}</option>
         </select>
@@ -2287,7 +2413,8 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
           ? <LoadIssue onRetry={loadData} />
           : <UserTable users={filteredUsers} managers={managers} currentUserId={user.id} busy={actionBusy} language={language} onChangeSector={changeUserSector} onResetPassword={resetPassword} onSetStatus={setAccountStatus} empty={t('empty.noAccountsMatch')} />}
       </Panel>
-      <AccountForm form={accountForm} setForm={setAccountForm} managers={managers} busy={actionBusy} language={language} onSubmit={(event) => submit(event, '/api/users', accountPayload(accountForm), t('msg.accountCreated'), () => setAccountForm(emptyAccount))} />
+      <AccountForm form={accountForm} setForm={setAccountForm} managers={managers}
+        generalManagers={register.users.filter((account) => account.role === 'general-manager' && account.status === 'active')} busy={actionBusy} language={language} onSubmit={(event) => submit(event, '/api/users', accountPayload(accountForm), t('msg.accountCreated'), () => setAccountForm(emptyAccount))} />
     </>;
   } else if (view === 'monthly') {
     content = <MonthlyPlans
@@ -2317,6 +2444,10 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         busy={actionBusy}
         onInvite={invitePartner}
         onChangeOperation={changePartnerOperation}
+        projects={projects}
+        contacts={register.users.filter((account) => account.status === 'active'
+          && ['super-admin', 'general-manager', 'manager'].includes(account.role))}
+        onSaveSharing={savePartnerSharing}
         onChangeStatus={changePartnerStatus}
         onResetPassword={resetPartnerPassword}
         onRemove={removePartner}
@@ -2423,6 +2554,8 @@ function UserTable({ users, currentUserId, busy, language, onChangeSector, onRes
   return users.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('field.name')}</th><th>{t('field.username')}</th><th>{t('field.role')}</th><th>{t('user.access')}</th><th>{t('field.workingArea')}</th><th className="card-optional">{t('field.projects')}</th><th className="card-optional">{t('field.team')}</th><th className="card-optional">{t('field.added')}</th><th className="card-optional">{t('field.password')}</th><th>{t('field.action')}</th></tr></thead><tbody>
     {users.map((account) => {
       const isDirector = account.role === 'super-admin';
+      // Director and General Manager both oversee every operation by role.
+      const seesAll = isDirector || account.role === 'general-manager';
       const isSelf = account.id === currentUserId;
       return <tr key={account.id}>
         <td className="card-title-cell"><strong>{account.name}</strong><small>#{account.id}</small></td>
@@ -2435,7 +2568,7 @@ function UserTable({ users, currentUserId, busy, language, onChangeSector, onRes
             to is chosen when they are added, and the register no longer
             repeats it on every row. A manager may run several operations, so
             theirs are ticked; a team member sits in exactly one. */}
-        <td data-label={t('field.workingArea')}>{isDirector ? <span className="muted-cell">{t('user.allOperations')}</span>
+        <td data-label={t('field.workingArea')}>{seesAll ? <span className="muted-cell">{t('user.allOperations')}</span>
           : account.role === 'manager' ? <OperationChecks
             label={`${t('field.workingArea')}: ${account.name}`}
             allLabel={t('user.allOperations')}
@@ -2601,11 +2734,14 @@ function ApprovalTable({ approvals, canDecide, busy, onDecide, empty }) {
 
 function Field({ label, wide, children }) { return <label className={wide ? 'form-field form-field-wide' : 'form-field'}><span>{label}</span>{children}</label>; }
 
-function AccountForm({ form, setForm, managers, busy, language, onSubmit }) {
+function AccountForm({ form, setForm, managers, generalManagers = [], busy, language, onSubmit }) {
   const t = useT();
-  // A manager heads an area, so they report to nobody and the field is hidden.
+  // A team member reports to a manager of their operation; a manager may report
+  // to a General Manager (or to nobody -- the Director); a General Manager
+  // reports to the Director, which needs no choice.
   const showsManager = form.role === 'staff';
   const isManager = form.role === 'manager';
+  const isGeneral = form.role === 'general-manager';
   const managerOptions = managers.filter((manager) => worksIn(manager, form.sector));
   // Nothing ticked yet is not an account the API can create.
   const missingOperations = isManager && !(form.sectors || []).length;
@@ -2615,12 +2751,14 @@ function AccountForm({ form, setForm, managers, busy, language, onSubmit }) {
       <Field label={t('field.name')}><input required maxLength="150" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></Field>
       <Field label={t('field.username')}><input required maxLength="100" autoComplete="off" autoCapitalize="none" spellCheck="false" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></Field>
       <Field label={t('field.password')}><input required minLength={MINIMUM_PASSWORD_LENGTH} type="password" autoComplete="new-password" aria-describedby="account-password-hint" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /><small id="account-password-hint" className="field-hint">{t('form.temporaryPasswordHint')}</small></Field>
-      <Field label={t('field.role')}><select required value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value, managerId: '' })}><option value="manager">{t('role.manager')}</option><option value="staff">{t('role.staff')}</option></select></Field>
+      <Field label={t('field.role')}><select required value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value, managerId: '' })}><option value="general-manager">{t('role.general-manager')}</option><option value="manager">{t('role.manager')}</option><option value="staff">{t('role.staff')}</option></select></Field>
       {/* A manager may run several operations at once -- Mining and Agriculture,
           say -- or every one of them; a team member always sits in exactly one,
           so they keep the single choice. A <div>, not a <label>: a group of
           checkboxes inside one label would all answer to a click on its text. */}
-      {isManager
+      {isGeneral
+        ? <Field label={t('field.workingArea')}><input readOnly tabIndex={-1} value={t('user.allOperations')} /></Field>
+        : isManager
         ? <div className="form-field">
           <span>{t('field.workingArea')}</span>
           <OperationChecks
@@ -2635,9 +2773,10 @@ function AccountForm({ form, setForm, managers, busy, language, onSubmit }) {
           <small className="field-hint">{t('form.managerOperationsHint')}</small>
         </div>
         : <Field label={t('field.workingArea')}><select required value={form.sector || ''} onChange={(event) => setForm({ ...form, sector: event.target.value, managerId: '' })}><option value="">{t('form.selectOperation')}</option>{sectors.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}</select></Field>}
+      {isManager && generalManagers.length > 0 && <Field label={t('field.reportsTo')}><select value={form.managerId || ''} onChange={(event) => setForm({ ...form, managerId: event.target.value })}><option value="">{t('org.reportsToDirector')}</option>{generalManagers.map((general) => <option key={general.id} value={general.id}>{general.name}</option>)}</select></Field>}
       {showsManager && <Field label={t('field.reportsTo')}><select value={form.managerId || ''} onChange={(event) => setForm({ ...form, managerId: event.target.value })} disabled={!form.sector}><option value="">{t('form.noManagerYet')}</option>{managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}</select></Field>}
     </div>
-    <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy || missingOperations}>{form.role === 'manager' ? t('form.addManager') : t('form.addTeamMember')}</button></div>
+    <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy || missingOperations}>{isGeneral ? t('form.addGeneralManager') : form.role === 'manager' ? t('form.addManager') : t('form.addTeamMember')}</button></div>
   </form>;
 }
 

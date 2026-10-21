@@ -26,6 +26,9 @@ import partnersRouter from './routes/partners.js';
 import partnerCommentsRouter from './routes/partnerComments.js';
 import monthlyPlanRouter from './routes/monthlyPlans.js';
 import notificationRouter from './routes/notifications.js';
+import organizationRouter from './routes/organization.js';
+import escalationRouter from './routes/escalations.js';
+import { escalationsHeldBySql } from './lib/organization.js';
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -495,6 +498,14 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
   );
   const planRow = planCounts.rows[0];
 
+  // Issues waiting on this account to settle or pass on -- the same predicate
+  // as the "Waiting for me" list, so the badge and the list agree.
+  const escalationValues = [];
+  const escalationsWaiting = await pool.query(
+    `SELECT COUNT(*)::int AS waiting FROM escalations e WHERE ${escalationsHeldBySql(req.user, escalationValues, 'e')}`,
+    escalationValues
+  );
+
   // What this account has not yet opened under the bell. Per person, never
   // per role: the Director's unread count is theirs alone.
   const unread = await pool.query(
@@ -593,6 +604,7 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
       plansBudget: Math.round(Number(planRow.plans_budget || 0) * 100) / 100,
       plansSpent: Math.round(Number(planRow.plans_spent || 0) * 100) / 100,
       unreadNotifications: unread.rows[0].unread,
+      escalationsAwaitingMe: escalationsWaiting.rows[0].waiting,
       totalProjects: project.total_projects,
       activeOperations: operationsStats.rows[0].active_operations,
       approvalsPending: approval.pending_approvals,
@@ -1063,6 +1075,13 @@ app.use('/api/monthly-plans', authMiddleware, monthlyPlanRouter);
 // no email or SMS behind it and the rows never claim otherwise. Each account
 // reads and marks only its own.
 app.use('/api/notifications', authMiddleware, notificationRouter);
+
+// The organisation: the chart from the Director down through the General
+// Manager, the project managers and their teams, with the external partners as
+// a branch of their own; and the issues that climb that line. Internal only --
+// neither path is on the partner allowlist.
+app.use('/api/organization', authMiddleware, organizationRouter);
+app.use('/api/escalations', authMiddleware, escalationRouter);
 
 // An /api path nothing matched is answered in JSON, not by the SPA fallback
 // below. Handing back index.html would give the client an HTML page where it

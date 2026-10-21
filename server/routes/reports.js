@@ -22,7 +22,7 @@ import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 import { pool } from '../db/database.js';
 import { sectors } from '../data/seedData.js';
-import { asyncRoute, hasFullScope, isAdmin, managerScope, operationsOf, projectScope, sectorIds, withinScope } from '../lib/http.js';
+import { asyncRoute, hasFullScope, isAdmin, isGeneralManager, managerScope, operationsOf, projectScope, sectorIds, withinScope } from '../lib/http.js';
 import { getCurrentRate, round2 } from '../lib/rates.js';
 // Progress and the month's budget are read through the monthly module's own
 // definitions rather than worked out again here: objectiveProgress and
@@ -336,7 +336,7 @@ export async function buildReport(user, period, choice = null) {
   managerScope(user, 'a.sector', values, filters);
   // A report covers what the reader is responsible for, which for a project
   // manager is their project.
-  projectScope(user, 'a.project_id', values, filters);
+  projectScope(user, 'a.project_id', values, filters, { assignedColumn: 'a.assigned_to' });
   // And then whatever the reader asked for on top of that.
   applyChoice(choice, { sector: 'a.sector', project: 'a.project_id' }, values, filters);
 
@@ -777,7 +777,10 @@ router.use((req, res, next) => {
   // but nothing enforced it: sector scoping alone let a team member pull -- and
   // export to Excel or PDF -- the entire budget and spend of their operation.
   // Scope answers "whose data?"; it was never an answer to "who may ask?".
-  if (!isAdmin(req.user) && req.user.role !== 'manager') {
+  // The General Manager reads the organisation's reports on screen like the
+  // Director does (scope comes from hasFullScope); the export below stays the
+  // Director's alone.
+  if (!isAdmin(req.user) && req.user.role !== 'manager' && !isGeneralManager(req.user)) {
     return res.status(403).json({ message: 'Only a manager or the Director can run a report.' });
   }
   next();

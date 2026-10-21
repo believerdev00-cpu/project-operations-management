@@ -36,7 +36,8 @@ const SUITES = [
   ['reports', 'reports.test.mjs', { needsApi: true }],
   ['feedback workflow', 'feedback-workflow.test.mjs', { needsApi: true }],
   ['manager operations', 'manager-operations.test.mjs', { needsApi: true }],
-  ['day correction', 'day-correction.test.mjs', { needsApi: true }]
+  ['day correction', 'day-correction.test.mjs', { needsApi: true }],
+  ['organization', 'organization.test.mjs', { needsApi: true }]
 ];
 
 const only = process.argv[2];

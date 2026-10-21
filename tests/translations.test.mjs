@@ -28,7 +28,7 @@ const check = (label, ok, detail = '') => {
 
 // ui.jsx holds the shared error boundary and dialogs; left off this list, every
 // key only they use was reported as unused, and their JSX went unchecked.
-const FILES = ['App.jsx', 'ui.jsx', 'journey.jsx', 'Home.jsx', 'MovementModule.jsx', 'ActivityReview.jsx', 'PartnerPortal.jsx', 'ExternalPartners.jsx', 'MonthlyPlans.jsx', 'ExpensePanel.jsx']
+const FILES = ['App.jsx', 'ui.jsx', 'journey.jsx', 'Home.jsx', 'MovementModule.jsx', 'ActivityReview.jsx', 'PartnerPortal.jsx', 'ExternalPartners.jsx', 'MonthlyPlans.jsx', 'ExpensePanel.jsx', 'Organization.jsx', 'Escalations.jsx']
   .map((name) => path.join(root, 'src', name));
 
 const sources = Object.fromEntries(FILES.map((file) => [path.basename(file), fs.readFileSync(file, 'utf8')]));
@@ -70,7 +70,7 @@ check(`${new Set(templates).size} template prefixes all resolve`, badPrefixes.le
 const FAMILIES = {
   'status.': ['Draft', 'Pending Approval', 'Approved', 'Rejected', 'In Progress', 'Completed', 'Cancelled',
     'Budget Adjusted', 'Needs Correction', 'On Hold', 'Funds Released', 'On Track', 'In Review', 'Delayed', 'Healthy'],
-  'role.': ['super-admin', 'manager', 'staff', 'partner'],
+  'role.': ['super-admin', 'general-manager', 'manager', 'staff', 'partner'],
   'approval.': ['pending', 'approved', 'rejected'],
   'partners.': ['active', 'suspended', 'revoked'],
   'mtype.': ['Staff', 'Equipment', 'Materials', 'Field Operation', 'Other'],
@@ -84,7 +84,16 @@ const FAMILIES = {
   // Every event the server can write a notification for (NOTIFICATION_KINDS in
   // server/db/monthlySchema.js) needs a sentence in every language.
   'notice.kind.': ['plan_assigned', 'plan_changed', 'change_requested', 'report_submitted', 'report_accepted',
-    'report_returned', 'work_submitted', 'work_approved', 'work_returned', 'partner_comment'],
+    'report_returned', 'work_submitted', 'work_approved', 'work_returned', 'partner_comment',
+    'team_added', 'escalation_raised', 'escalation_escalated', 'escalation_resolved', 'escalation_rejected',
+    'escalation_comment', 'partner_shared'],
+  // The organisation (server/db/organizationSchema.js): every escalation kind,
+  // status and trail action, and every organisation trail action.
+  'esc.kind.': ['issue', 'approval'],
+  'esc.status.': ['open', 'resolved', 'rejected'],
+  'esc.action.': ['raised', 'escalated', 'commented', 'resolved', 'rejected', 'reopened'],
+  'org.action.': ['team_created', 'team_updated', 'team_archived', 'team_restored', 'member_added', 'member_removed',
+    'leader_changed', 'reporting_changed', 'partner_profile_changed', 'partner_projects_changed'],
   'plan.objectiveState.': ['notStarted', 'inProgress', 'done', 'overdue']
 };
 for (const [prefix, values] of Object.entries(FAMILIES)) {

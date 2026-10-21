@@ -5,7 +5,7 @@ import { pool, safeRollback } from '../db/database.js';
 import { MAX_EVIDENCE_BYTES, MAX_EVIDENCE_FILES, MAX_EVIDENCE_LABEL, deleteFile, readFile, saveFile, storedFileName } from '../lib/storage.js';
 import { authMiddleware } from '../lib/auth.js';
 import {
-  asyncRoute, contentDisposition, hasFullScope, isAdmin, isValidDate as isCalendarDate, parseId, requiredText,
+  actsAcrossOperations, asyncRoute, contentDisposition, hasFullScope, isAdmin, isValidDate as isCalendarDate, parseId, requiredText,
   validNumber, sectorIds
 } from '../lib/http.js';
 import { MOVEMENT_STATUSES } from '../db/movementSchema.js';
@@ -88,7 +88,7 @@ function canCreate(user) {
   // all-operations manager covers it like any other. A team member in the
   // operation follows its trips but does not raise one: that would put a
   // funding request in the Director's queue, which only managers do.
-  return hasFullScope(user) || runsTrips(user);
+  return actsAcrossOperations(user) || runsTrips(user);
 }
 
 // Section 7 keeps approval, funds and final expenditure with the Director.
@@ -405,7 +405,7 @@ function canEdit(user, row) {
   if (isAdmin(user)) return true;
   // A movement officer may correct their own request only while it is still
   // theirs to change; once it is with its approver it is read-only to them.
-  return (hasFullScope(user) || worksIn(user, TRIPS_OPERATION))
+  return (actsAcrossOperations(user) || worksIn(user, TRIPS_OPERATION))
     && row.created_by === user.id
     && ['Draft', 'Pending Approval'].includes(row.status);
 }
@@ -1188,7 +1188,7 @@ router.get('/:id/evidence', asyncRoute(async (req, res) => {
 // memory, so a refused caller never gets the server to buffer 100 MB first.
 const authorizeEvidenceUpload = asyncRoute(async (req, res, next) => {
   const existing = await loadMovement(req.params.id, req.user);
-  if (!isAdmin(req.user) && !((hasFullScope(req.user) || worksIn(req.user, TRIPS_OPERATION)) && existing.created_by === req.user.id)) {
+  if (!isAdmin(req.user) && !((actsAcrossOperations(req.user) || worksIn(req.user, TRIPS_OPERATION)) && existing.created_by === req.user.id)) {
     return res.status(403).json({ message: 'You cannot attach evidence to this trip.' });
   }
   req.movement = existing;

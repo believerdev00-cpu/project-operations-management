@@ -4,6 +4,7 @@ import pg from 'pg';
 import { migrateMovementModule } from './movementSchema.js';
 import { migrateActivityModule } from './activitySchema.js';
 import { migrateMonthlyModule } from './monthlySchema.js';
+import { migrateOrganizationModule } from './organizationSchema.js';
 import { BUSINESS_OPERATIONS } from '../../shared/businessOperations.js';
 
 dotenv.config({ path: '.env.local' });
@@ -450,6 +451,11 @@ export async function initDatabase() {
     await pool.query('CREATE INDEX IF NOT EXISTS partner_comments_parent_idx ON partner_comments(parent_id)');
     await pool.query(`CREATE INDEX IF NOT EXISTS partner_comments_unread_idx ON partner_comments(read_by_director_at)
       WHERE author_role = 'partner' AND read_by_director_at IS NULL`);
+
+    // The organisation -- reporting lines, teams, escalations and what each
+    // partner is shown project by project -- hangs off users, projects,
+    // activities and the partner grants above, so it migrates after all of them.
+    await migrateOrganizationModule(pool);
 
   // The Director is identified by the role, not by a fixed username. Keyed on
   // username = 'admin', renaming that account -- which its owner is free to do

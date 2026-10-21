@@ -94,7 +94,32 @@ export function coversAllSectors(user) {
 // Every sector filter below asks the second question. Nothing here grants the
 // first.
 export function hasFullScope(user) {
+  return isAdmin(user) || coversAllSectors(user) || isGeneralManager(user);
+}
+
+// The General Manager: second in the line, under the Director, over the
+// project managers. They read every internal operation -- that is the job, and
+// it is why they count in hasFullScope above -- but they are NOT the Director:
+// isAdmin stays false for them, so they assign no work, decide no activity or
+// trip approval, export no report and manage no partner. Their own authority is
+// the organisation (teams, membership) and the escalations that reach them.
+//
+// Every route that used hasFullScope as permission to ACT rather than to READ
+// (raising a trip, editing one) asks actsAcrossOperations instead, so widening
+// the read did not widen the writes.
+export function isGeneralManager(user) {
+  return user?.role === 'general-manager';
+}
+
+// The Director, or a manager covering every operation: the accounts whose full
+// scope comes with the right to work in it. Not the General Manager.
+export function actsAcrossOperations(user) {
   return isAdmin(user) || coversAllSectors(user);
+}
+
+// Senior management: the people who oversee the whole organisation chart.
+export function isSeniorManagement(user) {
+  return isAdmin(user) || isGeneralManager(user);
 }
 
 // A manager may run more than one operation, so the filter is a list, never
@@ -132,25 +157,68 @@ export function operationsSql(alias) {
 // list of projects would show them nothing at all. The Director and an
 // all-operations manager are unaffected.
 //
-// `column` is the project id column of the table being read.
-export function projectScope(user, column, values, filters) {
+// A TEAM MEMBER on one or more teams is narrowed the same way, to the projects
+// of their live teams -- plus the work they personally carry, so an assignment
+// outside their teams never vanishes from the person doing it. Without this, a
+// member of Mining's drilling crew read every other Mining team's work, budgets
+// and spend. A team member on no team keeps the operation-wide view they always
+// had, for the same reason a manager with no project does: nothing about them
+// has been narrowed yet.
+//
+// `column` is the project id column of the table being read. `assignedColumn`,
+// when the table has one (activities), opens exactly the rows assigned to the
+// team member; without it the project they carry work in is opened instead,
+// which is what a list of projects needs.
+export function projectScope(user, column, values, filters, { assignedColumn = null } = {}) {
   if (hasFullScope(user)) return;
-  if (user.role !== 'manager') return;
-  values.push(user.id);
-  filters.push(
-    `(${column} IN (SELECT id FROM projects WHERE manager_id = $${values.length})
-       OR NOT EXISTS (SELECT 1 FROM projects WHERE manager_id = $${values.length}))`
-  );
+  if (user.role === 'manager') {
+    values.push(user.id);
+    filters.push(
+      `(${column} IN (SELECT id FROM projects WHERE manager_id = $${values.length})
+         OR NOT EXISTS (SELECT 1 FROM projects WHERE manager_id = $${values.length}))`
+    );
+    return;
+  }
+  if (user.role === 'staff') {
+    values.push(user.id);
+    const me = `$${values.length}`;
+    const carried = assignedColumn
+      ? `${assignedColumn} = ${me}`
+      : `${column} IN (SELECT project_id FROM activities WHERE assigned_to = ${me})`;
+    filters.push(
+      `(${column} IN (${TEAM_PROJECTS_SQL(me)})
+         OR ${carried}
+         OR NOT EXISTS (${TEAM_PROJECTS_SQL(me)}))`
+    );
+  }
 }
+
+// The projects of a team member's live teams. `me` is the placeholder (or
+// literal) holding their user id.
+export const TEAM_PROJECTS_SQL = (me) => `SELECT t.project_id FROM team_members tm
+  JOIN teams t ON t.id = tm.team_id AND t.status = 'active'
+  WHERE tm.user_id = ${me}`;
 
 // The single-row form of projectScope, for handlers that have already loaded the
 // row. Answers "may this account touch a record on that project?".
 export async function withinProjectScope(pool, user, projectId) {
   if (hasFullScope(user)) return true;
-  if (user.role !== 'manager') return true;
-  const mine = await pool.query('SELECT id FROM projects WHERE manager_id = $1', [user.id]);
-  if (!mine.rowCount) return true;
-  return mine.rows.some((row) => row.id === projectId);
+  if (user.role === 'manager') {
+    const mine = await pool.query('SELECT id FROM projects WHERE manager_id = $1', [user.id]);
+    if (!mine.rowCount) return true;
+    return mine.rows.some((row) => row.id === projectId);
+  }
+  if (user.role === 'staff') {
+    const teams = await pool.query(TEAM_PROJECTS_SQL('$1'), [user.id]);
+    if (!teams.rowCount) return true;
+    if (teams.rows.some((row) => row.project_id === projectId)) return true;
+    const carries = await pool.query(
+      'SELECT 1 FROM activities WHERE assigned_to = $1 AND project_id = $2 LIMIT 1',
+      [user.id, projectId]
+    );
+    return carries.rowCount > 0;
+  }
+  return true;
 }
 
 // "May this account touch a record in that operation?" -- the single-row form of

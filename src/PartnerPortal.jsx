@@ -168,6 +168,11 @@ export default function PartnerPortal({ user, fetchJson, language, t, tab = 'ove
         <Metric label={t('portal.completionRate')} value={`${overview.activities.completionRate}%`} />
         <Metric label={t('portal.movements')} value={overview.movements.total} />
       </div>
+      {/* The projects the Director shared with this partner one by one. When
+          there are none, the partner follows their operations whole. */}
+      {overview.sharedProjects?.length > 0 && <p className="partner-notice">
+        {t('portal.sharedProjects')}: {overview.sharedProjects.map((project) => project.name).join(', ')}
+      </p>}
       <Panel title={t('portal.approvedBudget')} subtitle={operation}>
         <div className="partner-budget">{formatMoney(overview.activities.approvedBudget)}</div>
       </Panel>

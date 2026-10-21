@@ -2,12 +2,25 @@ import express from 'express';
 import { pool, safeRollback } from '../db/database.js';
 import { ALL_OPERATIONS, asyncRoute, isAdmin, operationsSql, parseId, requiredText, sectorIds, withinScope } from '../lib/http.js';
 import { hashPassword, passwordProblem } from '../lib/passwords.js';
+import { REPORTS_TO } from '../db/organizationSchema.js';
+import { recordOrganization } from '../lib/organization.js';
 
 const router = express.Router();
 
 // Accounts the Director can create. 'super-admin' is deliberately absent: the
-// Director account is seeded, never minted through the API.
-export const assignableRoles = new Set(['manager', 'staff']);
+// Director account is seeded, never minted through the API. Nor is there any
+// route that changes an existing account's role, so nobody -- the Director
+// included -- can promote an account after the fact; a General Manager is
+// created as one. That is what keeps "assign yourself a higher role" from
+// having a door at all.
+export const assignableRoles = new Set(['general-manager', 'manager', 'staff']);
+
+// Who an account of this role may report to (REPORTS_TO in organizationSchema.js,
+// which the users_reporting_line trigger enforces too). Read here so the API
+// can refuse with a sentence before the database refuses with an exception.
+function reportsToRoles(role) {
+  return REPORTS_TO[role] || [];
+}
 
 function adminOnly(message) {
   return (req, res, next) => {
@@ -91,6 +104,9 @@ function translateConstraintError(error) {
 // operation: their manager and their work are in it. An unknown id or an empty
 // list makes the request invalid rather than quietly saving less.
 function requestedOperations(body, role) {
+  // The General Manager oversees every operation by role, not by a list: the
+  // account carries none, and hasFullScope is what widens what it reads.
+  if (role === 'general-manager') return { coversAll: false, operations: [] };
   const list = Array.isArray(body?.sectors) ? body.sectors : (body?.sector ? [body.sector] : []);
   const unique = [...new Set(list)];
   if (role === 'manager' && unique.length === 1 && unique[0] === ALL_OPERATIONS) {
@@ -134,7 +150,7 @@ router.get('/', adminOnly('Only the Director can view the account register.'), a
   // mean nothing for an outside, view-only account.
   const result = await pool.query(
     `${ACCOUNT_SELECT} WHERE u.role <> 'partner'
-     ORDER BY CASE WHEN u.role = 'super-admin' THEN 0 WHEN u.role = 'manager' THEN 1 ELSE 2 END, u.name`
+     ORDER BY CASE u.role WHEN 'super-admin' THEN 0 WHEN 'general-manager' THEN 1 WHEN 'manager' THEN 2 ELSE 3 END, u.name`
   );
   const users = result.rows.map(mapAccount);
 
@@ -155,7 +171,7 @@ router.post('/', adminOnly('Only the Director can create accounts.'), asyncRoute
   const weak = passwordProblem(password, { username });
   if (weak) return res.status(400).json({ message: weak });
   if (!assignableRoles.has(role)) {
-    return res.status(400).json({ message: 'Choose a role: manager or team member.' });
+    return res.status(400).json({ message: 'Choose a role: general manager, manager or team member.' });
   }
   // Every non-Director account is scoped to at least one operation; without it
   // their own scoped queries would read back nothing. A manager may run
@@ -169,12 +185,15 @@ router.post('/', adminOnly('Only the Director can create accounts.'), asyncRoute
   if (req.body?.managerId && !managerId) return res.status(400).json({ message: 'The selected manager is invalid.' });
   if (managerId) {
     const manager = await pool.query(
-      `SELECT id, sector, role, covers_all_sectors AS "coversAllSectors", ${operationsSql('users')} AS operations FROM users WHERE id = $1 AND role = 'manager'`,
-      [managerId]
+      `SELECT id, sector, role, covers_all_sectors AS "coversAllSectors", ${operationsSql('users')} AS operations
+       FROM users WHERE id = $1 AND role = ANY($2::text[])`,
+      [managerId, reportsToRoles(role)]
     );
     if (!manager.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
-    // A manager covering every operation may hold staff from any of them.
-    if (!coversAll && !coversEvery(manager.rows[0], operations)) {
+    // A manager covering every operation may hold staff from any of them. A
+    // General Manager or the Director above someone covers every operation by
+    // role, so only a manager boss is checked against the operations.
+    if (manager.rows[0].role === 'manager' && !coversAll && !coversEvery(manager.rows[0], operations)) {
       return res.status(400).json({ message: 'That manager works in a different operation. Pick a manager from the same one.' });
     }
   }
@@ -192,6 +211,11 @@ router.post('/', adminOnly('Only the Director can create accounts.'), asyncRoute
       [username.trim(), passwordHash, name.trim(), role, storedSector, managerId, coversAll]
     );
     createdId = inserted.rows[0].id;
+    if (managerId) {
+      await recordOrganization(client, req.user, 'reporting_changed', {
+        subjectUserId: createdId, subjectName: name.trim(), detail: { from: null, to: managerId }
+      });
+    }
     // In the same transaction, so the three-managers limit on a second
     // operation refuses the whole account rather than leaving half of it.
     if (role === 'manager') await setManagerOperations(client, createdId, operations, req.user.id);
@@ -247,7 +271,7 @@ router.patch('/:id/status', adminOnly('Only the Director can suspend or reactiva
     return res.status(400).json({ message: 'You cannot suspend your own account.' });
   }
   const result = await pool.query(
-    "UPDATE users SET status = $2 WHERE id = $1 AND role IN ('manager', 'staff') RETURNING id",
+    "UPDATE users SET status = $2 WHERE id = $1 AND role IN ('general-manager', 'manager', 'staff') RETURNING id",
     [req.params.id, status]
   );
   if (!result.rowCount) return res.status(404).json({ message: 'Account not found.' });
@@ -281,7 +305,7 @@ router.patch('/:id/status', adminOnly('Only the Director can suspend or reactiva
 router.patch('/:id/assignment', adminOnly('Only the Director can change an assignment.'), asyncRoute(async (req, res) => {
   const payload = req.body || {};
   const existing = await pool.query(
-    `SELECT id, role, sector, manager_id, covers_all_sectors, ${operationsSql('users')} AS operations FROM users WHERE id = $1`,
+    `SELECT id, name, role, sector, manager_id, covers_all_sectors, ${operationsSql('users')} AS operations FROM users WHERE id = $1`,
     [req.params.id]
   );
   if (!existing.rowCount) return res.status(404).json({ message: 'Account not found.' });
@@ -292,6 +316,10 @@ router.patch('/:id/assignment', adminOnly('Only the Director can change an assig
   }
   if (target.role === 'partner') {
     return res.status(403).json({ message: 'Change an external partner\'s operations from External Partners.' });
+  }
+  if (target.role === 'general-manager' && (Object.prototype.hasOwnProperty.call(payload, 'sector')
+    || Object.prototype.hasOwnProperty.call(payload, 'sectors'))) {
+    return res.status(400).json({ message: 'The General Manager oversees every operation; there is no operation to change.' });
   }
 
   // An absent key means "leave as is"; an explicit null means "clear it".
@@ -326,11 +354,11 @@ router.patch('/:id/assignment', adminOnly('Only the Director can change an assig
 
     const manager = await pool.query(
       `SELECT id, sector, role, covers_all_sectors AS "coversAllSectors", ${operationsSql('users')} AS operations
-       FROM users WHERE id = $1 AND role = 'manager'`,
-      [managerId]
+       FROM users WHERE id = $1 AND role = ANY($2::text[])`,
+      [managerId, reportsToRoles(target.role)]
     );
     if (!manager.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
-    if (!coversAll && !coversEvery(manager.rows[0], operations)) {
+    if (manager.rows[0].role === 'manager' && !coversAll && !coversEvery(manager.rows[0], operations)) {
       return res.status(400).json({
         message: 'That manager works in a different operation. Move the user to the manager\'s operation, or pick a manager from this one.'
       });
@@ -386,6 +414,11 @@ router.patch('/:id/assignment', adminOnly('Only the Director can change an assig
       [target.id, sector, managerId, coversAll]
     );
     if (target.role === 'manager') await setManagerOperations(client, target.id, operations, req.user.id);
+    if (Number(managerId || 0) !== Number(target.manager_id || 0)) {
+      await recordOrganization(client, req.user, 'reporting_changed', {
+        subjectUserId: target.id, subjectName: target.name, detail: { from: target.manager_id, to: managerId }
+      });
+    }
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);

@@ -31,6 +31,7 @@ import { TRIPS_OPERATION, operationById } from '../../shared/businessOperations.
 import { round2 } from '../lib/rates.js';
 import { COMMENT_SUBJECTS, PARTNER_COMMENTS_PER_HOUR, commentBody, loadThreads } from '../lib/partnerComments.js';
 import { notifyDirectors } from '../lib/notifications.js';
+import { partnerProjectSql } from '../lib/organization.js';
 
 const router = express.Router();
 
@@ -49,9 +50,17 @@ function scopeFor(req) {
 
 // The single clause that every query in this file is built on. It takes the
 // operations from the authenticated account's grants and nowhere else.
-function activityVisibility(operations, values) {
+//
+// Within an operation, a partner the Director has shared particular projects
+// with sees those projects only (partnerProjectSql); the partner's id comes
+// from the authenticated account like the operations do.
+function activityVisibility(operations, values, partnerId) {
   values.push(operations);
-  return `a.sector = ANY($${values.length}::text[])
+  const granted = `$${values.length}::text[]`;
+  values.push(partnerId);
+  const me = `$${values.length}::int`;
+  return `a.sector = ANY(${granted})
+    AND ${partnerProjectSql(me, 'a.sector', 'a.project_id')}
     AND a.approval_status = 'approved'
     AND a.externally_visible = TRUE
     AND a.status NOT IN ('Draft', 'Cancelled', 'Rejected')`;
@@ -64,13 +73,19 @@ function activityVisibility(operations, values) {
 // Linkage is decided by related_area alone. movements.sector is 'movement' on
 // every row, so testing it here once let a Logistics partner read movements
 // that support Mining, Farming or Agriculture.
-function movementVisibility(operations, values) {
+function movementVisibility(operations, values, partnerId) {
   values.push(operations);
   const granted = `$${values.length}::text[]`;
+  values.push(partnerId);
+  const me = `$${values.length}::int`;
   const belongs = operations.includes(TRIPS_OPERATION)
     ? `(m.related_area IS NULL OR m.related_area = ANY(${granted}))`
     : `m.related_area = ANY(${granted})`;
+  // A trip narrowed to shared projects is judged by the operation it supports
+  // (the trips operation itself when it supports none).
+  const supports = `COALESCE(m.related_area, '${TRIPS_OPERATION}')`;
   return `${belongs}
+    AND ${partnerProjectSql(me, supports, 'm.project_id')}
     AND m.approval_status = 'approved'
     AND m.externally_visible = TRUE
     AND m.status NOT IN ('Draft', 'Cancelled', 'Rejected')`;
@@ -150,9 +165,9 @@ router.get('/overview', asyncRoute(async (req, res) => {
   const operation = operationById(headline);
 
   const activityValues = [];
-  const activityWhere = activityVisibility(scope, activityValues);
+  const activityWhere = activityVisibility(scope, activityValues, req.user.id);
   const movementValues = [];
-  const movementWhere = movementVisibility(scope, movementValues);
+  const movementWhere = movementVisibility(scope, movementValues, req.user.id);
 
   const [activities, movements, recent] = await Promise.all([
     pool.query(
@@ -177,6 +192,15 @@ router.get('/overview', asyncRoute(async (req, res) => {
     )
   ]);
 
+  // The projects the Director shared with this partner one by one, so the
+  // partner can see what their view has been narrowed to. Names only, and only
+  // their own shares.
+  const shared = await pool.query(
+    `SELECT p.id, p.name, p.sector FROM partner_projects pp JOIN projects p ON p.id = pp.project_id
+      WHERE pp.partner_id = $1 AND p.sector = ANY($2::text[]) ORDER BY p.name`,
+    [req.user.id, scope]
+  );
+
   const activityStats = activities.rows[0];
   const total = activityStats.total;
   res.json({
@@ -189,6 +213,7 @@ router.get('/overview', asyncRoute(async (req, res) => {
     // covers -- all of them unless one was asked for.
     operations: req.user.operations,
     scope,
+    sharedProjects: shared.rows.map((row) => ({ id: row.id, name: row.name, operation: row.sector })),
     accessLevel: req.user.accessLevel,
     activities: {
       total,
@@ -212,7 +237,7 @@ router.get('/overview', asyncRoute(async (req, res) => {
 
 router.get('/activities', asyncRoute(async (req, res) => {
   const values = [];
-  const filters = [activityVisibility(scopeFor(req), values)];
+  const filters = [activityVisibility(scopeFor(req), values, req.user.id)];
 
   // A partner may narrow what they are already entitled to see. They cannot
   // widen it: the visibility clause above is always present, and these filters
@@ -241,7 +266,7 @@ router.get('/activities', asyncRoute(async (req, res) => {
 
 router.get('/movements', asyncRoute(async (req, res) => {
   const values = [];
-  const filters = [movementVisibility(scopeFor(req), values)];
+  const filters = [movementVisibility(scopeFor(req), values, req.user.id)];
 
   if (req.query.status && req.query.status !== 'All') {
     values.push(req.query.status);
@@ -266,7 +291,7 @@ router.get('/report', asyncRoute(async (req, res) => {
 
   const scope = scopeFor(req);
   const values = [];
-  const where = activityVisibility(scope, values);
+  const where = activityVisibility(scope, values, req.user.id);
   values.push(window);
   // An activity belongs to the month its work was approved (or, failing that,
   // handed out or raised). updated_at moved every time the record was touched --
@@ -320,7 +345,7 @@ router.get('/report', asyncRoute(async (req, res) => {
 // names, notes and budget arguments are internal and are not carried across.
 router.get('/updates', asyncRoute(async (req, res) => {
   const values = [];
-  const where = activityVisibility(scopeFor(req), values);
+  const where = activityVisibility(scopeFor(req), values, req.user.id);
   values.push(safeLimit(req.query.limit, 25, 100));
 
   const result = await pool.query(
@@ -356,11 +381,11 @@ router.get('/updates', asyncRoute(async (req, res) => {
 // is made with the same visibility clauses as the reads above, so a partner can
 // only comment on what they can see.
 
-async function canSeeSubject(operation, subjectType, subjectId) {
+async function canSeeSubject(partnerId, operation, subjectType, subjectId) {
   const values = [];
   const [table, where] = subjectType === 'activity'
-    ? ['activities a', activityVisibility([operation], values)]
-    : ['movements m', movementVisibility([operation], values)];
+    ? ['activities a', activityVisibility([operation], values, partnerId)]
+    : ['movements m', movementVisibility([operation], values, partnerId)];
   values.push(subjectId);
   const alias = subjectType === 'activity' ? 'a' : 'm';
   const result = await pool.query(`SELECT 1 FROM ${table} WHERE ${where} AND ${alias}.id = $${values.length}`, values);
@@ -430,7 +455,7 @@ router.post('/comments', asyncRoute(async (req, res) => {
     return res.status(400).json({ message: 'A comment is about the operation, an activity or a trip.' });
   }
   const subject = subjectType === 'operation' ? null : String(subjectId || '');
-  if (subjectType !== 'operation' && (!subject || !(await canSeeSubject(operation, subjectType, subject)))) {
+  if (subjectType !== 'operation' && (!subject || !(await canSeeSubject(req.user.id, operation, subjectType, subject)))) {
     // The same answer whether the record does not exist or is not theirs to
     // see, so the reply cannot be used to probe for records.
     return res.status(404).json({ message: 'That record is not one you can see.' });

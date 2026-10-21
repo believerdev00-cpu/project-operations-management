@@ -373,7 +373,7 @@ async function loadActivity(id, user) {
   // projects. Applied to the scoped branch only: a record waiting on this
   // person's own approval stays readable either way, or they could be handed a
   // decision they cannot open.
-  projectScope(user, 'a.project_id', values, scopeFilters);
+  projectScope(user, 'a.project_id', values, scopeFilters, { assignedColumn: 'a.assigned_to' });
   const scope = scopeFilters.length
     ? `(${scopeFilters.join(' AND ')} OR ${pendingForMeSql(user, values, 'a')})`
     : '';
@@ -555,7 +555,7 @@ router.get('/', asyncRoute(async (req, res) => {
   }
   if (!approvalQueue) {
     managerScope(req.user, 'a.sector', values, filters);
-    projectScope(req.user, 'a.project_id', values, filters);
+    projectScope(req.user, 'a.project_id', values, filters, { assignedColumn: 'a.assigned_to' });
   }
 
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
