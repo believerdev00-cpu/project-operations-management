@@ -300,7 +300,7 @@ function readMovementPayload(payload) {
     ? null
     : payload.relatedArea;
   if (relatedArea !== null && !sectorIds.has(relatedArea)) {
-    throw new MovementError(400, 'Related area must be one of the four business operations, or left empty.');
+    throw new MovementError(400, 'Related area must be one of the four operations, or left empty.');
   }
 
   if (!isValidDate(payload.departureDate) || !isValidDate(payload.returnDate)) {

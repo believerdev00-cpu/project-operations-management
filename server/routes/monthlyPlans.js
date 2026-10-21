@@ -282,7 +282,7 @@ function readObjectives(payload, operation) {
     if (supports) {
       if (!isSupportOperation(operation)) {
         return {
-          error: `"${title}": only a Movement & Facilitation objective says which project it supports.`
+          error: `"${title}": only a Movement & Facilitation objective says which operation it supports.`
         };
       }
       if (!isPrimaryOperation(supports)) {
@@ -703,7 +703,7 @@ router.get('/', asyncRoute(async (req, res) => {
   }
   if (req.query.operation && req.query.operation !== 'All') {
     if (!sectorIds.has(req.query.operation)) {
-      return res.status(400).json({ message: 'That project does not exist.' });
+      return res.status(400).json({ message: 'That operation does not exist.' });
     }
     values.push(req.query.operation);
     filters.push(`p.sector = $${values.length}`);
@@ -1101,7 +1101,7 @@ async function planDetail(planId, user) {
 router.get('/:id', asyncRoute(async (req, res) => {
   const row = await loadPlan(req.params.id, req.user);
   if (!canReadPlan(req.user, row)) {
-    return res.status(403).json({ message: 'This plan belongs to another project.' });
+    return res.status(403).json({ message: 'This plan belongs to another operation.' });
   }
   res.json(await planDetail(row.id, req.user));
 }));
@@ -1137,7 +1137,7 @@ router.post('/', asyncRoute(async (req, res) => {
   const { operation, managerId } = req.body || {};
 
   if (!sectorIds.has(operation)) {
-    return res.status(400).json({ message: 'Choose one of the four projects.' });
+    return res.status(400).json({ message: 'Choose one of the four operations.' });
   }
   const month = monthStart(req.body?.month);
   if (!month) return res.status(400).json({ message: 'The month must be in YYYY-MM form.' });
@@ -1169,7 +1169,7 @@ router.post('/', asyncRoute(async (req, res) => {
     [operation, month]
   );
   if (duplicate.rowCount) {
-    return res.status(409).json({ message: 'A plan already exists for that project and month.' });
+    return res.status(409).json({ message: 'A plan already exists for that operation and month.' });
   }
 
   // The agreed list of commitments for the month. This is the Director's whole
@@ -1192,7 +1192,7 @@ router.post('/', asyncRoute(async (req, res) => {
   if (requiredText(req.body?.projectId)) {
     const project = await pool.query('SELECT id FROM projects WHERE id = $1 AND sector = $2', [req.body.projectId, operation]);
     if (!project.rowCount) {
-      return res.status(400).json({ message: 'That work package does not belong to this project.' });
+      return res.status(400).json({ message: 'That project does not belong to this operation.' });
     }
     projectId = project.rows[0].id;
   }
@@ -1210,7 +1210,7 @@ router.post('/', asyncRoute(async (req, res) => {
     if (!found.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
     // A manager covering every operation may run any operation's month.
     if (!withinScope(found.rows[0], operation)) {
-      return res.status(400).json({ message: 'That manager works in a different project.' });
+      return res.status(400).json({ message: 'That manager works in a different operation.' });
     }
     manager = found.rows[0];
   }
@@ -1297,7 +1297,7 @@ router.post('/', asyncRoute(async (req, res) => {
     await safeRollback(client);
     // One plan per operation per month, enforced by a unique index.
     if (error?.code === '23505') {
-      return res.status(409).json({ message: 'A plan already exists for that project and month.' });
+      return res.status(409).json({ message: 'A plan already exists for that operation and month.' });
     }
     throw error;
   } finally {
@@ -1338,7 +1338,7 @@ router.patch('/:id', asyncRoute(async (req, res) => {
       );
       if (!found.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
       if (!withinScope(found.rows[0], existing.sector)) {
-        return res.status(400).json({ message: 'That manager works in a different project.' });
+        return res.status(400).json({ message: 'That manager works in a different operation.' });
       }
     }
     if (managerId !== existing.manager_id) {
@@ -1413,7 +1413,7 @@ router.patch('/:id', asyncRoute(async (req, res) => {
     if (projectId) {
       const project = await pool.query('SELECT id FROM projects WHERE id = $1 AND sector = $2', [projectId, existing.sector]);
       if (!project.rowCount) {
-        return res.status(400).json({ message: 'That work package does not belong to this project.' });
+        return res.status(400).json({ message: 'That project does not belong to this operation.' });
       }
     }
     if (projectId !== existing.project_id) {
@@ -1861,7 +1861,7 @@ router.delete('/:id/objectives/:objectiveId', asyncRoute(async (req, res) => {
 router.post('/:id/start', asyncRoute(async (req, res) => {
   const plan = await loadPlan(req.params.id, req.user);
   if (!canWorkPlan(req.user, plan)) {
-    return res.status(403).json({ message: 'Only the manager of this project can start this month.' });
+    return res.status(403).json({ message: 'Only the manager of this operation can start this month.' });
   }
   if (plan.status === 'Draft') {
     return res.status(409).json({ message: 'The Director has not confirmed this month yet.' });
@@ -1908,7 +1908,7 @@ router.post('/:id/start', asyncRoute(async (req, res) => {
 router.post('/:id/reports', asyncRoute(async (req, res) => {
   const plan = await loadPlan(req.params.id, req.user);
   if (!canWorkPlan(req.user, plan)) {
-    return res.status(403).json({ message: 'Only the manager of this project can report on this month.' });
+    return res.status(403).json({ message: 'Only the manager of this operation can report on this month.' });
   }
   // THE MANAGER OWNS THE OPERATIONAL RECORD. The Director monitors the month;
   // they do not lead it and they do not enter what happened in it. Letting them
@@ -1919,7 +1919,7 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
   // that should not be there), because reviewing an account is not writing it.
   if (isAdmin(req.user)) {
     return res.status(403).json({
-      message: 'The manager of this project records what happened. The Director reads it.',
+      message: 'The manager of this operation records what happened. The Director reads it.',
       code: 'MANAGER_RECORDS'
     });
   }
@@ -2126,7 +2126,7 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
 router.post('/:id/reports/:reportId/evidence', asyncRoute(async (req, res, next) => {
   const plan = await loadPlan(req.params.id, req.user);
   if (!canWorkPlan(req.user, plan)) {
-    return res.status(403).json({ message: 'Only the manager of this project can add proof to this month.' });
+    return res.status(403).json({ message: 'Only the manager of this operation can add proof to this month.' });
   }
   if (!isPlanOpen(plan)) {
     return res.status(400).json({ message: 'This month has been closed.' });
@@ -2177,7 +2177,7 @@ router.post('/:id/reports/:reportId/evidence', asyncRoute(async (req, res, next)
 router.get('/:id/reports/:reportId/evidence/:evidenceId/file', asyncRoute(async (req, res) => {
   const plan = await loadPlan(req.params.id, req.user);
   if (!canReadPlan(req.user, plan)) {
-    return res.status(403).json({ message: 'This plan belongs to another project.' });
+    return res.status(403).json({ message: 'This plan belongs to another operation.' });
   }
   const reportId = parseId(req.params.reportId);
   const evidenceId = parseId(req.params.evidenceId);
@@ -2482,8 +2482,8 @@ router.post('/:id/activities', asyncRoute(async (req, res) => {
   if (!projectResult.rowCount) {
     return res.status(400).json({
       message: payload.projectId
-        ? 'That project does not belong to this business operation.'
-        : 'No project exists for this business operation. Add one first.'
+        ? 'That project does not belong to this operation.'
+        : 'No project exists for this operation. Add one first.'
     });
   }
 
@@ -2572,7 +2572,7 @@ router.post('/:id/activities', asyncRoute(async (req, res) => {
 router.post('/:id/activities/:activityId/work', asyncRoute(async (req, res) => {
   const plan = await loadPlan(req.params.id, req.user);
   if (!canReadPlan(req.user, plan)) {
-    return res.status(403).json({ message: 'This plan belongs to another project.' });
+    return res.status(403).json({ message: 'This plan belongs to another operation.' });
   }
   // The manager the plan names, or the Director. Another manager in the same
   // operation can read the month but does not staff it.
@@ -2642,7 +2642,7 @@ router.post('/:id/activities/:activityId/work', asyncRoute(async (req, res) => {
     );
     if (!person.rowCount) return res.status(400).json({ message: 'The selected person is invalid.' });
     if (!withinScope(person.rows[0], plan.sector)) {
-      return res.status(400).json({ message: 'That person works in a different project.' });
+      return res.status(400).json({ message: 'That person works in a different operation.' });
     }
   }
   if (!assignedTo) {
@@ -2845,7 +2845,7 @@ router.post('/:id/attach/:activityId', asyncRoute(async (req, res) => {
 router.get('/:id/month-report', asyncRoute(async (req, res) => {
   const plan = await loadPlan(req.params.id, req.user);
   if (!canReadPlan(req.user, plan)) {
-    return res.status(403).json({ message: 'This plan belongs to another project.' });
+    return res.status(403).json({ message: 'This plan belongs to another operation.' });
   }
 
   const [objectiveRows, counts] = await Promise.all([
@@ -2939,7 +2939,7 @@ router.get('/:id/month-report', asyncRoute(async (req, res) => {
 router.post('/:id/report', asyncRoute(async (req, res) => {
   const plan = await loadPlan(req.params.id, req.user);
   if (!canReadPlan(req.user, plan)) {
-    return res.status(403).json({ message: 'This plan belongs to another project.' });
+    return res.status(403).json({ message: 'This plan belongs to another operation.' });
   }
   // The report is filed by whoever may work the month: the manager the plan
   // names, or -- on a month with nobody named -- a manager of that operation.

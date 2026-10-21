@@ -469,9 +469,9 @@ function canEditRequest(user, row) {
 // refused rather than quietly overridden.
 function projectSector(payload, project) {
   const sector = validateSector(project.sector);
-  if (!sector) return { error: 'That work package has no valid project.' };
+  if (!sector) return { error: 'That project has no valid operation.' };
   if (payload.sector && payload.sector !== sector) {
-    return { error: 'The project must match the work package’s. Choose a work package in that project, or change the project.' };
+    return { error: 'The operation must match the project’s. Choose a project in that operation, or change the operation.' };
   }
   return { sector };
 }
@@ -631,13 +631,13 @@ router.post('/', asyncRoute(async (req, res) => {
     `SELECT id, sector FROM projects WHERE id = $1${hasFullScope(req.user) ? '' : ' AND sector = ANY($2::text[])'}`,
     hasFullScope(req.user) ? [payload.projectId] : [payload.projectId, operationsOf(req.user)]
   );
-  if (!projectResult.rowCount) return res.status(404).json({ message: 'Select an existing work package before assigning an activity.' });
+  if (!projectResult.rowCount) return res.status(404).json({ message: 'Select an existing project before assigning an activity.' });
 
   const resolved = projectSector(payload, projectResult.rows[0]);
   if (resolved.error) return res.status(400).json({ message: resolved.error });
   const sector = resolved.sector;
   if (!withinScope(req.user, sector)) {
-    return res.status(403).json({ message: 'You can only add work in your own project.' });
+    return res.status(403).json({ message: 'You can only add work in your own operation.' });
   }
 
   // Two ways in, one table. The Director assigns work to a manager, and that
@@ -677,7 +677,7 @@ router.post('/', asyncRoute(async (req, res) => {
     // handing them work outside it would leave them assigned to a record they
     // cannot open. A manager who covers every area can be handed anything.
     if (!withinScope(manager.rows[0], sector)) {
-      return res.status(400).json({ message: 'That person works in a different project. Pick somebody from this one.' });
+      return res.status(400).json({ message: 'That person works in a different operation. Pick somebody from this one.' });
     }
     // A team member has nobody to answer to on the record, so there is nothing
     // for them to accept: the Director's own instruction is the approval. Left
@@ -763,7 +763,7 @@ router.post('/', asyncRoute(async (req, res) => {
     );
     if (!result.rowCount) {
       await safeRollback(client);
-      return res.status(404).json({ message: 'Work package not found.' });
+      return res.status(404).json({ message: 'Project not found.' });
     }
     const entries = assigning
       ? [
@@ -820,13 +820,13 @@ router.put('/:id', asyncRoute(async (req, res) => {
     `SELECT id, sector FROM projects WHERE id = $1${hasFullScope(req.user) ? '' : ' AND sector = ANY($2::text[])'}`,
     hasFullScope(req.user) ? [payload.projectId] : [payload.projectId, operationsOf(req.user)]
   );
-  if (!projectResult.rowCount) return res.status(404).json({ message: 'Select an existing work package before assigning an activity.' });
+  if (!projectResult.rowCount) return res.status(404).json({ message: 'Select an existing project before assigning an activity.' });
 
   const resolved = projectSector(payload, projectResult.rows[0]);
   if (resolved.error) return res.status(400).json({ message: resolved.error });
   const sector = resolved.sector;
   if (!withinScope(req.user, sector)) {
-    return res.status(403).json({ message: 'You can only add work in your own project.' });
+    return res.status(403).json({ message: 'You can only add work in your own operation.' });
   }
 
   const requestedBudget = round2(payload.costUsd || 0);
@@ -839,7 +839,7 @@ router.put('/:id', asyncRoute(async (req, res) => {
       return res.status(400).json({ message: 'The budget cannot be changed while correcting. Ask for a budget change instead.' });
     }
     if (payload.projectId !== existing.project_id) {
-      return res.status(400).json({ message: 'Work sent back for correction stays in its work package.' });
+      return res.status(400).json({ message: 'Work sent back for correction stays in its project.' });
     }
   }
   const client = await pool.connect();
@@ -1707,7 +1707,7 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
       );
       if (!manager.rowCount) return res.status(400).json({ message: 'The selected person is invalid.' });
       if (!withinScope(manager.rows[0], existing.sector)) {
-        return res.status(400).json({ message: 'That person works in a different project. Pick somebody from this one.' });
+        return res.status(400).json({ message: 'That person works in a different operation. Pick somebody from this one.' });
       }
       // Handing work to a team member while it is still waiting for a manager to
       // accept it would leave the record waiting on somebody with no approval
@@ -1796,7 +1796,7 @@ const BUDGET_CHANGEABLE_STATUSES = ['Approved', 'Budget Adjusted', 'In Progress'
 router.post('/:id/budget-requests', asyncRoute(async (req, res) => {
   const existing = await loadActivity(req.params.id, req.user);
   if (!isAdmin(req.user) && (!withinScope(req.user, existing.sector) || req.user.role !== 'manager')) {
-    return res.status(403).json({ message: 'Only a manager in this project can ask for a different budget.' });
+    return res.status(403).json({ message: 'Only a manager in this operation can ask for a different budget.' });
   }
   assertPlanOpen(existing);
   if (!BUDGET_CHANGEABLE_STATUSES.includes(existing.status)) {

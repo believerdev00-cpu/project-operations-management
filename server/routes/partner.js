@@ -43,7 +43,7 @@ function scopeFor(req) {
   const granted = req.user.operations || [req.user.sector];
   const asked = typeof req.query.operation === 'string' ? req.query.operation : '';
   if (!asked || asked === 'All') return granted;
-  if (!granted.includes(asked)) throw new PartnerScopeError('That business operation is not part of your access.');
+  if (!granted.includes(asked)) throw new PartnerScopeError('That operation is not part of your access.');
   return [asked];
 }
 
@@ -424,10 +424,10 @@ router.get('/comments', asyncRoute(async (req, res) => {
 router.post('/comments', asyncRoute(async (req, res) => {
   const { operation, subjectType = 'operation', subjectId = null } = req.body || {};
   if (!req.user.operations.includes(operation)) {
-    return res.status(403).json({ message: 'That project is not part of your access.' });
+    return res.status(403).json({ message: 'That operation is not part of your access.' });
   }
   if (!COMMENT_SUBJECTS.includes(subjectType)) {
-    return res.status(400).json({ message: 'A comment is about the project, an activity or a trip.' });
+    return res.status(400).json({ message: 'A comment is about the operation, an activity or a trip.' });
   }
   const subject = subjectType === 'operation' ? null : String(subjectId || '');
   if (subjectType !== 'operation' && (!subject || !(await canSeeSubject(operation, subjectType, subject)))) {
@@ -458,7 +458,7 @@ router.post('/comments/:id/replies', asyncRoute(async (req, res) => {
   if (!thread.rowCount) return res.status(404).json({ message: 'Comment not found.' });
   const row = thread.rows[0];
   if (!req.user.operations.includes(row.sector)) {
-    return res.status(403).json({ message: 'That project is not part of your access.' });
+    return res.status(403).json({ message: 'That operation is not part of your access.' });
   }
   const text = commentBody(req.body?.body);
   if (text.error) return res.status(400).json({ message: text.error });

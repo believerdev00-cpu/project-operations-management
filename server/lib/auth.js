@@ -198,20 +198,20 @@ export async function authMiddleware(req, res, next) {
     // handler has to remember to do it and none can forget.
     if (user.role === 'partner' && !partnerMayReach(req.originalUrl)) {
       return res.status(403).json({
-        message: 'External partner access is limited to your assigned projects.'
+        message: 'External partner access is limited to your assigned operations.'
       });
     }
     // An account with no operation cannot be scoped to one, so it would read
     // either nothing or everything depending on the query. Refuse instead.
     if (user.role === 'partner' && !user.sector) {
-      return res.status(403).json({ message: 'This partner account has no project assigned.' });
+      return res.status(403).json({ message: 'This partner account has no operation assigned.' });
     }
     // Every operation the Director granted this partner, read on every request
     // like the role and the status, so a grant taken away bites at once.
     if (user.role === 'partner') {
       user.operations = await partnerOperations(user);
       if (!user.operations.length) {
-        return res.status(403).json({ message: 'This partner account has no project assigned.' });
+        return res.status(403).json({ message: 'This partner account has no operation assigned.' });
       }
     }
 
