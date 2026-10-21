@@ -159,6 +159,18 @@ try {
   const deleteWithMoney = await api(admin, `/api/activities/${request.body.id}`, { method: 'DELETE' });
   check('an activity with expenses cannot be deleted', deleteWithMoney.status === 409, `${deleteWithMoney.status} ${deleteWithMoney.body.message}`);
 
+  // The Director edits a work package from the register. Its operation is fixed
+  // once work is filed under it; its figures are still read from the work.
+  const putProject = (body) => api(admin, `/api/projects/${PROJECT_IDS.farming}`, { method: 'PUT', body: JSON.stringify(body) });
+  const renamed = await putProject({ name: 'ZZ renamed work package', location: 'ZZ new place', status: 'Delayed' });
+  check('the Director edits a work package', renamed.status === 200 && renamed.body.name === 'ZZ renamed work package'
+    && renamed.body.location === 'ZZ new place' && renamed.body.status === 'Delayed', renamed.body);
+  const movedProject = await putProject({ sector: 'mining' });
+  check('  but cannot move one with activities to another project', movedProject.status === 409, `${movedProject.status} ${movedProject.body.message}`);
+  const afterEdit = (await api(admin, '/api/projects')).body.find((item) => item.id === PROJECT_IDS.farming);
+  check('  and its figures still come from the work', afterEdit && afterEdit.sector === 'farming' && afterEdit.spentUsd >= 40,
+    JSON.stringify(afterEdit && { sector: afterEdit.sector, spent: afterEdit.spentUsd }));
+
   // ---- reopened work can be handed back again ---------------------------------
   section('Reopened work can be handed back again');
   check('  evidence is attached', await uploadEvidence(farming.token, request.body.id) === 201);

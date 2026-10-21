@@ -718,14 +718,14 @@ function readProjectPayload(payload, current = null) {
     spent: pick('spent', current?.spent ?? 0),
     category: pick('category', current?.category || 'General')
   };
-  if (!project.sector) return { error: 'A valid project is required.' };
+  if (!project.sector) return { error: 'A valid operation is required.' };
   if (!requiredText(project.name) || !requiredText(project.location) || !requiredText(project.owner)) {
-    return { error: 'Work package name, project, location, and owner are required.' };
+    return { error: 'Project name, operation, location, and owner are required.' };
   }
   if (project.name.trim().length > 200 || project.location.trim().length > 200 || project.owner.trim().length > 200) {
-    return { error: 'Work package name, location and owner can be at most 200 characters.' };
+    return { error: 'Project name, location and owner can be at most 200 characters.' };
   }
-  if (!PROJECT_STATUSES.includes(project.status)) return { error: 'Work package status is invalid.' };
+  if (!PROJECT_STATUSES.includes(project.status)) return { error: 'Project status is invalid.' };
   const progress = Number(project.progress === '' ? 0 : project.progress);
   if (!Number.isInteger(progress) || progress < 0 || progress > 100) {
     return { error: 'Progress must be a whole number from 0 to 100.' };
@@ -761,12 +761,12 @@ async function checkProjectManager(rawManagerId, sector) {
   );
   if (!found.rowCount) return { error: 'Selected manager is invalid.' };
   // A manager covering every operation may manage a project in any of them.
-  if (!withinScope(found.rows[0], sector)) return { error: 'That manager works in a different project.' };
+  if (!withinScope(found.rows[0], sector)) return { error: 'That manager works in a different operation.' };
   return { managerId };
 }
 
 app.post('/api/projects', authMiddleware, asyncRoute(async (req, res) => {
-  if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the Director can create work packages.' });
+  if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the Director can create projects.' });
   const payload = req.body || {};
   const { project, error } = readProjectPayload(payload);
   if (error) return res.status(400).json({ message: error });
@@ -786,20 +786,30 @@ app.post('/api/projects', authMiddleware, asyncRoute(async (req, res) => {
 app.put('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
   const payload = req.body || {};
   const existingProject = await pool.query('SELECT * FROM projects WHERE id = $1', [req.params.id]);
-  if (!existingProject.rowCount) return res.status(404).json({ message: 'Work package not found.' });
+  if (!existingProject.rowCount) return res.status(404).json({ message: 'Project not found.' });
   const current = existingProject.rows[0];
 
   // Authorize against the sector the project is in now, not the one the caller
   // sent, and refuse to let a manager move a project out of their own sector.
   if (!isAdmin(req.user) && (req.user.role !== 'manager' || !withinScope(req.user, current.sector))) {
-    return res.status(403).json({ message: 'Managers can only update work packages in their own project.' });
+    return res.status(403).json({ message: 'Managers can only update projects in their own operation.' });
   }
   // Anything left out of the body keeps its current value. Defaulting a missing
   // sector to 'agriculture' silently moved projects the Director edited.
   const { project, error } = readProjectPayload(payload, current);
   if (error) return res.status(400).json({ message: error });
   if (!withinScope(req.user, project.sector)) {
-    return res.status(403).json({ message: 'Managers cannot move a work package to another project.' });
+    return res.status(403).json({ message: 'Managers cannot move a project to another operation.' });
+  }
+  // An activity's operation is its project's (create and edit refuse anything
+  // else), so a project with activities under it cannot change operation: every
+  // one of them would be left filed under an operation it no longer belongs to,
+  // and scoped to the wrong manager. The edit form locks the field to match.
+  if (project.sector !== current.sector) {
+    const filed = await pool.query('SELECT 1 FROM activities WHERE project_id = $1 LIMIT 1', [current.id]);
+    if (filed.rowCount) {
+      return res.status(409).json({ message: 'This project has activities filed under it, so it cannot move to another operation.' });
+    }
   }
 
   // Who manages a project is the Director's call, exactly as on PATCH /manager.
@@ -808,7 +818,7 @@ app.put('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
     const manager = await checkProjectManager(payload.managerId, project.sector);
     if (manager.error) return res.status(400).json({ message: manager.error });
     if (manager.managerId !== current.manager_id && !isAdmin(req.user)) {
-      return res.status(403).json({ message: 'Only the Director can assign a work package manager.' });
+      return res.status(403).json({ message: 'Only the Director can assign a project manager.' });
     }
     managerId = manager.managerId;
   } else if (project.sector !== current.sector) {
@@ -829,7 +839,7 @@ app.put('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
 app.patch('/api/projects/:id/manager', authMiddleware, asyncRoute(async (req, res) => {
   if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the Director can assign managers.' });
   const existing = await pool.query('SELECT sector FROM projects WHERE id = $1', [req.params.id]);
-  if (!existing.rowCount) return res.status(404).json({ message: 'Work package not found.' });
+  if (!existing.rowCount) return res.status(404).json({ message: 'Project not found.' });
   const manager = await checkProjectManager(req.body?.managerId, existing.rows[0].sector);
   if (manager.error) return res.status(400).json({ message: manager.error });
 
@@ -838,12 +848,12 @@ app.patch('/api/projects/:id/manager', authMiddleware, asyncRoute(async (req, re
      RETURNING *, (SELECT name FROM users WHERE id = manager_id) AS manager_name`,
     [req.params.id, manager.managerId]
   );
-  if (!result.rowCount) return res.status(404).json({ message: 'Work package not found.' });
+  if (!result.rowCount) return res.status(404).json({ message: 'Project not found.' });
   res.json(mapProject(result.rows[0]));
 }));
 
 app.delete('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
-  if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the Director can delete work packages.' });
+  if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the Director can delete projects.' });
   // Deleting a project cascades to its activities and their evidence rows. The
   // stored files are read first so they are removed too, instead of being left
   // in storage with nothing pointing at them.
@@ -852,9 +862,9 @@ app.delete('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
     [req.params.id]
   );
   const result = await pool.query('DELETE FROM projects WHERE id = $1 RETURNING *', [req.params.id]);
-  if (!result.rowCount) return res.status(404).json({ message: 'Work package not found.' });
+  if (!result.rowCount) return res.status(404).json({ message: 'Project not found.' });
   await Promise.all(files.rows.map((file) => deleteFile('activities', file.stored_name)));
-  res.json({ message: 'Work package deleted successfully.', deletedProject: mapProject(result.rows[0]) });
+  res.json({ message: 'Project deleted successfully.', deletedProject: mapProject(result.rows[0]) });
 }));
 
 app.get('/api/approvals', authMiddleware, asyncRoute(async (req, res) => {
@@ -896,9 +906,9 @@ app.post('/api/approvals', authMiddleware, asyncRoute(async (req, res) => {
     return res.status(403).json({ message: 'Only a manager can make a request for approval.' });
   }
   const sector = validateSector(payload.sector, req.user.sector);
-  if (sector && !withinScope(req.user, sector)) return res.status(403).json({ message: 'Managers can only make requests in their own project.' });
+  if (sector && !withinScope(req.user, sector)) return res.status(403).json({ message: 'Managers can only make requests in their own operation.' });
   if (!sector || !requiredText(payload.title) || !requiredText(payload.owner)) {
-    return res.status(400).json({ message: 'What is needed, the project and the owner are required.' });
+    return res.status(400).json({ message: 'What is needed, the operation and the owner are required.' });
   }
   if (!validNumber(payload.amount)) return res.status(400).json({ message: 'Approval amount must be a valid non-negative number.' });
   if (!['Low', 'Medium', 'High'].includes(payload.priority || 'Medium')) return res.status(400).json({ message: 'Approval priority is invalid.' });
@@ -965,7 +975,7 @@ app.patch('/api/approvals/:id', authMiddleware, asyncRoute(async (req, res) => {
     return res.status(403).json({ message: 'You cannot approve or reject an approval you requested yourself.' });
   }
   if (!withinScope(req.user, sector)) {
-    return res.status(403).json({ message: 'Managers cannot move a request to another project.' });
+    return res.status(403).json({ message: 'Managers cannot move a request to another operation.' });
   }
 
   // Reopening a request to Pending clears the previous decision, so a stale

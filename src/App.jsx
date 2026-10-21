@@ -849,6 +849,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const [sectorFilter, setSectorFilter] = useState('All');
   const [projectSearch, setProjectSearch] = useState('');
   const [projectForm, setProjectForm] = useState(emptyProject);
+  // The work package the form below the register is editing, or null when the
+  // form is adding a new one. One form for both, so the two cannot drift.
+  const [editingProject, setEditingProject] = useState(null);
   const [activityForm, setActivityForm] = useState(emptyActivity);
   const [approvalForm, setApprovalForm] = useState(emptyApproval);
   const [accountForm, setAccountForm] = useState(emptyAccount);
@@ -1677,6 +1680,35 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     } catch (deleteError) { fail(deleteError.message); }
   });
 
+  // Edit opens the work package in the add form, filled in, and scrolls to it.
+  // Budget, spending and progress are not on it: they are summed from the
+  // activities, never typed.
+  const startEditProject = (project) => {
+    setEditingProject(project);
+    setProjectForm({
+      name: project.name, sector: project.sector, location: project.location, owner: project.owner,
+      status: project.status, category: project.category || '',
+      managerId: project.managerId ? String(project.managerId) : ''
+    });
+    requestAnimationFrame(() => document.getElementById('project-form')?.scrollIntoView({ behavior: 'smooth' }));
+  };
+  const stopEditProject = () => { setEditingProject(null); setProjectForm(emptyProject); };
+  const saveProjectEdit = (event) => {
+    event.preventDefault();
+    return runAction(async () => {
+      setError('');
+      try {
+        await fetchJson(`/api/projects/${encodeURIComponent(editingProject.id)}`, {
+          method: 'PUT',
+          body: JSON.stringify({ ...projectForm, managerId: projectForm.managerId || null })
+        });
+      } catch (saveError) { fail(saveError.message); return; }
+      stopEditProject();
+      notify(t('msg.projectUpdated'));
+      await loadData();
+    });
+  };
+
   const assignManager = act(async (projectId, managerId) => {
     setError('');
     try {
@@ -2070,9 +2102,13 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         {isDirector && <button className="primary-btn" type="button" onClick={() => document.getElementById('project-form')?.scrollIntoView({ behavior: 'smooth' })}>{t('form.addProject')}</button>}
       </section>
       <Panel title={t('panel.projectRegister')} subtitle={`${filteredProjects.length}`}>
-        <ProjectTable projects={filteredProjects} managers={managers} isDirector={isDirector} busy={actionBusy} onShowActivities={showProjectActivities} onAssign={assignManager} onDelete={deleteProject} empty={t('empty.noProjectsMatch')} />
+        <ProjectTable projects={filteredProjects} managers={managers} isDirector={isDirector} busy={actionBusy} onShowActivities={showProjectActivities} onAssign={assignManager} onEdit={startEditProject} onDelete={deleteProject} empty={t('empty.noProjectsMatch')} />
       </Panel>
-      {isDirector && <ProjectForm form={projectForm} setForm={setProjectForm} managers={managers} busy={actionBusy} onSubmit={(event) => submit(event, '/api/projects', projectForm, t('msg.projectAdded'), () => setProjectForm(emptyProject))} />}
+      {isDirector && <ProjectForm form={projectForm} setForm={setProjectForm} managers={managers} busy={actionBusy}
+        editing={editingProject} onCancel={stopEditProject}
+        onSubmit={editingProject
+          ? saveProjectEdit
+          : (event) => submit(event, '/api/projects', projectForm, t('msg.projectAdded'), () => setProjectForm(emptyProject))} />}
     </>;
   } else if (view === 'activities') {
     content = <>
@@ -2468,7 +2504,7 @@ function StageBadge({ activity }) {
 
 // Delete and the manager picker are the Director's; the API refuses anyone else,
 // so a manager is no longer shown controls that could only ever fail.
-function ProjectTable({ projects, managers, isDirector, busy, onShowActivities, onAssign, onDelete, empty }) {
+function ProjectTable({ projects, managers, isDirector, busy, onShowActivities, onAssign, onEdit, onDelete, empty }) {
   const t = useT();
   return projects.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('field.project')}</th><th>{t('app.businessOperation')}</th><th>{t('field.location')}</th><th>{t('field.organizationOwner')}</th><th>{t('field.manager')}</th><th>{t('field.status')}</th><th>{t('table.progress')}</th><th>{t('money.approved')} (USD)</th><th>{t('money.spent')} (USD)</th><th>{t('table.actions')}</th></tr></thead><tbody>
     {projects.map((project) => {
@@ -2489,6 +2525,7 @@ function ProjectTable({ projects, managers, isDirector, busy, onShowActivities, 
         <td data-label={`${t('money.spent')} (USD)`}>{formatUsd(project.spentUsd)}</td>
         <td className="card-actions">
           <button className="text-btn" type="button" onClick={() => onShowActivities(project.id)}>{t('nav.activities')}</button>
+          {isDirector && <button className="text-btn" disabled={busy} onClick={() => onEdit(project)} type="button">{t('action.edit')}</button>}
           {isDirector && <button className="danger-btn" disabled={busy} onClick={() => onDelete(project)} type="button">{t('action.delete')}</button>}
         </td>
       </tr>;
@@ -2604,14 +2641,24 @@ function AccountForm({ form, setForm, managers, busy, language, onSubmit }) {
   </form>;
 }
 
-function ProjectForm({ form, setForm, managers, busy, onSubmit }) {
+function ProjectForm({ form, setForm, managers, busy, editing = null, onCancel, onSubmit }) {
   const t = useT();
-  const managerOptions = managers.filter((manager) => worksIn(manager, form.sector));
+  // The work package's current manager stays in the list even if they no
+  // longer cover its operation, so opening the form does not silently drop them.
+  const managerOptions = managers.filter((manager) => worksIn(manager, form.sector)
+    || (editing && String(manager.id) === String(editing.managerId)));
+  // Work filed under it belongs to its operation, so the operation is fixed
+  // once there is any (the API refuses the move as well).
+  const sectorLocked = Boolean(editing && editing.activityCount > 0);
   return <form className="form-panel" id="project-form" onSubmit={onSubmit}>
-    <div className="panel-header"><div><h2>{t('form.addProject')}</h2><span>{t('form.addProjectBlurb')}</span></div></div>
+    <div className="panel-header"><div>
+      <h2>{editing ? t('form.editProject') : t('form.addProject')}</h2>
+      <span>{editing ? t('form.editProjectBlurb') : t('form.addProjectBlurb')}</span>
+    </div></div>
     <div className="form-grid">
       <Field label={t('field.name')}><input required maxLength="200" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></Field>
-      <Field label={t('app.businessOperation')}><select value={form.sector} onChange={(event) => setForm({ ...form, sector: event.target.value, managerId: '' })}>{sectors.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}</select></Field>
+      <Field label={t('app.businessOperation')}><select value={form.sector} disabled={sectorLocked} onChange={(event) => setForm({ ...form, sector: event.target.value, managerId: '' })}>{sectors.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}</select>
+        {sectorLocked && <small className="field-hint">{t('projects.operationLocked')}</small>}</Field>
       <Field label={t('field.location')}><input required maxLength="200" value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} /></Field>
       <Field label={t('field.organizationOwner')}><input required maxLength="200" value={form.owner} onChange={(event) => setForm({ ...form, owner: event.target.value })} /></Field>
       <Field label={t('field.status')}><select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}>{PROJECT_STATUSES.map((option) => <option key={option} value={option}>{t(`status.${option}`)}</option>)}</select></Field>
@@ -2619,7 +2666,10 @@ function ProjectForm({ form, setForm, managers, busy, onSubmit }) {
       <Field label={t('field.manager')}><select value={form.managerId} onChange={(event) => setForm({ ...form, managerId: event.target.value })}><option value="">{t('table.unassigned')}</option>{managerOptions.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}</select></Field>
     </div>
     <p className="field-hint">{t('projects.figuresAutomatic')}</p>
-    <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('form.addProject')}</button></div>
+    <div className="form-submit-bar">
+      {editing && <button className="text-btn" type="button" disabled={busy} onClick={onCancel}>{t('action.cancel')}</button>}
+      <button className="primary-btn" type="submit" disabled={busy}>{editing ? t('action.saveCorrection') : t('form.addProject')}</button>
+    </div>
   </form>;
 }
 
