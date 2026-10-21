@@ -29,11 +29,11 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 
-// Opus 5. The skill's rule is to use the most capable model unless the operator
+// Opus 5.5. The skill's rule is to use the most capable model unless the operator
 // asks for another, and this runs a handful of times a month per operation --
 // once per objective, in the background -- so the cost is negligible and the
 // wording is what the manager lives with all month.
-const DEFAULT_MODEL = 'claude-opus-5';
+const DEFAULT_MODEL = 'claude-opus-5-5';
 
 // Every field the rest of the system will read. Anything outside this list is
 // dropped, whoever produced it.
