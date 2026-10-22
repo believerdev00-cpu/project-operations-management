@@ -644,15 +644,18 @@ function AppShell({
       onKeyDown={drawerActive ? (event) => trapFocus(event, sidebar.current, closeDrawer) : undefined}
     >
       <div className="sidebar-top">
-        <div className="brand-lockup"><img className="brand-logo" src="/logo-mark.png" alt="" /><div><strong>{t('app.operationsControl')}</strong>
-          {/* The operations under the logo are a way in, not a caption: each
-              opens that operation's work. */}
+        <div className="brand-block">
+          <div className="brand-lockup"><img className="brand-logo" src="/logo-mark.png" alt="" /><strong>{t('app.name')}</strong></div>
+          {/* The operations under the logo are a way in, not a caption: each is
+              a chip, in its operation's colour, that opens that operation's work. */}
           {brandLinks
-            ? <span className="brand-links">{brandLinks.map((link, index) => <span key={link.id}>
-              {index > 0 && <span aria-hidden="true"> · </span>}
-              <button type="button" className="brand-link" onClick={link.onClick}>{link.label}</button>
-            </span>)}</span>
-            : <span>{subtitle}</span>}</div></div>
+            ? <div className="brand-links" role="group" aria-label={t('app.businessOperation')}>
+              {brandLinks.map((link) => <button key={link.id} type="button" className={`brand-link brand-link-${link.id}`} onClick={link.onClick}>
+                <span className="brand-dot" aria-hidden="true" />{link.label}
+              </button>)}
+            </div>
+            : <span className="brand-sub">{subtitle}</span>}
+        </div>
         <button className="icon-btn drawer-close" type="button" onClick={closeDrawer} aria-label={t('app.closeMenu')}>&times;</button>
       </div>
       {nav.length > 0 && <nav aria-label={navLabel}>
@@ -2489,7 +2492,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     bottomNav={bottomNav}
     activeId={view}
     onNavigate={go}
-    eyebrow={t('app.operationsControl')}
+    eyebrow={t('app.name')}
     title={pageTitle}
     badge={approvalCount}
     onBadge={() => go('approval-queue')}

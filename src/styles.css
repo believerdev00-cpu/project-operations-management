@@ -87,17 +87,25 @@ input[type="checkbox"] { width: 18px; height: 18px; min-height: 0; }
 .sidebar::-webkit-scrollbar-track { background: transparent; }
 .sidebar { scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, .2) transparent; }
 .sidebar-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-.brand-lockup { display: flex; align-items: center; gap: 11px; min-width: 0; padding: 0 10px 34px; }
-.brand-logo { flex: none; width: 40px; height: 40px; object-fit: contain; }
-.brand-lockup strong, .brand-lockup span { display: block; }
-.brand-lockup strong { color: white; font-size: .95rem; }
-.brand-lockup span { margin-top: 3px; color: #9db0c2; font-size: .72rem; }
-/* The operation names under the logo, each a link into that operation's work. */
-.brand-links { display: grid; gap: 3px; margin-top: 4px; }
-.brand-links > span { display: block; margin: 0; }
-.brand-links span[aria-hidden] { display: none; }
-.brand-link { display: inline; padding: 0; color: #cfe0f1; font: inherit; font-size: .74rem; text-decoration: underline; text-underline-offset: 2px; background: none; border: 0; cursor: pointer; }
-.brand-link:hover, .brand-link:focus-visible { color: white; }
+/* The brand: the mark and the system's full name, then the operations as
+   chips beneath it, separated from the menu by a hairline. */
+.brand-block { display: grid; gap: 14px; min-width: 0; padding: 0 6px 22px; margin-bottom: 18px; border-bottom: 1px solid rgba(255, 255, 255, .1); }
+.brand-lockup { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.brand-logo { flex: none; width: 42px; height: 42px; object-fit: contain; }
+.brand-lockup strong { display: block; color: white; font-size: 1rem; font-weight: 800; line-height: 1.2; letter-spacing: .01em; }
+.brand-sub { display: block; color: #9db0c2; font-size: .74rem; }
+/* The operation chips: each a link into that operation's work, marked with
+   the same colour its card carries on the dashboard. */
+/* One per line, full width: four names of very different lengths never
+   line up in columns, and a list reads as a list of places to go. */
+.brand-links { display: grid; gap: 5px; }
+.brand-link { display: inline-flex; align-items: center; gap: 7px; min-height: 30px; padding: 5px 11px; color: #e3edf7; font: inherit; font-size: .76rem; font-weight: 650; line-height: 1.2; text-align: left; background: rgba(255, 255, 255, .07); border: 1px solid rgba(255, 255, 255, .14); border-radius: 999px; cursor: pointer; transition: background .15s ease, border-color .15s ease; }
+.brand-link:hover, .brand-link:focus-visible { color: white; background: rgba(255, 255, 255, .16); border-color: rgba(255, 255, 255, .32); }
+.brand-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #9db0c2; box-shadow: 0 0 0 2px rgba(255, 255, 255, .12); }
+.brand-link-farming .brand-dot { background: #4caf50; }
+.brand-link-agriculture .brand-dot { background: #d4a72c; }
+.brand-link-mining .brand-dot { background: #a1887f; }
+.brand-link-movement .brand-dot { background: #64b5f6; }
 .sidebar-label { margin: 0 10px 10px; color: #7f99b1; font-size: .65rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
 .sidebar nav { display: grid; gap: 4px; }
 .nav-item { display: flex; align-items: center; gap: 11px; width: 100%; padding: 12px 10px; color: #b7c8d8; background: transparent; border: 0; border-radius: 5px; text-align: left; font-size: .86rem; }
@@ -748,7 +756,7 @@ td .operation-checks { display: grid; gap: 0; }
   .drawer-backdrop { position: fixed; inset: 0; z-index: 35; display: block; background: rgba(8, 20, 33, .45); opacity: 0; pointer-events: none; transition: opacity .2s ease; }
   .drawer-open .drawer-backdrop { opacity: 1; pointer-events: auto; }
   .drawer-close { display: inline-grid; }
-  .brand-lockup { padding: 4px 6px 22px; }
+  .brand-block { padding: 4px 4px 18px; margin-bottom: 14px; }
   .nav-item { min-height: 48px; padding: 12px; font-size: .95rem; }
   .logout-btn, .account-btn { min-height: 48px; text-align: center; }
 
