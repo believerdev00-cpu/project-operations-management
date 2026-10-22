@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import * as i18n from '../shared/strings.js';
 import * as ops from '../shared/businessOperations.js';
 import { DAY_COLUMNS } from '../shared/dailyReport.js';
+import * as boutique from '../shared/boutique.js';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -28,7 +29,7 @@ const check = (label, ok, detail = '') => {
 
 // ui.jsx holds the shared error boundary and dialogs; left off this list, every
 // key only they use was reported as unused, and their JSX went unchecked.
-const FILES = ['App.jsx', 'ui.jsx', 'journey.jsx', 'Home.jsx', 'MovementModule.jsx', 'ActivityReview.jsx', 'PartnerPortal.jsx', 'ExternalPartners.jsx', 'MonthlyPlans.jsx', 'ExpensePanel.jsx', 'Organization.jsx']
+const FILES = ['App.jsx', 'ui.jsx', 'journey.jsx', 'Home.jsx', 'MovementModule.jsx', 'ActivityReview.jsx', 'PartnerPortal.jsx', 'ExternalPartners.jsx', 'MonthlyPlans.jsx', 'ExpensePanel.jsx', 'Organization.jsx', 'Boutique.jsx']
   .map((name) => path.join(root, 'src', name));
 
 const sources = Object.fromEntries(FILES.map((file) => [path.basename(file), fs.readFileSync(file, 'utf8')]));
@@ -92,7 +93,23 @@ const FAMILIES = {
   // server/db/monthlySchema.js) needs a sentence in every language.
   'notice.kind.': ['plan_assigned', 'plan_changed', 'change_requested', 'report_submitted', 'report_accepted',
     'report_returned', 'work_submitted', 'work_to_check', 'work_approved', 'work_returned', 'partner_comment',
-    'team_added', 'partner_shared'],
+    'team_added', 'partner_shared', 'boutique_approval_requested', 'boutique_approval_decided'],
+  // The boutique (shared/boutique.js): every list a screen renders through a
+  // template key, so a value added there without its words fails here.
+  'btq.tab.': ['overview', 'sell', 'sales', 'products', 'stock', 'suppliers', 'cash', 'expenses', 'books', 'reports', 'approvals', 'history'],
+  'btq.type.': boutique.PRODUCT_TYPES,
+  'btq.method.': boutique.ALL_BOUTIQUE_PAYMENT_METHODS,
+  'btq.kind.': boutique.STOCK_MOVEMENT_KINDS,
+  'btq.approval.': boutique.APPROVAL_STATUSES,
+  'btq.poStatus.': boutique.PURCHASE_STATUSES,
+  'btq.saleStatus.': boutique.SALE_STATUSES,
+  'btq.returnKind.': boutique.RETURN_KINDS,
+  'btq.sessionStatus.': boutique.SESSION_STATUSES,
+  'btq.cashKind.': boutique.CASH_MOVEMENT_KINDS,
+  'btq.expenseStatus.': boutique.EXPENSE_STATUSES,
+  'btq.itemStatus.': ['active', 'archived'],
+  'btq.period.': boutique.REPORT_PERIODS,
+  'btq.outcome.': ['approved', 'refused'],
   // The organisation (server/db/organizationSchema.js): every trail action.
   'org.action.': ['team_created', 'team_updated', 'team_archived', 'team_restored', 'member_added', 'member_removed',
     'leader_changed', 'reporting_changed', 'partner_profile_changed', 'partner_projects_changed'],

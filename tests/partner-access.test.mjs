@@ -106,7 +106,8 @@ try {
   section('The four business operations');
   const sectorList = (await api(adminToken, '/api/sectors')).body;
   const names = sectorList.map((operation) => operation.name);
-  check('exactly four business operations exist', sectorList.length === 4, String(sectorList.length));
+  // The four, plus the boutique (Project 5, a retail operation of its own).
+  check('exactly five business operations exist', sectorList.length === 5, String(sectorList.length));
   check('they are Mining, Agriculture, Farming, Movement & Facilitation',
     ['Mining', 'Agriculture', 'Farming', 'Movement & Facilitation'].every((name) => names.includes(name)),
     names.join(' | '));

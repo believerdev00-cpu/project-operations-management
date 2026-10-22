@@ -181,7 +181,8 @@ async function run() {
   check("the General Manager cannot read partners' messages to the Director", gmInbox.status === 403, gmInbox.status);
   const gmSummary = await api(gm.token, '/api/summary');
   check('the General Manager gets the organisation-wide summary', gmSummary.status === 200
-    && gmSummary.body.sectorBreakdown?.length === 4 && typeof gmSummary.body.summary?.managerChecksWaiting === 'number', gmSummary.status);
+    // Five rows: the four operations and the boutique (Project 5).
+    && gmSummary.body.sectorBreakdown?.length === 5 && typeof gmSummary.body.summary?.managerChecksWaiting === 'number', gmSummary.status);
 
   // ---- 2. reporting lines --------------------------------------------------------
   section('2. reporting lines follow the hierarchy');

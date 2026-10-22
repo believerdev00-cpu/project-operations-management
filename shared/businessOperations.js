@@ -14,6 +14,15 @@
 //         transport, movement of people and materials, logistics and the
 //         other facilitation the three primary operations need.
 //
+//   RETAIL OPERATION (Project 5, added later)
+//   └── Boutique                           boutique
+//         a shop selling clothing, shoes, bags and accessories. It neither
+//         produces like the three nor supports them: it sells, and its work is
+//         recorded in the Boutique Management System (shared/boutique.js,
+//         server/routes/boutique.js, src/Boutique.jsx) rather than as
+//         objectives and days. It is still a sectors row so that its manager
+//         and cashiers are scoped by the same rules as everybody else.
+//
 // Movement & Facilitation is NOT a fourth production operation. It has its own
 // manager and its own monthly plan like the others -- but the work on that plan
 // is support given TO Mining, Agriculture or Farming, and the system keeps that
@@ -93,6 +102,24 @@ export const BUSINESS_OPERATIONS = [
       fr: 'Déplacements et facilitation',
       sw: 'Safari na Uwezeshaji'
     }
+  },
+  {
+    id: 'boutique',
+    name: 'Boutique',
+    kind: 'retail',
+    shortName: 'Boutique',
+    translations: {
+      // PROJECT 5: the Boutique Management System. A retail operation, not a
+      // fifth production column and not a support function: isPrimaryOperation
+      // and isSupportOperation are both false for it, so nothing that reasons
+      // about producing or supporting ever includes it. Its month is not a
+      // list of objectives but a shop: products, sales, stock, suppliers, cash
+      // and the books, all under /api/boutique and the #/boutique workspace.
+      en: 'Boutique',
+      rw: 'Butike',
+      fr: 'Boutique',
+      sw: 'Butiki'
+    }
   }
 ];
 
@@ -115,6 +142,26 @@ export function isPrimaryOperation(id) {
 // id is historical and says nothing about what the operation is.
 export function isSupportOperation(id) {
   return id === SUPPORT_OPERATION;
+}
+
+// The retail operation: the boutique (Project 5). Read this rather than
+// comparing against 'boutique' by hand, for the same reason as the two above.
+export const RETAIL_OPERATION = 'boutique';
+
+export function isRetailOperation(id) {
+  return id === RETAIL_OPERATION;
+}
+
+// Whether this account works in the boutique: its manager (or a manager
+// covering every operation) and its cashiers (team members placed in the
+// boutique operation). The Director and the General Manager are deliberately
+// not answered for here -- their access is a question of role, decided in
+// server/lib/boutique.js -- so a screen that asks "is this person boutique
+// staff?" gets a plain answer.
+export function worksInBoutique(user) {
+  if (!user) return false;
+  if (user.coversAllSectors) return user.role === 'manager';
+  return (user.role === 'manager' || user.role === 'staff') && operationsOf(user).includes(RETAIL_OPERATION);
 }
 
 // Which operation runs the trips register: Movement & Facilitation, because

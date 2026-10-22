@@ -21,6 +21,15 @@ export function formatUsd(value) {
   return `${amount < 0 ? '-' : ''}$${digits}`;
 }
 
+// Rwandan francs, whole: "RWF 15,000". The boutique (Project 5) trades in
+// RWF and shows every figure this way; App.jsx keeps a private copy for the
+// trips register's RWF column, which predates this one.
+export function formatRwf(value) {
+  const amount = Number(value || 0);
+  const digits = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(Math.abs(amount));
+  return `${amount < 0 ? '-' : ''}RWF ${digits}`;
+}
+
 // Today as the `yyyy-mm-dd` a date input expects, in the reader's OWN
 // timezone. `new Date().toISOString().slice(0, 10)` is UTC, which hands a
 // manager in Kigali (UTC+2) yesterday's date every evening after 22:00 -- and

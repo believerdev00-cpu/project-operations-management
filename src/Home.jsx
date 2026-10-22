@@ -605,7 +605,9 @@ export function noticeSentence(notice, t, language) {
     // The organisation's events: a team, its project, an issue's title.
     team: params.team || '',
     project: params.project || '',
-    title: params.title || ''
+    title: params.title || '',
+    // The boutique's decisions: approved or refused, in the reader's words.
+    outcome: params.outcome ? t(`btq.outcome.${params.outcome}`) : ''
   });
 }
 

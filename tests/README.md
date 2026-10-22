@@ -23,6 +23,7 @@ running is left alone.
 | `monthly-target.test.mjs` | a month as one objective with a target, started and reported day by day by the operation's manager |
 | `reports.test.mjs` | a period report: a month of objectives reads as a full report, an objective nobody worked on says so, the month’s money kept apart from the register’s, no person named anywhere, and the PDF and spreadsheet written in each of the four languages |
 | `assigned-plan.test.mjs` | the whole cycle: the Director assigns a month, the named manager is told and works it, another manager cannot see it, evidence, submission, return with a reason, resubmission, approval, notifications, change requests, the dashboard counts; the same cycle on a planned activity |
+| `boutique.test.mjs` | the Boutique Management System (Project 5): who gets in, products and variants with their ledger, suppliers and a purchase order received in two deliveries, the till (split payments, change only from cash, the refusals), returns and exchanges, voids asked and decided, stock adjustments, closing a till against its expected cash, the books with nothing counted twice, the reports, the project row that cannot be deleted, the audit trail |
 
 ## They run against the real database
 
@@ -57,9 +58,21 @@ The consequences are worth knowing:
   DELETE FROM notifications WHERE actor_id IN (SELECT id FROM users WHERE username LIKE 'zz-%');
   DELETE FROM teams WHERE name LIKE 'ZZTEST%';
   DELETE FROM organization_history WHERE subject_name LIKE 'ZZTEST%' OR detail->>'teamName' LIKE 'ZZTEST%';
+  DELETE FROM boutique_returns WHERE sale_id IN (SELECT id FROM boutique_sales WHERE cashier_id IN (SELECT id FROM users WHERE username LIKE 'zz-%'));
+  DELETE FROM boutique_sales WHERE cashier_id IN (SELECT id FROM users WHERE username LIKE 'zz-%');
+  DELETE FROM boutique_cash_sessions WHERE opened_by IN (SELECT id FROM users WHERE username LIKE 'zz-%');
+  DELETE FROM boutique_expenses WHERE recorded_by IN (SELECT id FROM users WHERE username LIKE 'zz-%');
+  DELETE FROM boutique_supplier_payments WHERE supplier_id IN (SELECT id FROM boutique_suppliers WHERE name LIKE 'ZZTEST %');
+  DELETE FROM boutique_purchase_orders WHERE supplier_id IN (SELECT id FROM boutique_suppliers WHERE name LIKE 'ZZTEST %');
+  DELETE FROM boutique_suppliers WHERE name LIKE 'ZZTEST %';
+  DELETE FROM boutique_products WHERE name LIKE 'ZZTEST %';
   DELETE FROM users WHERE username LIKE 'zz-%';
   DELETE FROM projects WHERE id LIKE 'ZZ-PRJ-%';
   ```
+
+  (In that order: a sale's lines, a return's lines and a purchase order's
+  lines all refuse to outlive the variant they name, so the sales, returns
+  and orders go before the products.)
 
 The suites act as the Director through `tests/director.mjs`, which signs a short
 session token for the Director account with `JWT_SECRET` -- they never need the

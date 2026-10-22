@@ -17,13 +17,15 @@ const MovementModule = lazy(() => import('./MovementModule.jsx'));
 const PartnerPortal = lazy(() => import('./PartnerPortal.jsx'));
 const ExternalPartners = lazy(() => import('./ExternalPartners.jsx'));
 const MonthlyPlans = lazy(() => import('./MonthlyPlans.jsx'));
+// The Boutique Management System (Project 5): its own workspace at #/boutique.
+const Boutique = lazy(() => import('./Boutique.jsx'));
 // The organisation is not a page: its two pieces sit where the work is (the
 // teams on Projects and on Home, the chart on People and the GM's Home).
 const TeamsSection = lazy(() => import('./Organization.jsx').then((module) => ({ default: module.TeamsSection })));
 const OrganizationSection = lazy(() => import('./Organization.jsx').then((module) => ({ default: module.OrganizationSection })));
 const GeneralManagerHome = lazy(() => import('./Organization.jsx').then((module) => ({ default: module.GeneralManagerHome })));
 import { LANGUAGES, LanguageContext, displayLanguage, fill, setDisplayLanguage, useI18n, useLanguage, useT } from './i18n.js';
-import { BUSINESS_OPERATIONS, operationName, operationsOf, runsTrips, worksIn } from '../shared/businessOperations.js';
+import { BUSINESS_OPERATIONS, isRetailOperation, operationName, operationsOf, runsTrips, worksIn, worksInBoutique } from '../shared/businessOperations.js';
 import { OPERATIONS_WITH_CATEGORIES, OTHER_CATEGORY } from '../shared/categories.js';
 import { DAY_COLUMNS } from '../shared/dailyReport.js';
 import ActivityReview, {
@@ -513,6 +515,8 @@ const NAV_ICON_PATHS = {
   more: 'M5 12h.01M12 12h.01M19 12h.01',
   users: 'M16 19v-1a4 4 0 0 0-8 0v1M12 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7 8v-1a3 3 0 0 0-2-2.8M17 5.2a3 3 0 0 1 0 5.6',
   partners: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm-9 9h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9Z',
+  // A shopping bag: the boutique.
+  boutique: 'M6 8h12l1 12H5L6 8Zm3 0V6a3 3 0 0 1 6 0v2'
 };
 
 function NavIcon({ id }) {
@@ -958,6 +962,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       ['monthly', t('nav.monthlyPlans'), 0, 'main', t('nav.shortBudget')],
       ['activities', t('nav.activities'), 0, 'main', t('nav.activities')],
       ['movements', t('nav.trips'), 0, 'main', t('nav.shortTrips')],
+      // Project 5, the boutique: a workspace of its own, which the Director
+      // oversees entirely (every figure, every approval).
+      ['boutique', t('nav.boutique'), 0, 'main', t('nav.boutique')],
       ['reports', t('nav.reports'), 0, 'review'],
       ['projects', t('nav.projects'), 0, 'manage'],
       ['users', t('nav.users'), 0, 'manage'],
@@ -972,7 +979,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       ['dashboard', t('nav.home'), 0, 'main', t('nav.home')],
       ['monthly', t('nav.monthlyPlans'), 0, 'main', t('nav.shortBudget')],
       ['activities', t('nav.activities'), 0, 'review'],
-      ['reports', t('nav.reports'), 0, 'review']
+      ['reports', t('nav.reports'), 0, 'review'],
+      // The boutique, read-only for them like every other operation.
+      ['boutique', t('nav.boutique'), 0, 'review']
     ];
   } else if (isManager) {
     // A manager's job is the month they were given: the plan is the front door,
@@ -997,7 +1006,10 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     // General Manager. Their teams are on Home, beside the month they run.
     navItems = [
       ['dashboard', t('nav.home'), 0, 'main', t('nav.home')],
-      ['monthly', t('nav.myPlan'), 0, 'main', t('nav.shortMyPlan')]
+      ['monthly', t('nav.myPlan'), 0, 'main', t('nav.shortMyPlan')],
+      // The Boutique Manager's shop (Project 5): only for the manager whose
+      // operation it is, or one covering every operation.
+      ...(worksInBoutique(user) ? [['boutique', t('nav.boutique'), 0, 'main', t('nav.boutique')]] : [])
     ];
   } else {
     // A team member has one job: the work they were given. Two pages, and the
@@ -1007,7 +1019,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     // manager, not into a void. Their team is on My work.
     navItems = [
       ['dashboard', t('nav.myWork'), 0, 'main', t('nav.myWork')],
-      ['activities', t('nav.myActivities'), 0, 'main', t('nav.myActivities')]
+      ['activities', t('nav.myActivities'), 0, 'main', t('nav.myActivities')],
+      // A boutique cashier's till (Project 5).
+      ...(worksInBoutique(user) ? [['boutique', t('nav.boutique'), 0, 'main', t('nav.boutique')]] : [])
     ];
   }
   // The bar along the bottom of a phone. Someone who works in Movements &
@@ -2128,7 +2142,11 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     .map((operation) => ({
       id: operation.id,
       label: operationName(operation.id, language),
-      onClick: () => navigate(isManager ? buildHash('monthly') : `${buildHash('activities')}?operation=${operation.id}`)
+      // The boutique's chip opens the shop, whoever is looking: its work is
+      // not in the activity register or a monthly plan.
+      onClick: () => navigate(isRetailOperation(operation.id)
+        ? buildHash('boutique')
+        : isManager ? buildHash('monthly') : `${buildHash('activities')}?operation=${operation.id}`)
     }));
   const go = (id, filter) => navigate(filter ? `${buildHash(id)}?filter=${encodeURIComponent(filter)}` : buildHash(id));
   const addActivity = () => navigate(buildHash('activities', 'new'));
@@ -2139,6 +2157,15 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const closePlanRoute = useCallback(() => navigate(buildHash('monthly')), [navigate]);
   const openMovementRoute = useCallback((movementId) => navigate(buildHash('movements', movementId)), [navigate]);
   const closeMovementRoute = useCallback(() => navigate(buildHash('movements')), [navigate]);
+  // The boutique's own addresses: #/boutique/<tab>, with the open record in
+  // the query (?sale=12). Stable, like the others, because the module keys
+  // its effects on it.
+  const boutiqueNavigate = useCallback((tab, params) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params || {})) if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+    const search = query.toString();
+    navigate(`${buildHash('boutique', tab === 'overview' ? null : tab)}${search ? `?${search}` : ''}`);
+  }, [navigate]);
   const openQueueItem = (item) => (item.ref ? navigate(buildHash('movements', item.id)) : openActivity(item.id));
   const onModuleChanged = useCallback(() => { loadData(); }, [loadData]);
 
@@ -2250,7 +2277,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         {isDirector && <button className="primary-btn" type="button" onClick={() => document.getElementById('project-form')?.scrollIntoView({ behavior: 'smooth' })}>{t('form.addProject')}</button>}
       </section>
       <Panel title={t('panel.projectRegister')} subtitle={`${filteredProjects.length}`}>
-        <ProjectTable projects={filteredProjects} managers={managers} isDirector={isDirector} busy={actionBusy} onShowActivities={showProjectActivities} onAssign={assignManager} onEdit={startEditProject} onDelete={deleteProject} empty={t('empty.noProjectsMatch')} />
+        <ProjectTable projects={filteredProjects} managers={managers} isDirector={isDirector} busy={actionBusy} onShowActivities={showProjectActivities} onAssign={assignManager} onEdit={startEditProject} onDelete={deleteProject} onOpenWorkspace={() => navigate(buildHash('boutique'))} empty={t('empty.noProjectsMatch')} />
       </Panel>
       {isDirector && <ProjectForm form={projectForm} setForm={setProjectForm} managers={managers} busy={actionBusy}
         editing={editingProject} onCancel={stopEditProject}
@@ -2498,6 +2525,20 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       onMessage={notify}
       onError={fail}
     />;
+  } else if (view === 'boutique') {
+    // #/boutique/<tab>?sale=…: the tab is the second segment, the open record
+    // is in the query, so Back closes it and refresh keeps it.
+    content = <Boutique
+      user={user}
+      fetchJson={fetchJson}
+      upload={upload}
+      onMessage={notify}
+      onError={fail}
+      onChanged={onModuleChanged}
+      tab={routeId || 'overview'}
+      query={route.query}
+      onNavigate={boutiqueNavigate}
+    />;
   }
 
   return <AppShell
@@ -2680,7 +2721,7 @@ function StageBadge({ activity }) {
 
 // Delete and the manager picker are the Director's; the API refuses anyone else,
 // so a manager is no longer shown controls that could only ever fail.
-function ProjectTable({ projects, managers, isDirector, busy, onShowActivities, onAssign, onEdit, onDelete, empty }) {
+function ProjectTable({ projects, managers, isDirector, busy, onShowActivities, onAssign, onEdit, onDelete, onOpenWorkspace, empty }) {
   const t = useT();
   return projects.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('field.project')}</th><th>{t('app.businessOperation')}</th><th>{t('field.location')}</th><th>{t('field.organizationOwner')}</th><th>{t('field.manager')}</th><th>{t('field.status')}</th><th>{t('table.progress')}</th><th>{t('money.approved')} (USD)</th><th>{t('money.spent')} (USD)</th><th>{t('table.actions')}</th></tr></thead><tbody>
     {projects.map((project) => {
@@ -2700,9 +2741,13 @@ function ProjectTable({ projects, managers, isDirector, busy, onShowActivities, 
         <td data-label={`${t('money.approved')} (USD)`}>{formatUsd(project.approvedUsd)}</td>
         <td data-label={`${t('money.spent')} (USD)`}>{formatUsd(project.spentUsd)}</td>
         <td className="card-actions">
+          {/* Project 5: the boutique opens into its own workspace, and is the
+              anchor of everything recorded there, so it cannot be deleted
+              (the API refuses too). */}
+          {project.workspace === 'boutique' && <button className="primary-btn" type="button" onClick={() => onOpenWorkspace(project)}>{t('btq.openBoutique')}</button>}
           <button className="text-btn" type="button" onClick={() => onShowActivities(project.id)}>{t('nav.activities')}</button>
           {isDirector && <button className="text-btn" disabled={busy} onClick={() => onEdit(project)} type="button">{t('action.edit')}</button>}
-          {isDirector && <button className="danger-btn" disabled={busy} onClick={() => onDelete(project)} type="button">{t('action.delete')}</button>}
+          {isDirector && !project.workspace && <button className="danger-btn" disabled={busy} onClick={() => onDelete(project)} type="button">{t('action.delete')}</button>}
         </td>
       </tr>;
     })}

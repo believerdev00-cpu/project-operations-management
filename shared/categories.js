@@ -33,6 +33,15 @@ export const CATEGORIES = {
     'Vehicle hire', 'Fuel and lubricants', 'Freight and haulage', 'Border clearance',
     'Permits and licenses', 'Escort and security', 'Warehousing and handling',
     'Loading and offloading', 'Travel and allowances', 'Documentation and administration'
+  ],
+  // The boutique's running costs. These are ALSO the expense categories of the
+  // Boutique Management System (shared/boutique.js re-exports them), so a cost
+  // recorded in the shop and an activity filed under the operation are
+  // described in the same words.
+  boutique: [
+    'Rent and utilities', 'Staff and wages', 'Transport and delivery', 'Packaging and bags',
+    'Marketing and display', 'Repairs and maintenance', 'Licences and taxes',
+    'Shop supplies', 'Bank and mobile money charges', 'Other costs'
   ]
 };
 

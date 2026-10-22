@@ -500,7 +500,11 @@ export const NOTIFICATION_KINDS = [
   'partner_comment',    // to the Director: an external partner wrote to them
   // The organisation (server/routes/organization.js, partners.js).
   'team_added',           // to a team member: you were put on a team
-  'partner_shared'        // to a partner: a project was shared with you
+  'partner_shared',       // to a partner: a project was shared with you
+  // The boutique (server/routes/boutique.js): a manager's stock adjustment or
+  // sale void waits for the Director; the Director's answer, with its note.
+  'boutique_approval_requested',
+  'boutique_approval_decided'
 ];
 
 export async function migrateMonthlyModule(pool) {

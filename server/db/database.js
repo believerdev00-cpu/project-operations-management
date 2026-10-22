@@ -5,6 +5,7 @@ import { migrateMovementModule } from './movementSchema.js';
 import { migrateActivityModule } from './activitySchema.js';
 import { migrateMonthlyModule } from './monthlySchema.js';
 import { migrateOrganizationModule } from './organizationSchema.js';
+import { migrateBoutiqueModule } from './boutiqueSchema.js';
 import { BUSINESS_OPERATIONS } from '../../shared/businessOperations.js';
 
 dotenv.config({ path: '.env.local' });
@@ -456,6 +457,11 @@ export async function initDatabase() {
     // partner is shown project by project -- hangs off users, projects,
     // activities and the partner grants above, so it migrates after all of them.
     await migrateOrganizationModule(pool);
+
+    // The Boutique Management System (Project 5): the shop's own tables and
+    // the PRJ-BOUTIQUE project row. After the organisation, because the
+    // project row it seeds is what the Projects page and the teams refer to.
+    await migrateBoutiqueModule(pool);
 
   // The Director is identified by the role, not by a fixed username. Keyed on
   // username = 'admin', renaming that account -- which its owner is free to do

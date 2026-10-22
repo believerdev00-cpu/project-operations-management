@@ -1,0 +1,1323 @@
+// The Boutique Management System (Project 5): the shop's workspace, at
+// #/boutique/<tab>.
+//
+// One module, one page, with a tab per part of the brief: the till (Sell),
+// Sales, Products, Stock, Suppliers & purchases, Cash, Expenses, the Books,
+// Reports, Approvals and History. Which tabs a person gets is decided by the
+// role the API answers in /overview (director, reader, manager, cashier),
+// never by the browser's own guess, and every button here is re-checked by
+// the route it calls.
+//
+// Reached from the Director's Projects page (the PRJ-BOUTIQUE row's "Open
+// boutique" button), from the Boutique chip under the logo, and from the
+// Boutique entry in the menu of everybody who works in it. Money is RWF
+// throughout (formatRwf); nothing here moves money, it records it.
+
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { fill, useI18n } from './i18n.js';
+import { DetailView, Fact, useBusy, useDialog } from './ui.jsx';
+import { formatDate, formatRwf, todayLocal } from './format.js';
+import {
+  ADJUSTMENT_KINDS, BOUTIQUE_PAYMENT_METHODS, EXPENSE_CATEGORIES, PRODUCT_TYPES, REPORT_PERIODS,
+  fromMinor, lineTotals, saleTotals, toMinor
+} from '../shared/boutique.js';
+
+const TABS = {
+  director: ['overview', 'sell', 'sales', 'products', 'stock', 'suppliers', 'cash', 'expenses', 'books', 'reports', 'approvals', 'history'],
+  manager: ['overview', 'sell', 'sales', 'products', 'stock', 'suppliers', 'cash', 'expenses', 'books', 'reports', 'approvals', 'history'],
+  reader: ['overview', 'sales', 'products', 'stock', 'suppliers', 'cash', 'expenses', 'books', 'reports', 'approvals', 'history'],
+  cashier: ['overview', 'sell', 'sales', 'products', 'stock', 'cash']
+};
+
+const money = formatRwf;
+const variantLabel = (v) => [v.size, v.color].filter(Boolean).join(' / ');
+const fullName = (v) => `${v.productName || ''}${variantLabel(v) ? ` (${variantLabel(v)})` : ''}`;
+
+function Panel({ title, subtitle, children, action, onAction }) {
+  return <section className="panel">
+    <div className="panel-header"><div><h2>{title}</h2>{subtitle && <span>{subtitle}</span>}</div>
+      {action && <button className="text-btn" type="button" onClick={onAction}>{action} &rarr;</button>}</div>
+    {children}
+  </section>;
+}
+function Field({ label, children, wide }) {
+  return <label className={wide ? 'form-field form-field-wide' : 'form-field'}><span>{label}</span>{children}</label>;
+}
+function Metric({ label, value, tone }) {
+  return <div className={`metric-card${tone ? ` btq-metric-${tone}` : ''}`}><span>{label}</span><strong>{value}</strong></div>;
+}
+function Empty({ children }) { return <div className="empty-state"><strong>{children}</strong></div>; }
+function Badge({ tone, children }) { return <span className={`status-badge tone-${tone}`}>{children}</span>; }
+
+const SALE_TONE = { completed: 'done', void_requested: 'waiting', voided: 'stopped' };
+const APPROVAL_TONE = { pending: 'waiting', approved: 'done', rejected: 'stopped' };
+const PO_TONE = { ordered: 'waiting', partially_received: 'active', received: 'done', cancelled: 'stopped' };
+
+// Loads one address and re-loads it when `key` changes. The newest request
+// wins, as every loader in this app does.
+function useLoad(fetchJson, path, key, onError) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const latest = useRef(0);
+  const reload = useCallback(async () => {
+    if (!path) return;
+    const n = ++latest.current;
+    setLoading(true);
+    try {
+      const result = await fetchJson(path);
+      if (n === latest.current) setData(result);
+    } catch (error) {
+      if (n === latest.current) onError?.(error.message);
+    } finally {
+      if (n === latest.current) setLoading(false);
+    }
+  }, [fetchJson, path, onError]);
+  useEffect(() => { reload(); }, [reload, key]);
+  return [data, reload, loading];
+}
+
+// A search box that asks the till's search route and offers the matches.
+function VariantSearch({ fetchJson, onPick, placeholder, disabled }) {
+  const { t } = useI18n();
+  const [q, setQ] = useState('');
+  const [results, setResults] = useState([]);
+  const latest = useRef(0);
+  useEffect(() => {
+    const text = q.trim();
+    if (!text) { setResults([]); return undefined; }
+    const n = ++latest.current;
+    const timer = setTimeout(async () => {
+      try {
+        const found = await fetchJson(`/api/boutique/pos/search?q=${encodeURIComponent(text)}`);
+        if (n === latest.current) setResults(found);
+      } catch { /* the box simply shows nothing */ }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [q, fetchJson]);
+  return <div className="btq-search">
+    <input type="search" value={q} disabled={disabled} placeholder={placeholder || t('btq.searchProducts')} onChange={(e) => setQ(e.target.value)}
+      onKeyDown={(e) => { if (e.key === 'Enter' && results.length === 1) { e.preventDefault(); onPick(results[0]); setQ(''); setResults([]); } }} />
+    {results.length > 0 && <ul className="btq-results">
+      {results.map((v) => <li key={v.id}>
+        <button type="button" className="btq-result" onClick={() => { onPick(v); setQ(''); setResults([]); }}>
+          <strong>{fullName(v)}</strong>
+          <span>{v.sku} · {money(v.sellingPrice)} · {fill(t('btq.inStockCount'), { count: v.stockQuantity })}</span>
+        </button>
+      </li>)}
+    </ul>}
+  </div>;
+}
+
+// ---- the workspace ----------------------------------------------------------------
+
+export default function Boutique({ user, fetchJson, upload, onMessage, onError, onChanged, tab, query, onNavigate }) {
+  const { t } = useI18n();
+  const [overview, reloadOverview] = useLoad(fetchJson, '/api/boutique/overview', 0, onError);
+  const role = overview?.role;
+  const tabs = role ? TABS[role] : [];
+  const active = tabs.includes(tab) ? tab : 'overview';
+  const changed = useCallback(() => { reloadOverview(); onChanged?.(); }, [reloadOverview, onChanged]);
+  const go = useCallback((next, params) => onNavigate(next, params), [onNavigate]);
+
+  if (!overview) return <div className="loading-state"><span className="spinner" />{t('app.loading')}</div>;
+  const can = { manage: role === 'director' || role === 'manager', sell: role !== 'reader', decide: role === 'director', role };
+  const common = { fetchJson, upload, onMessage, onError, changed, can, go, query, user, overview };
+
+  return <div className="boutique">
+    <section className="welcome-strip btq-head">
+      <div>
+        <span className="eyebrow">{t('btq.eyebrow')}</span>
+        <h2>{t('btq.title')}</h2>
+        <p>{t('btq.blurb')}</p>
+      </div>
+    </section>
+    <nav className="partner-tabs btq-tabs" aria-label={t('btq.title')}>
+      {tabs.map((id) => <button key={id} type="button" className={`partner-tab${active === id ? ' active' : ''}`} onClick={() => go(id)}>
+        {t(`btq.tab.${id}`)}{id === 'approvals' && overview.pendingApprovals > 0 && <span className="nav-badge btq-badge">{overview.pendingApprovals}</span>}
+      </button>)}
+    </nav>
+    {active === 'overview' && <OverviewTab {...common} />}
+    {active === 'sell' && <SellTab {...common} />}
+    {active === 'sales' && <SalesTab {...common} />}
+    {active === 'products' && <ProductsTab {...common} />}
+    {active === 'stock' && <StockTab {...common} />}
+    {active === 'suppliers' && <SuppliersTab {...common} />}
+    {active === 'cash' && <CashTab {...common} />}
+    {active === 'expenses' && <ExpensesTab {...common} />}
+    {active === 'books' && <BooksTab {...common} />}
+    {active === 'reports' && <ReportsTab {...common} />}
+    {active === 'approvals' && <ApprovalsTab {...common} />}
+    {active === 'history' && <HistoryTab {...common} />}
+  </div>;
+}
+
+// ---- overview ------------------------------------------------------------------------
+
+function OverviewTab({ overview, can, go }) {
+  const { t } = useI18n();
+  return <>
+    <div className="metric-grid metric-grid-4">
+      <Metric label={t('btq.todaySales')} value={`${money(overview.todaySales.total)} · ${overview.todaySales.count}`} />
+      {/* A cashier is not given the shelf's worth at cost, the supplier
+          balance or the Director's queue; the API answers null for them. */}
+      {can.role !== 'cashier' && <Metric label={t('btq.stockValue')} value={money(overview.stockValue)} />}
+      <Metric label={t('btq.piecesOnShelf')} value={overview.pieces} />
+      <Metric label={t('btq.lowStockCount')} value={overview.lowStock} tone={overview.lowStock ? 'warn' : ''} />
+      <Metric label={t('btq.openTills')} value={overview.openSessions} />
+      {can.role !== 'cashier' && <Metric label={t('btq.pendingApprovals')} value={overview.pendingApprovals} tone={overview.pendingApprovals ? 'warn' : ''} />}
+      {can.role !== 'cashier' && <Metric label={t('btq.owedToSuppliers')} value={money(overview.supplierBalance)} />}
+      <Metric label={t('btq.productsCount')} value={`${overview.products} · ${overview.variants}`} />
+    </div>
+    <div className="button-row btq-quick">
+      {can.sell && <button className="primary-btn big-action" type="button" onClick={() => go('sell')}>{t('btq.tab.sell')}</button>}
+      {can.sell && <button className="secondary-btn" type="button" onClick={() => go('cash')}>{overview.mySessionId ? t('btq.myTill') : t('btq.openTill')}</button>}
+      {can.manage && <button className="secondary-btn" type="button" onClick={() => go('products', { add: '1' })}>{t('btq.addProduct')}</button>}
+      {can.manage && <button className="secondary-btn" type="button" onClick={() => go('reports')}>{t('btq.tab.reports')}</button>}
+    </div>
+    <p className="field-hint">{t('btq.overviewHint')}</p>
+  </>;
+}
+
+// ---- the till ------------------------------------------------------------------------
+
+function SellTab({ fetchJson, onMessage, onError, changed, can, go, overview }) {
+  const { t, language } = useI18n();
+  const dialog = useDialog();
+  const [busy, run] = useBusy();
+  const [methods] = useLoad(fetchJson, '/api/boutique/payment-methods', 0, onError);
+  const [lines, setLines] = useState([]);
+  const [discount, setDiscount] = useState('');
+  const [customer, setCustomer] = useState('');
+  const [note, setNote] = useState('');
+  const [payments, setPayments] = useState([{ method: 'Cash', amount: '', reference: '' }]);
+  const [receipt, setReceipt] = useState(null);
+  const activeMethods = (methods || []).filter((m) => m.active).map((m) => m.code);
+
+  const totals = saleTotals(lines, discount);
+  const paid = payments.reduce((sum, p) => sum + toMinor(p.amount), 0);
+  const change = Math.max(0, paid - totals.total);
+
+  const add = (v) => setLines((current) => {
+    const found = current.find((l) => l.variantId === v.id);
+    if (found) return current.map((l) => (l.variantId === v.id ? { ...l, quantity: Math.min(v.stockQuantity, l.quantity + 1) } : l));
+    return [...current, { variantId: v.id, name: fullName(v), sku: v.sku, stock: v.stockQuantity, catalogue: v.sellingPrice, unitPrice: v.sellingPrice, quantity: 1, discount: '' }];
+  });
+  const update = (variantId, patch) => setLines((current) => current.map((l) => (l.variantId === variantId ? { ...l, ...patch } : l)));
+  const remove = (variantId) => setLines((current) => current.filter((l) => l.variantId !== variantId));
+  const reset = () => { setLines([]); setDiscount(''); setCustomer(''); setNote(''); setPayments([{ method: 'Cash', amount: '', reference: '' }]); };
+
+  const complete = () => run(async () => {
+    try {
+      const sale = await fetchJson('/api/boutique/sales', {
+        method: 'POST',
+        body: JSON.stringify({
+          // A cashier sends neither price nor discount: the catalogue price is
+          // charged, and the API refuses either from them anyway.
+          items: lines.map((l) => ({ variantId: l.variantId, quantity: l.quantity, ...(can.manage ? { unitPrice: l.unitPrice, discount: l.discount || 0 } : {}) })),
+          ...(can.manage ? { discount: discount || 0 } : {}), customerName: customer, note,
+          payments: payments.filter((p) => Number(p.amount) > 0)
+        })
+      });
+      setReceipt(sale);
+      reset();
+      onMessage(fill(t('btq.saleDone'), { number: sale.number }));
+      changed();
+    } catch (error) { onError(error.message); }
+  });
+
+  const openTill = () => run(async () => {
+    const float = await dialog.prompt({ title: t('btq.openTill'), label: t('btq.openingCash'), initialValue: '0', required: true });
+    if (float === null) return;
+    try {
+      await fetchJson('/api/boutique/cash/sessions', { method: 'POST', body: JSON.stringify({ openingCash: float }) });
+      onMessage(t('btq.tillOpened'));
+      changed();
+    } catch (error) { onError(error.message); }
+  });
+
+  if (receipt) return <Receipt sale={receipt} language={language} onNew={() => setReceipt(null)} onOpen={() => go('sales', { sale: receipt.id })} />;
+
+  return <div className="btq-pos">
+    <div className="btq-pos-left">
+      <Panel title={t('btq.tab.sell')} subtitle={overview.mySessionId ? t('btq.tillOpenHint') : t('btq.noTillHint')}>
+        {!overview.mySessionId && can.sell && <div className="button-row"><button className="secondary-btn" type="button" disabled={busy} onClick={openTill}>{t('btq.openTill')}</button></div>}
+        <VariantSearch fetchJson={fetchJson} onPick={add} disabled={busy} />
+        {lines.length ? <div className="table-wrap"><table className="card-table btq-cart">
+          <thead><tr><th>{t('btq.item')}</th><th>{t('btq.qty')}</th><th>{t('btq.unitPrice')}</th><th>{t('btq.lineDiscount')}</th><th>{t('btq.lineTotal')}</th><th>{t('table.actions')}</th></tr></thead>
+          <tbody>{lines.map((l) => <tr key={l.variantId}>
+            <td className="card-title-cell"><strong>{l.name}</strong><small>{l.sku} · {fill(t('btq.inStockCount'), { count: l.stock })}</small></td>
+            <td data-label={t('btq.qty')}><div className="btq-qty">
+              <button type="button" className="icon-btn" aria-label={t('btq.less')} onClick={() => update(l.variantId, { quantity: Math.max(1, l.quantity - 1) })}>−</button>
+              <input type="number" min="1" max={l.stock} value={l.quantity} aria-label={t('btq.qty')} onChange={(e) => update(l.variantId, { quantity: Math.max(1, Math.min(l.stock, Math.trunc(Number(e.target.value) || 1))) })} />
+              <button type="button" className="icon-btn" aria-label={t('btq.more')} onClick={() => update(l.variantId, { quantity: Math.min(l.stock, l.quantity + 1) })}>+</button>
+            </div></td>
+            <td data-label={t('btq.unitPrice')}>{can.manage
+              ? <input type="number" min="0" step="1" value={l.unitPrice} aria-label={t('btq.unitPrice')} onChange={(e) => update(l.variantId, { unitPrice: e.target.value })} />
+              : money(l.unitPrice)}</td>
+            <td data-label={t('btq.lineDiscount')}>{can.manage
+              ? <input type="number" min="0" step="1" value={l.discount} aria-label={t('btq.lineDiscount')} onChange={(e) => update(l.variantId, { discount: e.target.value })} />
+              : '—'}</td>
+            <td data-label={t('btq.lineTotal')}>{money(fromMinor(lineTotals(l).total))}</td>
+            <td className="card-actions"><button type="button" className="text-btn" onClick={() => remove(l.variantId)}>{t('action.remove')}</button></td>
+          </tr>)}</tbody>
+        </table></div> : <Empty>{t('btq.cartEmpty')}</Empty>}
+      </Panel>
+    </div>
+    <div className="btq-pos-right">
+      <Panel title={t('btq.payment')}>
+        <div className="form-grid">
+          {can.manage && <Field label={t('btq.saleDiscount')}><input type="number" min="0" step="1" value={discount} onChange={(e) => setDiscount(e.target.value)} /></Field>}
+          <Field label={t('btq.customer')}><input value={customer} maxLength="150" onChange={(e) => setCustomer(e.target.value)} /></Field>
+        </div>
+        <div className="btq-totals">
+          <Fact label={t('btq.subtotal')} value={money(fromMinor(totals.subtotal))} />
+          <Fact label={t('btq.discount')} value={money(fromMinor(totals.discount))} />
+          <Fact label={t('btq.total')} value={<span className="btq-grand">{money(fromMinor(totals.total))}</span>} />
+        </div>
+        {payments.map((p, index) => <div className="form-grid btq-payment-row" key={index}>
+          <Field label={t('btq.method')}><select value={p.method} onChange={(e) => setPayments(payments.map((x, i) => (i === index ? { ...x, method: e.target.value } : x)))}>
+            {activeMethods.map((code) => <option key={code} value={code}>{t(`btq.method.${code}`)}</option>)}
+          </select></Field>
+          <Field label={t('btq.amount')}><input type="number" min="0" step="1" value={p.amount} onChange={(e) => setPayments(payments.map((x, i) => (i === index ? { ...x, amount: e.target.value } : x)))} /></Field>
+          <Field label={t('btq.reference')}><input value={p.reference} maxLength="100" onChange={(e) => setPayments(payments.map((x, i) => (i === index ? { ...x, reference: e.target.value } : x)))} /></Field>
+        </div>)}
+        <div className="button-row">
+          <button type="button" className="text-btn" onClick={() => setPayments([...payments, { method: activeMethods[0] || 'Cash', amount: '', reference: '' }])}>{t('btq.splitPayment')}</button>
+          <button type="button" className="text-btn" onClick={() => setPayments(payments.map((p, i) => (i === 0 ? { ...p, amount: String(fromMinor(Math.max(0, totals.total - payments.filter((_, j) => j !== 0).reduce((s, x) => s + toMinor(x.amount), 0)))) } : p)))}>{t('btq.exactAmount')}</button>
+        </div>
+        <div className="btq-totals">
+          <Fact label={t('btq.paid')} value={money(fromMinor(paid))} />
+          <Fact label={t('btq.change')} value={money(fromMinor(change))} />
+        </div>
+        <Field label={t('field.notes')}><textarea rows="2" value={note} maxLength="1000" onChange={(e) => setNote(e.target.value)} /></Field>
+        <div className="form-submit-bar">
+          <button type="button" className="primary-btn big-action" disabled={busy || !lines.length || paid < totals.total} onClick={complete}>{t('btq.completeSale')}</button>
+        </div>
+        {lines.length > 0 && paid < totals.total && <p className="field-hint over-budget">{t('btq.notEnoughPaid')}</p>}
+      </Panel>
+    </div>
+  </div>;
+}
+
+// The receipt the customer gets: on screen, and printed with the browser's
+// own print dialog (the page's print stylesheet hides everything else).
+function Receipt({ sale, language, onNew, onOpen }) {
+  const { t } = useI18n();
+  return <Panel title={fill(t('btq.receiptFor'), { number: sale.number })} action={onOpen ? t('btq.openSale') : null} onAction={onOpen}>
+    <div className="btq-receipt" id="btq-receipt">
+      <h3>{t('btq.title')}</h3>
+      <p>{sale.number} · {formatDate(sale.soldOn, language)} · {sale.cashierName}</p>
+      {sale.customerName && <p>{t('btq.customer')}: {sale.customerName}</p>}
+      <table><thead><tr><th>{t('btq.item')}</th><th>{t('btq.qty')}</th><th>{t('btq.unitPrice')}</th><th>{t('btq.lineTotal')}</th></tr></thead>
+        <tbody>{(sale.items || []).map((i) => <tr key={i.id}><td>{i.productName} {variantLabel(i) && `(${variantLabel(i)})`}</td><td>{i.quantity}</td><td>{money(i.unitPrice)}</td><td>{money(i.lineTotal)}</td></tr>)}</tbody></table>
+      <div className="btq-receipt-totals">
+        {sale.discount > 0 && <p>{t('btq.discount')}: {money(sale.discount)}</p>}
+        <p><strong>{t('btq.total')}: {money(sale.total)}</strong></p>
+        {(sale.payments || []).map((p) => <p key={p.id}>{t(`btq.method.${p.method}`)}: {money(p.amount)}{p.reference && ` (${p.reference})`}</p>)}
+        {sale.changeGiven > 0 && <p>{t('btq.change')}: {money(sale.changeGiven)}</p>}
+      </div>
+      <p className="btq-receipt-thanks">{t('btq.thanks')}</p>
+    </div>
+    <div className="button-row">
+      <button type="button" className="secondary-btn" onClick={() => window.print()}>{t('btq.print')}</button>
+      {onNew && <button type="button" className="primary-btn" onClick={onNew}>{t('btq.newSale')}</button>}
+    </div>
+  </Panel>;
+}
+
+// ---- sales --------------------------------------------------------------------------
+
+function SalesTab({ fetchJson, onMessage, onError, changed, can, go, query }) {
+  const { t, language } = useI18n();
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [status, setStatus] = useState('');
+  const [search, setSearch] = useState('');
+  const [tick, setTick] = useState(0);
+  const path = `/api/boutique/sales?limit=200${from ? `&from=${from}` : ''}${to ? `&to=${to}` : ''}${status ? `&status=${status}` : ''}${search ? `&search=${encodeURIComponent(search)}` : ''}`;
+  const [sales] = useLoad(fetchJson, path, tick, onError);
+  const openId = query.get('sale');
+  const refresh = () => { setTick((n) => n + 1); changed(); };
+  return <>
+    {openId && <SaleDetail saleId={openId} fetchJson={fetchJson} onMessage={onMessage} onError={onError} can={can} onClose={() => go('sales')} onChanged={refresh} />}
+    <Panel title={t('btq.tab.sales')} subtitle={sales ? String(sales.length) : ''}>
+      <div className="filter-grid">
+        <Field label={t('btq.from')}><input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></Field>
+        <Field label={t('btq.to')}><input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></Field>
+        <Field label={t('field.status')}><select value={status} onChange={(e) => setStatus(e.target.value)}><option value="">{t('btq.all')}</option>{['completed', 'void_requested', 'voided'].map((s) => <option key={s} value={s}>{t(`btq.saleStatus.${s}`)}</option>)}</select></Field>
+        <Field label={t('btq.search')}><input type="search" value={search} onChange={(e) => setSearch(e.target.value)} /></Field>
+      </div>
+      {sales?.length ? <div className="table-wrap"><table className="card-table">
+        <thead><tr><th>{t('btq.number')}</th><th>{t('table.date')}</th><th>{t('btq.cashier')}</th><th>{t('btq.customer')}</th><th>{t('btq.items')}</th><th>{t('btq.total')}</th><th>{t('field.status')}</th></tr></thead>
+        <tbody>{sales.map((s) => <tr key={s.id} className="clickable-row" onClick={() => go('sales', { sale: s.id })}>
+          <td className="card-title-cell"><strong>{s.number}</strong></td>
+          <td data-label={t('table.date')}>{formatDate(s.soldOn, language)}</td>
+          <td data-label={t('btq.cashier')}>{s.cashierName}</td>
+          <td data-label={t('btq.customer')}>{s.customerName || '—'}</td>
+          <td data-label={t('btq.items')}>{s.itemCount}</td>
+          <td data-label={t('btq.total')}>{money(s.total)}</td>
+          <td data-label={t('field.status')}><Badge tone={SALE_TONE[s.status]}>{t(`btq.saleStatus.${s.status}`)}</Badge></td>
+        </tr>)}</tbody>
+      </table></div> : <Empty>{t('btq.noSales')}</Empty>}
+    </Panel>
+  </>;
+}
+
+function SaleDetail({ saleId, fetchJson, onMessage, onError, can, onClose, onChanged }) {
+  const { t, language } = useI18n();
+  const dialog = useDialog();
+  const [busy, run] = useBusy();
+  const [tick, setTick] = useState(0);
+  const [sale] = useLoad(fetchJson, `/api/boutique/sales/${encodeURIComponent(saleId)}`, tick, onError);
+  const [returning, setReturning] = useState(false);
+  const [showReceipt, setShowReceipt] = useState(false);
+  const refresh = () => { setTick((n) => n + 1); onChanged(); };
+
+  const askVoid = () => run(async () => {
+    const reason = await dialog.prompt({ title: t('btq.voidSale'), label: t('btq.reason'), message: t('btq.voidHint'), required: true, minLength: 10, multiline: true });
+    if (reason === null) return;
+    try {
+      const result = await fetchJson(`/api/boutique/sales/${sale.id}/void`, { method: 'POST', body: JSON.stringify({ reason }) });
+      onMessage(result.status === 'voided' ? t('btq.voided') : t('btq.voidAsked'));
+      refresh();
+    } catch (error) { onError(error.message); }
+  });
+  const decideVoid = (approve) => run(async () => {
+    const note = approve ? '' : await dialog.prompt({ title: t('btq.refuseVoid'), label: t('btq.reason'), required: true, minLength: 10, multiline: true });
+    if (note === null) return;
+    try {
+      await fetchJson(`/api/boutique/sales/${sale.id}/void-decision`, { method: 'POST', body: JSON.stringify({ approve, note }) });
+      onMessage(approve ? t('btq.voided') : t('btq.voidRefused'));
+      refresh();
+    } catch (error) { onError(error.message); }
+  });
+
+  if (!sale) return <DetailView onClose={onClose} label={t('btq.tab.sales')}><div className="loading-state"><span className="spinner" /></div></DetailView>;
+  const returnable = sale.status === 'completed' && sale.items.some((i) => i.returnedQuantity < i.quantity);
+  return <DetailView onClose={onClose} label={sale.number}>
+    <section className="panel detail-panel">
+      <div className="panel-header"><div><h2>{sale.number}</h2><span>{formatDate(sale.soldOn, language)} · {sale.cashierName}</span></div>
+        <button className="text-btn" type="button" onClick={onClose}>{t('action.close')}</button></div>
+      <div className="detail-facts">
+        <Fact label={t('field.status')} value={<Badge tone={SALE_TONE[sale.status]}>{t(`btq.saleStatus.${sale.status}`)}</Badge>} />
+        <Fact label={t('btq.total')} value={money(sale.total)} />
+        <Fact label={t('btq.paid')} value={money(sale.paid)} />
+        <Fact label={t('btq.change')} value={money(sale.changeGiven)} />
+        <Fact label={t('btq.customer')} value={sale.customerName || '—'} />
+        {sale.exchangeOfReturnId && <Fact label={t('btq.exchangeOf')} value={t('btq.yes')} />}
+      </div>
+      {sale.voidReason && <p className="admin-note"><strong>{t('btq.voidReason')}:</strong> {sale.voidReason}</p>}
+      <div className="table-wrap"><table className="card-table">
+        <thead><tr><th>{t('btq.item')}</th><th>{t('btq.qty')}</th><th>{t('btq.unitPrice')}</th><th>{t('btq.lineDiscount')}</th><th>{t('btq.lineTotal')}</th><th>{t('btq.returned')}</th></tr></thead>
+        <tbody>{sale.items.map((i) => <tr key={i.id}>
+          <td className="card-title-cell"><strong>{i.productName}</strong><small>{i.sku} {variantLabel(i)}</small></td>
+          <td data-label={t('btq.qty')}>{i.quantity}</td><td data-label={t('btq.unitPrice')}>{money(i.unitPrice)}</td>
+          <td data-label={t('btq.lineDiscount')}>{money(i.discount)}</td><td data-label={t('btq.lineTotal')}>{money(i.lineTotal)}</td>
+          <td data-label={t('btq.returned')}>{i.returnedQuantity}</td>
+        </tr>)}</tbody>
+      </table></div>
+      <h3 className="form-section-title">{t('btq.payment')}</h3>
+      <ul className="history-list">{sale.payments.map((p) => <li key={p.id}>{t(`btq.method.${p.method}`)}: {money(p.amount)}{p.reference && ` (${p.reference})`}</li>)}</ul>
+      {sale.returns.length > 0 && <>
+        <h3 className="form-section-title">{t('btq.returns')}</h3>
+        <ul className="history-list">{sale.returns.map((r) => <li key={r.id}>
+          <strong>{r.number}</strong> · {t(`btq.returnKind.${r.kind}`)} · {money(r.value)}
+          {r.refundTotal > 0 && ` · ${fill(t('btq.refundedBy'), { amount: money(r.refundTotal), method: t(`btq.method.${r.refundMethod}`) })}`}
+          {r.exchangeSaleNumber && ` · ${fill(t('btq.newSaleNumber'), { number: r.exchangeSaleNumber })}`} — {r.reason}
+        </li>)}</ul>
+      </>}
+      <div className="button-row">
+        <button type="button" className="secondary-btn" onClick={() => setShowReceipt((s) => !s)}>{t('btq.receipt')}</button>
+        {can.sell && returnable && <button type="button" className="secondary-btn" disabled={busy} onClick={() => setReturning((r) => !r)}>{t('btq.returnOrExchange')}</button>}
+        {can.manage && sale.status === 'completed' && <button type="button" className="danger-btn" disabled={busy} onClick={askVoid}>{t('btq.voidSale')}</button>}
+        {can.decide && sale.status === 'void_requested' && <>
+          <button type="button" className="primary-btn" disabled={busy} onClick={() => decideVoid(true)}>{t('btq.approveVoid')}</button>
+          <button type="button" className="danger-btn" disabled={busy} onClick={() => decideVoid(false)}>{t('btq.refuseVoid')}</button>
+        </>}
+      </div>
+      {showReceipt && <Receipt sale={sale} language={language} />}
+      {returning && <ReturnForm sale={sale} fetchJson={fetchJson} can={can} busy={busy} run={run} onMessage={onMessage} onError={onError} onDone={() => { setReturning(false); refresh(); }} />}
+    </section>
+  </DetailView>;
+}
+
+function ReturnForm({ sale, fetchJson, can, busy, run, onMessage, onError, onDone }) {
+  const { t } = useI18n();
+  const [methods] = useLoad(fetchJson, '/api/boutique/payment-methods', 0, onError);
+  const [quantities, setQuantities] = useState({});
+  const [restock, setRestock] = useState({});
+  const [reason, setReason] = useState('');
+  const [refundMethod, setRefundMethod] = useState('Cash');
+  const [exchange, setExchange] = useState(false);
+  const [newLines, setNewLines] = useState([]);
+  const [newPayments, setNewPayments] = useState([{ method: 'Cash', amount: '' }]);
+  const activeMethods = (methods || []).filter((m) => m.active).map((m) => m.code);
+  const value = sale.items.reduce((sum, i) => sum + Math.round(toMinor(i.lineTotal) / i.quantity) * (Number(quantities[i.id]) || 0), 0);
+  const newTotal = saleTotals(newLines, 0).total;
+  const credit = exchange ? Math.min(value, newTotal) : 0;
+  const refund = value - credit;
+  const stillToPay = Math.max(0, newTotal - credit);
+
+  const submit = (e) => {
+    e.preventDefault();
+    run(async () => {
+      try {
+        const body = {
+          items: sale.items.filter((i) => Number(quantities[i.id]) > 0).map((i) => ({ saleItemId: i.id, quantity: Number(quantities[i.id]), restock: restock[i.id] !== false })),
+          reason, refundMethod,
+          exchange: exchange ? { items: newLines.map((l) => ({ variantId: l.variantId, quantity: l.quantity })), payments: newPayments.filter((p) => Number(p.amount) > 0) } : undefined
+        };
+        const result = await fetchJson(`/api/boutique/sales/${sale.id}/returns`, { method: 'POST', body: JSON.stringify(body) });
+        onMessage(result.exchangeSale ? fill(t('btq.exchangeDone'), { number: result.exchangeSale.number }) : t('btq.returnDone'));
+        onDone();
+      } catch (error) { onError(error.message); }
+    });
+  };
+  return <form className="decision-form" onSubmit={submit}>
+    <h3 className="form-section-title">{t('btq.returnOrExchange')}</h3>
+    <div className="table-wrap"><table className="card-table">
+      <thead><tr><th>{t('btq.item')}</th><th>{t('btq.canReturn')}</th><th>{t('btq.returnQty')}</th><th>{t('btq.backOnShelf')}</th></tr></thead>
+      <tbody>{sale.items.map((i) => <tr key={i.id}>
+        <td className="card-title-cell"><strong>{i.productName}</strong><small>{i.sku} {variantLabel(i)}</small></td>
+        <td data-label={t('btq.canReturn')}>{i.quantity - i.returnedQuantity}</td>
+        <td data-label={t('btq.returnQty')}><input type="number" min="0" max={i.quantity - i.returnedQuantity} value={quantities[i.id] || ''} aria-label={t('btq.returnQty')} onChange={(e) => setQuantities({ ...quantities, [i.id]: e.target.value })} /></td>
+        {/* Keeping a returned item off the shelf is a write-off: the manager's
+            choice, not the till's. A cashier's return always restocks. */}
+        <td data-label={t('btq.backOnShelf')}>{can.manage
+          ? <input type="checkbox" checked={restock[i.id] !== false} aria-label={t('btq.backOnShelf')} onChange={(e) => setRestock({ ...restock, [i.id]: e.target.checked })} />
+          : t('btq.yes')}</td>
+      </tr>)}</tbody>
+    </table></div>
+    <div className="form-grid">
+      <Field label={t('btq.reason')} wide><input required minLength="3" value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+      <label className="check-field"><input type="checkbox" checked={exchange} onChange={(e) => setExchange(e.target.checked)} /><span>{t('btq.exchangeInstead')}</span></label>
+    </div>
+    {exchange && <>
+      <VariantSearch fetchJson={fetchJson} onPick={(v) => setNewLines((c) => (c.some((l) => l.variantId === v.id) ? c : [...c, { variantId: v.id, name: fullName(v), quantity: 1, unitPrice: v.sellingPrice }]))} />
+      {newLines.length > 0 && <ul className="history-list">{newLines.map((l) => <li key={l.variantId}>
+        {l.name} × <input type="number" min="1" value={l.quantity} aria-label={t('btq.qty')} onChange={(e) => setNewLines(newLines.map((x) => (x.variantId === l.variantId ? { ...x, quantity: Math.max(1, Number(e.target.value) || 1) } : x)))} /> · {money(l.unitPrice)}
+        <button type="button" className="text-btn" onClick={() => setNewLines(newLines.filter((x) => x.variantId !== l.variantId))}>{t('action.remove')}</button>
+      </li>)}</ul>}
+      <div className="btq-totals">
+        <Fact label={t('btq.newSaleTotal')} value={money(fromMinor(newTotal))} />
+        <Fact label={t('btq.creditApplied')} value={money(fromMinor(credit))} />
+        <Fact label={t('btq.stillToPay')} value={money(fromMinor(stillToPay))} />
+      </div>
+      {stillToPay > 0 && newPayments.map((p, index) => <div className="form-grid" key={index}>
+        <Field label={t('btq.method')}><select value={p.method} onChange={(e) => setNewPayments(newPayments.map((x, i) => (i === index ? { ...x, method: e.target.value } : x)))}>{activeMethods.map((code) => <option key={code} value={code}>{t(`btq.method.${code}`)}</option>)}</select></Field>
+        <Field label={t('btq.amount')}><input type="number" min="0" value={p.amount} onChange={(e) => setNewPayments(newPayments.map((x, i) => (i === index ? { ...x, amount: e.target.value } : x)))} /></Field>
+      </div>)}
+    </>}
+    <div className="btq-totals">
+      <Fact label={t('btq.returnValue')} value={money(fromMinor(value))} />
+      <Fact label={t('btq.refund')} value={money(fromMinor(refund))} />
+    </div>
+    {refund > 0 && <Field label={t('btq.refundMethod')}><select value={refundMethod} onChange={(e) => setRefundMethod(e.target.value)}>{BOUTIQUE_PAYMENT_METHODS.map((m) => <option key={m} value={m}>{t(`btq.method.${m}`)}</option>)}</select></Field>}
+    <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy || value <= 0 || (exchange && !newLines.length)}>{exchange ? t('btq.recordExchange') : t('btq.recordReturn')}</button></div>
+    {!can.manage && <p className="field-hint">{t('btq.cashierReturnHint')}</p>}
+  </form>;
+}
+
+// ---- products ------------------------------------------------------------------------
+
+const emptyVariant = () => ({ sku: '', barcode: '', size: '', color: '', costPrice: '', sellingPrice: '', reorderLevel: '0', openingStock: '0' });
+const emptyProduct = () => ({ name: '', productType: 'clothing', category: '', brand: '', description: '', variants: [emptyVariant()] });
+
+function ProductsTab({ fetchJson, upload, onMessage, onError, changed, can, go, query }) {
+  const { t } = useI18n();
+  const [busy, run] = useBusy();
+  const [search, setSearch] = useState('');
+  const [type, setType] = useState('');
+  const [status, setStatus] = useState('active');
+  const [tick, setTick] = useState(0);
+  const [products] = useLoad(fetchJson, `/api/boutique/products?status=${status}${type ? `&type=${type}` : ''}${search ? `&search=${encodeURIComponent(search)}` : ''}`, tick, onError);
+  const [form, setForm] = useState(emptyProduct);
+  const openId = query.get('product');
+  const adding = query.get('add') === '1';
+  const refresh = () => { setTick((n) => n + 1); changed(); };
+
+  const submit = (e) => {
+    e.preventDefault();
+    run(async () => {
+      try {
+        const created = await fetchJson('/api/boutique/products', { method: 'POST', body: JSON.stringify(form) });
+        onMessage(fill(t('btq.productAdded'), { name: created.name }));
+        setForm(emptyProduct());
+        refresh();
+        go('products', { product: created.id });
+      } catch (error) { onError(error.message); }
+    });
+  };
+  const setVariant = (index, patch) => setForm({ ...form, variants: form.variants.map((v, i) => (i === index ? { ...v, ...patch } : v)) });
+
+  return <>
+    {openId && <ProductDetail productId={openId} fetchJson={fetchJson} upload={upload} onMessage={onMessage} onError={onError} can={can} onClose={() => go('products')} onChanged={refresh} />}
+    <section className="toolbar-row">
+      <div className="filter-group">
+        <input type="search" value={search} placeholder={t('btq.searchProducts')} aria-label={t('btq.searchProducts')} onChange={(e) => setSearch(e.target.value)} />
+        <select value={type} aria-label={t('btq.productType')} onChange={(e) => setType(e.target.value)}><option value="">{t('btq.allTypes')}</option>{PRODUCT_TYPES.map((p) => <option key={p} value={p}>{t(`btq.type.${p}`)}</option>)}</select>
+        <select value={status} aria-label={t('field.status')} onChange={(e) => setStatus(e.target.value)}><option value="active">{t('btq.activeOnly')}</option><option value="all">{t('btq.all')}</option></select>
+      </div>
+      {can.manage && <button className="primary-btn" type="button" onClick={() => go('products', { add: adding ? undefined : '1' })}>{t('btq.addProduct')}</button>}
+    </section>
+    {can.manage && adding && <form className="form-panel" onSubmit={submit}>
+      <div className="panel-header"><div><h2>{t('btq.addProduct')}</h2><span>{t('btq.addProductBlurb')}</span></div></div>
+      <div className="form-grid">
+        <Field label={t('field.name')}><input required maxLength="200" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+        <Field label={t('btq.productType')}><select value={form.productType} onChange={(e) => setForm({ ...form, productType: e.target.value })}>{PRODUCT_TYPES.map((p) => <option key={p} value={p}>{t(`btq.type.${p}`)}</option>)}</select></Field>
+        <Field label={t('field.category')}><input maxLength="100" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} /></Field>
+        <Field label={t('btq.brand')}><input maxLength="100" value={form.brand} onChange={(e) => setForm({ ...form, brand: e.target.value })} /></Field>
+        <Field label={t('field.description')} wide><textarea rows="2" maxLength="2000" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field>
+      </div>
+      <h3 className="form-section-title">{t('btq.variants')}</h3>
+      <p className="field-hint">{t('btq.variantsHint')}</p>
+      {form.variants.map((v, index) => <div className="form-grid btq-variant-row" key={index}>
+        <Field label={t('btq.sku')}><input required maxLength="60" value={v.sku} onChange={(e) => setVariant(index, { sku: e.target.value })} /></Field>
+        <Field label={t('btq.barcode')}><input maxLength="60" value={v.barcode} onChange={(e) => setVariant(index, { barcode: e.target.value })} /></Field>
+        <Field label={t('btq.size')}><input maxLength="40" value={v.size} onChange={(e) => setVariant(index, { size: e.target.value })} /></Field>
+        <Field label={t('btq.color')}><input maxLength="40" value={v.color} onChange={(e) => setVariant(index, { color: e.target.value })} /></Field>
+        <Field label={t('btq.costPrice')}><input type="number" min="0" step="1" required value={v.costPrice} onChange={(e) => setVariant(index, { costPrice: e.target.value })} /></Field>
+        <Field label={t('btq.sellingPrice')}><input type="number" min="0" step="1" required value={v.sellingPrice} onChange={(e) => setVariant(index, { sellingPrice: e.target.value })} /></Field>
+        <Field label={t('btq.reorderLevel')}><input type="number" min="0" step="1" value={v.reorderLevel} onChange={(e) => setVariant(index, { reorderLevel: e.target.value })} /></Field>
+        <Field label={t('btq.openingStock')}><input type="number" min="0" step="1" value={v.openingStock} onChange={(e) => setVariant(index, { openingStock: e.target.value })} /></Field>
+        {form.variants.length > 1 && <button type="button" className="text-btn" onClick={() => setForm({ ...form, variants: form.variants.filter((_, i) => i !== index) })}>{t('action.remove')}</button>}
+      </div>)}
+      <div className="button-row"><button type="button" className="secondary-btn" onClick={() => setForm({ ...form, variants: [...form.variants, emptyVariant()] })}>{t('btq.addVariant')}</button></div>
+      <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('btq.addProduct')}</button></div>
+    </form>}
+    <Panel title={t('btq.catalogue')} subtitle={products ? String(products.length) : ''}>
+      {products?.length ? <div className="table-wrap"><table className="card-table">
+        <thead><tr><th>{t('btq.product')}</th><th>{t('btq.productType')}</th><th>{t('btq.brand')}</th><th>{t('btq.variants')}</th><th>{t('btq.stock')}</th><th>{t('field.status')}</th></tr></thead>
+        <tbody>{products.map((p) => <tr key={p.id} className="clickable-row" onClick={() => go('products', { product: p.id })}>
+          <td className="card-title-cell"><strong>{p.name}</strong><small>{p.category}</small></td>
+          <td data-label={t('btq.productType')}>{t(`btq.type.${p.productType}`)}</td>
+          <td data-label={t('btq.brand')}>{p.brand || '—'}</td>
+          <td data-label={t('btq.variants')}>{p.variants.length}</td>
+          <td data-label={t('btq.stock')}>{p.stockQuantity}</td>
+          <td data-label={t('field.status')}><Badge tone={p.status === 'active' ? 'done' : 'stopped'}>{t(`btq.itemStatus.${p.status}`)}</Badge></td>
+        </tr>)}</tbody>
+      </table></div> : <Empty>{t('btq.noProducts')}</Empty>}
+    </Panel>
+  </>;
+}
+
+function ProductDetail({ productId, fetchJson, upload, onMessage, onError, can, onClose, onChanged }) {
+  const { t } = useI18n();
+  const [busy, run] = useBusy();
+  const [tick, setTick] = useState(0);
+  const [product] = useLoad(fetchJson, `/api/boutique/products/${encodeURIComponent(productId)}`, tick, onError);
+  const [form, setForm] = useState(null);
+  const [editingVariant, setEditingVariant] = useState(null);
+  const [newVariant, setNewVariant] = useState(null);
+  const [imageUrl, setImageUrl] = useState('');
+  const refresh = () => { setTick((n) => n + 1); onChanged(); };
+  useEffect(() => { if (product) setForm({ name: product.name, productType: product.productType, category: product.category, brand: product.brand, description: product.description, status: product.status }); }, [product]);
+  // The picture is fetched with the session header and shown from a blob
+  // URL, so no token ever sits in an <img src>.
+  useEffect(() => {
+    let url = '';
+    let cancelled = false;
+    if (product?.hasImage) {
+      fetch(`/api/boutique/products/${product.id}/image`, { headers: { Authorization: `Bearer ${localStorage.getItem('ops-token') || ''}` } })
+        .then((r) => (r.ok ? r.blob() : null)).then((blob) => { if (blob && !cancelled) { url = URL.createObjectURL(blob); setImageUrl(url); } }).catch(() => {});
+    } else setImageUrl('');
+    return () => { cancelled = true; if (url) URL.revokeObjectURL(url); };
+  }, [product]);
+
+  const save = (e) => { e.preventDefault(); run(async () => { try { await fetchJson(`/api/boutique/products/${product.id}`, { method: 'PUT', body: JSON.stringify(form) }); onMessage(t('btq.saved')); refresh(); } catch (error) { onError(error.message); } }); };
+  const saveVariant = (e) => { e.preventDefault(); run(async () => { try { await fetchJson(`/api/boutique/variants/${editingVariant.id}`, { method: 'PUT', body: JSON.stringify(editingVariant) }); setEditingVariant(null); onMessage(t('btq.saved')); refresh(); } catch (error) { onError(error.message); } }); };
+  const addVariant = (e) => { e.preventDefault(); run(async () => { try { await fetchJson(`/api/boutique/products/${product.id}/variants`, { method: 'POST', body: JSON.stringify(newVariant) }); setNewVariant(null); onMessage(t('btq.saved')); refresh(); } catch (error) { onError(error.message); } }); };
+  const pickImage = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    run(async () => {
+      try {
+        const data = new FormData();
+        data.append('file', file);
+        await upload(`/api/boutique/products/${product.id}/image`, data);
+        onMessage(t('btq.saved'));
+        refresh();
+      } catch (error) { onError(error.message); }
+    });
+  };
+
+  if (!product || !form) return <DetailView onClose={onClose} label={t('btq.product')}><div className="loading-state"><span className="spinner" /></div></DetailView>;
+  return <DetailView onClose={onClose} label={product.name}>
+    <section className="panel detail-panel">
+      <div className="panel-header"><div><h2>{product.name}</h2><span>{t(`btq.type.${product.productType}`)}{product.brand && ` · ${product.brand}`}</span></div>
+        <button className="text-btn" type="button" onClick={onClose}>{t('action.close')}</button></div>
+      <div className="btq-product-top">
+        <div className="btq-image">{imageUrl ? <img src={imageUrl} alt={product.name} /> : <span className="muted-cell">{t('btq.noPicture')}</span>}
+          {can.manage && <label className="secondary-btn btq-upload"><span>{t('btq.choosePicture')}</span><input type="file" accept="image/*" hidden disabled={busy} onChange={pickImage} /></label>}
+        </div>
+        {can.manage ? <form className="form-grid" onSubmit={save}>
+          <Field label={t('field.name')}><input required maxLength="200" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+          <Field label={t('btq.productType')}><select value={form.productType} onChange={(e) => setForm({ ...form, productType: e.target.value })}>{PRODUCT_TYPES.map((p) => <option key={p} value={p}>{t(`btq.type.${p}`)}</option>)}</select></Field>
+          <Field label={t('field.category')}><input maxLength="100" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} /></Field>
+          <Field label={t('btq.brand')}><input maxLength="100" value={form.brand} onChange={(e) => setForm({ ...form, brand: e.target.value })} /></Field>
+          <Field label={t('field.status')}><select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}><option value="active">{t('btq.itemStatus.active')}</option><option value="archived">{t('btq.itemStatus.archived')}</option></select></Field>
+          <Field label={t('field.description')} wide><textarea rows="2" maxLength="2000" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field>
+          <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('btq.save')}</button></div>
+        </form> : <div className="detail-facts">
+          <Fact label={t('field.category')} value={product.category || '—'} />
+          <Fact label={t('field.description')} value={product.description || '—'} />
+          <Fact label={t('field.status')} value={t(`btq.itemStatus.${product.status}`)} />
+        </div>}
+      </div>
+      <h3 className="form-section-title">{t('btq.variants')}</h3>
+      <div className="table-wrap"><table className="card-table">
+        <thead><tr><th>{t('btq.sku')}</th><th>{t('btq.size')}</th><th>{t('btq.color')}</th><th>{t('btq.costPrice')}</th><th>{t('btq.sellingPrice')}</th><th>{t('btq.stock')}</th><th>{t('btq.reorderLevel')}</th><th>{t('field.status')}</th>{can.manage && <th>{t('table.actions')}</th>}</tr></thead>
+        <tbody>{product.variants.map((v) => <tr key={v.id} className={v.lowStock ? 'btq-low' : undefined}>
+          <td className="card-title-cell"><strong>{v.sku}</strong><small>{v.barcode}</small></td>
+          <td data-label={t('btq.size')}>{v.size || '—'}</td><td data-label={t('btq.color')}>{v.color || '—'}</td>
+          <td data-label={t('btq.costPrice')}>{v.costPrice === undefined ? '—' : money(v.costPrice)}</td><td data-label={t('btq.sellingPrice')}>{money(v.sellingPrice)}</td>
+          <td data-label={t('btq.stock')}>{v.stockQuantity}</td><td data-label={t('btq.reorderLevel')}>{v.reorderLevel}</td>
+          <td data-label={t('field.status')}>{t(`btq.itemStatus.${v.status}`)}</td>
+          {can.manage && <td className="card-actions"><button type="button" className="text-btn" onClick={() => setEditingVariant({ id: v.id, sku: v.sku, barcode: v.barcode, size: v.size, color: v.color, costPrice: v.costPrice, sellingPrice: v.sellingPrice, reorderLevel: v.reorderLevel, status: v.status })}>{t('action.edit')}</button></td>}
+        </tr>)}</tbody>
+      </table></div>
+      {can.manage && (editingVariant || newVariant) && <form className="decision-form" onSubmit={editingVariant ? saveVariant : addVariant}>
+        <h3 className="form-section-title">{editingVariant ? t('btq.editVariant') : t('btq.addVariant')}</h3>
+        <VariantFields value={editingVariant || newVariant} onChange={editingVariant ? setEditingVariant : setNewVariant} withOpening={!editingVariant} withStatus={Boolean(editingVariant)} />
+        <div className="form-submit-bar">
+          <button type="button" className="text-btn" onClick={() => { setEditingVariant(null); setNewVariant(null); }}>{t('action.cancel')}</button>
+          <button className="primary-btn" type="submit" disabled={busy}>{t('btq.save')}</button>
+        </div>
+      </form>}
+      {can.manage && !newVariant && !editingVariant && <div className="button-row"><button type="button" className="secondary-btn" onClick={() => setNewVariant(emptyVariant())}>{t('btq.addVariant')}</button></div>}
+    </section>
+  </DetailView>;
+}
+
+function VariantFields({ value, onChange, withOpening, withStatus }) {
+  const { t } = useI18n();
+  const set = (patch) => onChange({ ...value, ...patch });
+  return <div className="form-grid">
+    <Field label={t('btq.sku')}><input required maxLength="60" value={value.sku} onChange={(e) => set({ sku: e.target.value })} /></Field>
+    <Field label={t('btq.barcode')}><input maxLength="60" value={value.barcode || ''} onChange={(e) => set({ barcode: e.target.value })} /></Field>
+    <Field label={t('btq.size')}><input maxLength="40" value={value.size} onChange={(e) => set({ size: e.target.value })} /></Field>
+    <Field label={t('btq.color')}><input maxLength="40" value={value.color} onChange={(e) => set({ color: e.target.value })} /></Field>
+    <Field label={t('btq.costPrice')}><input type="number" min="0" step="1" required value={value.costPrice} onChange={(e) => set({ costPrice: e.target.value })} /></Field>
+    <Field label={t('btq.sellingPrice')}><input type="number" min="0" step="1" required value={value.sellingPrice} onChange={(e) => set({ sellingPrice: e.target.value })} /></Field>
+    <Field label={t('btq.reorderLevel')}><input type="number" min="0" step="1" value={value.reorderLevel} onChange={(e) => set({ reorderLevel: e.target.value })} /></Field>
+    {withOpening && <Field label={t('btq.openingStock')}><input type="number" min="0" step="1" value={value.openingStock} onChange={(e) => set({ openingStock: e.target.value })} /></Field>}
+    {withStatus && <Field label={t('field.status')}><select value={value.status} onChange={(e) => set({ status: e.target.value })}><option value="active">{t('btq.itemStatus.active')}</option><option value="archived">{t('btq.itemStatus.archived')}</option></select></Field>}
+  </div>;
+}
+
+// ---- stock --------------------------------------------------------------------------
+
+function StockTab({ fetchJson, onMessage, onError, changed, can }) {
+  const { t, language } = useI18n();
+  const [busy, run] = useBusy();
+  const [search, setSearch] = useState('');
+  const [low, setLow] = useState(false);
+  const [tick, setTick] = useState(0);
+  const [stock] = useLoad(fetchJson, `/api/boutique/stock?${low ? 'low=1&' : ''}${search ? `search=${encodeURIComponent(search)}` : ''}`, tick, onError);
+  const [movements] = useLoad(fetchJson, '/api/boutique/stock/movements?limit=60', tick, onError);
+  const [adjustments] = useLoad(fetchJson, '/api/boutique/stock/adjustments', tick, onError);
+  const [form, setForm] = useState({ variant: null, kind: 'damaged', quantity: '', reason: '' });
+  const refresh = () => { setTick((n) => n + 1); changed(); };
+  const submit = (e) => {
+    e.preventDefault();
+    run(async () => {
+      try {
+        const result = await fetchJson('/api/boutique/stock/adjustments', { method: 'POST', body: JSON.stringify({ variantId: form.variant.id, kind: form.kind, quantity: form.quantity, reason: form.reason }) });
+        onMessage(result.status === 'approved' ? t('btq.adjusted') : t('btq.adjustmentAsked'));
+        setForm({ variant: null, kind: 'damaged', quantity: '', reason: '' });
+        refresh();
+      } catch (error) { onError(error.message); }
+    });
+  };
+  return <>
+    <Panel title={t('btq.tab.stock')} subtitle={stock ? (stock.value === null ? String(stock.pieces) : `${stock.pieces} · ${money(stock.value)}`) : ''}>
+      <div className="filter-grid">
+        <Field label={t('btq.search')}><input type="search" value={search} onChange={(e) => setSearch(e.target.value)} /></Field>
+        <label className="check-field"><input type="checkbox" checked={low} onChange={(e) => setLow(e.target.checked)} /><span>{t('btq.lowStockOnly')}</span></label>
+      </div>
+      {stock?.items?.length ? <div className="table-wrap"><table className="card-table">
+        <thead><tr><th>{t('btq.product')}</th><th>{t('btq.sku')}</th><th>{t('btq.size')}</th><th>{t('btq.color')}</th><th>{t('btq.stock')}</th><th>{t('btq.reorderLevel')}</th><th>{t('btq.costPrice')}</th><th>{t('btq.value')}</th></tr></thead>
+        <tbody>{stock.items.map((v) => <tr key={v.id} className={v.lowStock ? 'btq-low' : undefined}>
+          <td className="card-title-cell"><strong>{v.productName}</strong><small>{t(`btq.type.${v.productType}`)}</small></td>
+          <td data-label={t('btq.sku')}>{v.sku}</td><td data-label={t('btq.size')}>{v.size || '—'}</td><td data-label={t('btq.color')}>{v.color || '—'}</td>
+          <td data-label={t('btq.stock')}>{v.stockQuantity}{v.lowStock && <Badge tone="waiting">{t('btq.low')}</Badge>}</td>
+          <td data-label={t('btq.reorderLevel')}>{v.reorderLevel}</td><td data-label={t('btq.costPrice')}>{v.costPrice === undefined ? '—' : money(v.costPrice)}</td>
+          <td data-label={t('btq.value')}>{v.costPrice === undefined ? '—' : money(v.stockQuantity * v.costPrice)}</td>
+        </tr>)}</tbody>
+      </table></div> : <Empty>{t('btq.noStock')}</Empty>}
+    </Panel>
+    {can.manage && <form className="form-panel" onSubmit={submit}>
+      <div className="panel-header"><div><h2>{t('btq.adjustStock')}</h2><span>{can.decide ? t('btq.adjustDirectorHint') : t('btq.adjustManagerHint')}</span></div></div>
+      <VariantSearch fetchJson={fetchJson} onPick={(v) => setForm({ ...form, variant: v })} placeholder={t('btq.pickVariant')} />
+      {form.variant && <p className="field-hint">{fullName(form.variant)} · {form.variant.sku} · {fill(t('btq.inStockCount'), { count: form.variant.stockQuantity })}</p>}
+      <div className="form-grid">
+        <Field label={t('btq.adjustmentKind')}><select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>{ADJUSTMENT_KINDS.map((k) => <option key={k} value={k}>{t(`btq.kind.${k}`)}</option>)}</select></Field>
+        <Field label={form.kind === 'count' ? t('btq.countedQty') : t('btq.qty')}><input type="number" min="0" step="1" required value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} /></Field>
+        <Field label={t('btq.reason')} wide><input required minLength="5" maxLength="1000" value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} /></Field>
+      </div>
+      <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy || !form.variant}>{can.decide ? t('btq.applyAdjustment') : t('btq.askAdjustment')}</button></div>
+    </form>}
+    {adjustments?.length > 0 && <Panel title={t('btq.adjustments')}>
+      <div className="table-wrap"><table className="card-table">
+        <thead><tr><th>{t('btq.item')}</th><th>{t('btq.adjustmentKind')}</th><th>{t('btq.qty')}</th><th>{t('btq.change')}</th><th>{t('btq.reason')}</th><th>{t('field.status')}</th><th>{t('btq.askedBy')}</th></tr></thead>
+        <tbody>{adjustments.map((a) => <tr key={a.id}>
+          <td className="card-title-cell"><strong>{a.productName}</strong><small>{a.sku} {variantLabel(a)}</small></td>
+          <td data-label={t('btq.adjustmentKind')}>{t(`btq.kind.${a.kind}`)}</td><td data-label={t('btq.qty')}>{a.quantity}</td>
+          <td data-label={t('btq.change')}>{a.delta > 0 ? `+${a.delta}` : a.delta}</td>
+          <td data-label={t('btq.reason')}>{a.reason}{a.decisionNote && ` — ${a.decisionNote}`}</td>
+          <td data-label={t('field.status')}><Badge tone={APPROVAL_TONE[a.status]}>{t(`btq.approval.${a.status}`)}</Badge></td>
+          <td data-label={t('btq.askedBy')}>{a.requestedByName} · {formatDate(a.createdAt, language)}</td>
+        </tr>)}</tbody>
+      </table></div>
+    </Panel>}
+    <Panel title={t('btq.ledger')}>
+      {movements?.length ? <div className="table-wrap"><table className="card-table">
+        <thead><tr><th>{t('btq.item')}</th><th>{t('table.date')}</th><th>{t('btq.movementKind')}</th><th>{t('btq.change')}</th><th>{t('btq.balanceAfter')}</th><th>{t('field.notes')}</th><th>{t('expense.recordedBy')}</th></tr></thead>
+        <tbody>{movements.map((m) => <tr key={m.id}>
+          <td className="card-title-cell"><strong>{m.productName}</strong><small>{m.sku} {variantLabel(m)}</small></td>
+          <td data-label={t('table.date')}>{formatDate(m.createdAt, language)}</td>
+          <td data-label={t('btq.movementKind')}>{t(`btq.kind.${m.kind}`)}</td>
+          <td data-label={t('btq.change')}>{m.quantity > 0 ? `+${m.quantity}` : m.quantity}</td>
+          <td data-label={t('btq.balanceAfter')}>{m.balanceAfter}</td>
+          <td data-label={t('field.notes')}>{m.note || '—'}</td>
+          <td data-label={t('expense.recordedBy')}>{m.recordedByName || '—'}</td>
+        </tr>)}</tbody>
+      </table></div> : <Empty>{t('btq.noMovements')}</Empty>}
+    </Panel>
+  </>;
+}
+
+// ---- suppliers and purchases --------------------------------------------------------
+
+function SuppliersTab({ fetchJson, onMessage, onError, changed, can, go, query }) {
+  const { t, language } = useI18n();
+  const [busy, run] = useBusy();
+  const [tick, setTick] = useState(0);
+  const [suppliers] = useLoad(fetchJson, '/api/boutique/suppliers', tick, onError);
+  const [orders] = useLoad(fetchJson, '/api/boutique/purchases', tick, onError);
+  const [supplierForm, setSupplierForm] = useState({ name: '', contactName: '', phone: '', email: '', address: '', notes: '' });
+  const [orderForm, setOrderForm] = useState({ supplierId: '', expectedOn: '', notes: '', lines: [] });
+  const [showOrderForm, setShowOrderForm] = useState(false);
+  const refresh = () => { setTick((n) => n + 1); changed(); };
+  const openSupplier = query.get('supplier');
+  const openOrder = query.get('order');
+
+  const addSupplier = (e) => { e.preventDefault(); run(async () => { try { await fetchJson('/api/boutique/suppliers', { method: 'POST', body: JSON.stringify(supplierForm) }); onMessage(t('btq.saved')); setSupplierForm({ name: '', contactName: '', phone: '', email: '', address: '', notes: '' }); refresh(); } catch (error) { onError(error.message); } }); };
+  const raiseOrder = (e) => {
+    e.preventDefault();
+    run(async () => {
+      try {
+        const created = await fetchJson('/api/boutique/purchases', { method: 'POST', body: JSON.stringify({ supplierId: orderForm.supplierId, expectedOn: orderForm.expectedOn || undefined, notes: orderForm.notes, items: orderForm.lines.map((l) => ({ variantId: l.variantId, quantity: l.quantity, unitCost: l.unitCost })) }) });
+        onMessage(fill(t('btq.orderRaised'), { reference: created.reference }));
+        setOrderForm({ supplierId: '', expectedOn: '', notes: '', lines: [] });
+        setShowOrderForm(false);
+        refresh();
+        go('suppliers', { order: created.id });
+      } catch (error) { onError(error.message); }
+    });
+  };
+
+  return <>
+    {openSupplier && <SupplierDetail supplierId={openSupplier} fetchJson={fetchJson} onMessage={onMessage} onError={onError} can={can} onClose={() => go('suppliers')} onChanged={refresh} onOpenOrder={(id) => go('suppliers', { order: id })} />}
+    {openOrder && <OrderDetail orderId={openOrder} fetchJson={fetchJson} onMessage={onMessage} onError={onError} can={can} onClose={() => go('suppliers')} onChanged={refresh} />}
+    <Panel title={t('btq.suppliers')} subtitle={suppliers ? String(suppliers.length) : ''}>
+      {suppliers?.length ? <div className="table-wrap"><table className="card-table">
+        <thead><tr><th>{t('field.name')}</th><th>{t('btq.contact')}</th><th>{t('btq.orders')}</th><th>{t('btq.billed')}</th><th>{t('btq.paid')}</th><th>{t('btq.owed')}</th></tr></thead>
+        <tbody>{suppliers.map((s) => <tr key={s.id} className="clickable-row" onClick={() => go('suppliers', { supplier: s.id })}>
+          <td className="card-title-cell"><strong>{s.name}</strong></td>
+          <td data-label={t('btq.contact')}>{[s.contactName, s.phone].filter(Boolean).join(' · ') || '—'}</td>
+          <td data-label={t('btq.orders')}>{s.orderCount}</td><td data-label={t('btq.billed')}>{money(s.billed)}</td>
+          <td data-label={t('btq.paid')}>{money(s.paid)}</td><td data-label={t('btq.owed')}><span className={s.owed > 0 ? 'over-budget' : undefined}>{money(s.owed)}</span></td>
+        </tr>)}</tbody>
+      </table></div> : <Empty>{t('btq.noSuppliers')}</Empty>}
+      {can.manage && <form className="decision-form" onSubmit={addSupplier}>
+        <h3 className="form-section-title">{t('btq.addSupplier')}</h3>
+        <div className="form-grid">
+          <Field label={t('field.name')}><input required maxLength="200" value={supplierForm.name} onChange={(e) => setSupplierForm({ ...supplierForm, name: e.target.value })} /></Field>
+          <Field label={t('btq.contact')}><input maxLength="150" value={supplierForm.contactName} onChange={(e) => setSupplierForm({ ...supplierForm, contactName: e.target.value })} /></Field>
+          <Field label={t('btq.phone')}><input maxLength="50" value={supplierForm.phone} onChange={(e) => setSupplierForm({ ...supplierForm, phone: e.target.value })} /></Field>
+          <Field label={t('btq.email')}><input type="email" maxLength="255" value={supplierForm.email} onChange={(e) => setSupplierForm({ ...supplierForm, email: e.target.value })} /></Field>
+          <Field label={t('btq.address')} wide><input maxLength="1000" value={supplierForm.address} onChange={(e) => setSupplierForm({ ...supplierForm, address: e.target.value })} /></Field>
+        </div>
+        <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('btq.addSupplier')}</button></div>
+      </form>}
+    </Panel>
+    <Panel title={t('btq.purchaseOrders')} subtitle={orders ? String(orders.length) : ''} action={can.manage ? t('btq.newOrder') : null} onAction={() => setShowOrderForm((s) => !s)}>
+      {can.manage && showOrderForm && <form className="decision-form" onSubmit={raiseOrder}>
+        <div className="form-grid">
+          <Field label={t('btq.supplier')}><select required value={orderForm.supplierId} onChange={(e) => setOrderForm({ ...orderForm, supplierId: e.target.value })}><option value="">—</option>{(suppliers || []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field>
+          <Field label={t('btq.expectedOn')}><input type="date" value={orderForm.expectedOn} onChange={(e) => setOrderForm({ ...orderForm, expectedOn: e.target.value })} /></Field>
+          <Field label={t('field.notes')} wide><input maxLength="2000" value={orderForm.notes} onChange={(e) => setOrderForm({ ...orderForm, notes: e.target.value })} /></Field>
+        </div>
+        <VariantSearch fetchJson={fetchJson} onPick={(v) => setOrderForm((c) => (c.lines.some((l) => l.variantId === v.id) ? c : { ...c, lines: [...c.lines, { variantId: v.id, name: fullName(v), sku: v.sku, quantity: 1, unitCost: v.costPrice }] }))} placeholder={t('btq.pickVariant')} />
+        {orderForm.lines.length > 0 && <div className="table-wrap"><table className="card-table">
+          <thead><tr><th>{t('btq.item')}</th><th>{t('btq.qty')}</th><th>{t('btq.unitCost')}</th><th>{t('table.actions')}</th></tr></thead>
+          <tbody>{orderForm.lines.map((l) => <tr key={l.variantId}>
+            <td className="card-title-cell"><strong>{l.name}</strong><small>{l.sku}</small></td>
+            <td data-label={t('btq.qty')}><input type="number" min="1" value={l.quantity} aria-label={t('btq.qty')} onChange={(e) => setOrderForm({ ...orderForm, lines: orderForm.lines.map((x) => (x.variantId === l.variantId ? { ...x, quantity: e.target.value } : x)) })} /></td>
+            <td data-label={t('btq.unitCost')}><input type="number" min="0" value={l.unitCost} aria-label={t('btq.unitCost')} onChange={(e) => setOrderForm({ ...orderForm, lines: orderForm.lines.map((x) => (x.variantId === l.variantId ? { ...x, unitCost: e.target.value } : x)) })} /></td>
+            <td className="card-actions"><button type="button" className="text-btn" onClick={() => setOrderForm({ ...orderForm, lines: orderForm.lines.filter((x) => x.variantId !== l.variantId) })}>{t('action.remove')}</button></td>
+          </tr>)}</tbody>
+        </table></div>}
+        <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy || !orderForm.lines.length}>{t('btq.raiseOrder')}</button></div>
+      </form>}
+      {orders?.length ? <div className="table-wrap"><table className="card-table">
+        <thead><tr><th>{t('btq.reference')}</th><th>{t('btq.supplier')}</th><th>{t('table.date')}</th><th>{t('btq.orderedValue')}</th><th>{t('btq.receivedValue')}</th><th>{t('field.status')}</th></tr></thead>
+        <tbody>{orders.map((o) => <tr key={o.id} className="clickable-row" onClick={() => go('suppliers', { order: o.id })}>
+          <td className="card-title-cell"><strong>{o.reference}</strong>{o.invoiceNumber && <small>{o.invoiceNumber}</small>}</td>
+          <td data-label={t('btq.supplier')}>{o.supplierName}</td><td data-label={t('table.date')}>{formatDate(o.orderedOn, language)}</td>
+          <td data-label={t('btq.orderedValue')}>{money(o.orderedValue)}</td><td data-label={t('btq.receivedValue')}>{money(o.receivedValue)}</td>
+          <td data-label={t('field.status')}><Badge tone={PO_TONE[o.status]}>{t(`btq.poStatus.${o.status}`)}</Badge></td>
+        </tr>)}</tbody>
+      </table></div> : <Empty>{t('btq.noOrders')}</Empty>}
+    </Panel>
+  </>;
+}
+
+function SupplierDetail({ supplierId, fetchJson, onMessage, onError, can, onClose, onChanged, onOpenOrder }) {
+  const { t, language } = useI18n();
+  const [busy, run] = useBusy();
+  const [tick, setTick] = useState(0);
+  const [supplier] = useLoad(fetchJson, `/api/boutique/suppliers/${encodeURIComponent(supplierId)}`, tick, onError);
+  const [pay, setPay] = useState({ amount: '', method: 'Cash', paidOn: todayLocal(), orderId: '', reference: '' });
+  const refresh = () => { setTick((n) => n + 1); onChanged(); };
+  const submit = (e) => { e.preventDefault(); run(async () => { try { await fetchJson(`/api/boutique/suppliers/${supplier.id}/payments`, { method: 'POST', body: JSON.stringify({ ...pay, orderId: pay.orderId || undefined }) }); onMessage(t('btq.paymentRecorded')); setPay({ ...pay, amount: '', reference: '' }); refresh(); } catch (error) { onError(error.message); } }); };
+  if (!supplier) return <DetailView onClose={onClose} label={t('btq.supplier')}><div className="loading-state"><span className="spinner" /></div></DetailView>;
+  return <DetailView onClose={onClose} label={supplier.name}>
+    <section className="panel detail-panel">
+      <div className="panel-header"><div><h2>{supplier.name}</h2><span>{[supplier.contactName, supplier.phone, supplier.email].filter(Boolean).join(' · ')}</span></div>
+        <button className="text-btn" type="button" onClick={onClose}>{t('action.close')}</button></div>
+      <div className="detail-facts">
+        <Fact label={t('btq.billed')} value={money(supplier.billed)} />
+        <Fact label={t('btq.paid')} value={money(supplier.paid)} />
+        <Fact label={t('btq.owed')} value={<span className={supplier.owed > 0 ? 'over-budget' : undefined}>{money(supplier.owed)}</span>} />
+      </div>
+      <h3 className="form-section-title">{t('btq.purchaseOrders')}</h3>
+      {supplier.orders.length ? <ul className="history-list">{supplier.orders.map((o) => <li key={o.id}><button type="button" className="text-btn" onClick={() => onOpenOrder(o.id)}>{o.reference}</button> · {formatDate(o.orderedOn, language)} · {money(o.invoiceTotal ?? o.receivedValue)} · {t(`btq.poStatus.${o.status}`)}</li>)}</ul> : <p className="field-hint">{t('btq.noOrders')}</p>}
+      <h3 className="form-section-title">{t('btq.paymentsMade')}</h3>
+      {supplier.payments.length ? <ul className="history-list">{supplier.payments.map((p) => <li key={p.id}>{formatDate(p.paidOn, language)} · {money(p.amount)} · {t(`btq.method.${p.method}`)}{p.orderReference && ` · ${p.orderReference}`}{p.reference && ` · ${p.reference}`}</li>)}</ul> : <p className="field-hint">{t('btq.noPayments')}</p>}
+      {can.manage && <form className="decision-form" onSubmit={submit}>
+        <h3 className="form-section-title">{t('btq.recordPayment')}</h3>
+        <div className="form-grid">
+          <Field label={t('btq.amount')}><input type="number" min="1" required value={pay.amount} onChange={(e) => setPay({ ...pay, amount: e.target.value })} /></Field>
+          <Field label={t('btq.method')}><select value={pay.method} onChange={(e) => setPay({ ...pay, method: e.target.value })}>{BOUTIQUE_PAYMENT_METHODS.map((m) => <option key={m} value={m}>{t(`btq.method.${m}`)}</option>)}</select></Field>
+          <Field label={t('table.date')}><input type="date" required value={pay.paidOn} onChange={(e) => setPay({ ...pay, paidOn: e.target.value })} /></Field>
+          <Field label={t('btq.purchaseOrder')}><select value={pay.orderId} onChange={(e) => setPay({ ...pay, orderId: e.target.value })}><option value="">—</option>{supplier.orders.map((o) => <option key={o.id} value={o.id}>{o.reference}</option>)}</select></Field>
+          <Field label={t('btq.reference')}><input maxLength="100" value={pay.reference} onChange={(e) => setPay({ ...pay, reference: e.target.value })} /></Field>
+        </div>
+        <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('btq.recordPayment')}</button></div>
+      </form>}
+    </section>
+  </DetailView>;
+}
+
+function OrderDetail({ orderId, fetchJson, onMessage, onError, can, onClose, onChanged }) {
+  const { t, language } = useI18n();
+  const dialog = useDialog();
+  const [busy, run] = useBusy();
+  const [tick, setTick] = useState(0);
+  const [order] = useLoad(fetchJson, `/api/boutique/purchases/${encodeURIComponent(orderId)}`, tick, onError);
+  const [receiving, setReceiving] = useState({});
+  const [invoice, setInvoice] = useState({ invoiceNumber: '', invoiceTotal: '' });
+  useEffect(() => { if (order) setInvoice({ invoiceNumber: order.invoiceNumber, invoiceTotal: order.invoiceTotal ?? '' }); }, [order]);
+  const refresh = () => { setTick((n) => n + 1); onChanged(); };
+  const receive = (e) => {
+    e.preventDefault();
+    run(async () => {
+      try {
+        const items = order.items.filter((i) => Number(receiving[i.variantId]) > 0).map((i) => ({ variantId: i.variantId, quantity: Number(receiving[i.variantId]) }));
+        await fetchJson(`/api/boutique/purchases/${order.id}/receive`, { method: 'POST', body: JSON.stringify({ items }) });
+        onMessage(t('btq.received'));
+        setReceiving({});
+        refresh();
+      } catch (error) { onError(error.message); }
+    });
+  };
+  const saveInvoice = (e) => { e.preventDefault(); run(async () => { try { await fetchJson(`/api/boutique/purchases/${order.id}/invoice`, { method: 'PUT', body: JSON.stringify(invoice) }); onMessage(t('btq.saved')); refresh(); } catch (error) { onError(error.message); } }); };
+  const cancel = () => run(async () => {
+    const reason = await dialog.prompt({ title: t('btq.cancelOrder'), label: t('btq.reason'), required: true, multiline: true });
+    if (reason === null) return;
+    try { await fetchJson(`/api/boutique/purchases/${order.id}/cancel`, { method: 'POST', body: JSON.stringify({ reason }) }); onMessage(t('btq.saved')); refresh(); } catch (error) { onError(error.message); }
+  });
+  if (!order) return <DetailView onClose={onClose} label={t('btq.purchaseOrder')}><div className="loading-state"><span className="spinner" /></div></DetailView>;
+  const open = ['ordered', 'partially_received'].includes(order.status);
+  return <DetailView onClose={onClose} label={order.reference}>
+    <section className="panel detail-panel">
+      <div className="panel-header"><div><h2>{order.reference}</h2><span>{order.supplierName} · {formatDate(order.orderedOn, language)}</span></div>
+        <button className="text-btn" type="button" onClick={onClose}>{t('action.close')}</button></div>
+      <div className="detail-facts">
+        <Fact label={t('field.status')} value={<Badge tone={PO_TONE[order.status]}>{t(`btq.poStatus.${order.status}`)}</Badge>} />
+        <Fact label={t('btq.orderedValue')} value={money(order.orderedValue)} />
+        <Fact label={t('btq.receivedValue')} value={money(order.receivedValue)} />
+        <Fact label={t('btq.invoiceTotal')} value={order.invoiceTotal === null ? '—' : money(order.invoiceTotal)} />
+        {order.expectedOn && <Fact label={t('btq.expectedOn')} value={formatDate(order.expectedOn, language)} />}
+      </div>
+      {order.cancelReason && <p className="admin-note">{order.cancelReason}</p>}
+      <form onSubmit={receive}>
+        <div className="table-wrap"><table className="card-table">
+          <thead><tr><th>{t('btq.item')}</th><th>{t('btq.ordered')}</th><th>{t('btq.receivedQty')}</th><th>{t('btq.unitCost')}</th>{can.manage && open && <th>{t('btq.receiveNow')}</th>}</tr></thead>
+          <tbody>{order.items.map((i) => <tr key={i.id}>
+            <td className="card-title-cell"><strong>{i.productName}</strong><small>{i.sku} {variantLabel(i)}</small></td>
+            <td data-label={t('btq.ordered')}>{i.quantityOrdered}</td><td data-label={t('btq.receivedQty')}>{i.quantityReceived}</td>
+            <td data-label={t('btq.unitCost')}>{money(i.unitCost)}</td>
+            {can.manage && open && <td data-label={t('btq.receiveNow')}><input type="number" min="0" max={i.quantityOrdered - i.quantityReceived} value={receiving[i.variantId] || ''} aria-label={t('btq.receiveNow')} onChange={(e) => setReceiving({ ...receiving, [i.variantId]: e.target.value })} /></td>}
+          </tr>)}</tbody>
+        </table></div>
+        {can.manage && open && <div className="form-submit-bar">
+          <button type="button" className="text-btn" disabled={busy || order.status !== 'ordered'} onClick={cancel}>{t('btq.cancelOrder')}</button>
+          <button className="primary-btn" type="submit" disabled={busy}>{t('btq.recordDelivery')}</button>
+        </div>}
+      </form>
+      {order.receipts.length > 0 && <><h3 className="form-section-title">{t('btq.deliveries')}</h3>
+        <ul className="history-list">{order.receipts.map((r) => <li key={r.id}>{formatDate(r.receivedOn, language)} · {r.pieces} · {money(r.value)} · {r.receivedByName}</li>)}</ul></>}
+      {can.manage && order.status !== 'cancelled' && <form className="decision-form" onSubmit={saveInvoice}>
+        <h3 className="form-section-title">{t('btq.invoice')}</h3>
+        <div className="form-grid">
+          <Field label={t('btq.invoiceNumber')}><input maxLength="100" value={invoice.invoiceNumber} onChange={(e) => setInvoice({ ...invoice, invoiceNumber: e.target.value })} /></Field>
+          <Field label={t('btq.invoiceTotal')}><input type="number" min="0" value={invoice.invoiceTotal} onChange={(e) => setInvoice({ ...invoice, invoiceTotal: e.target.value })} /></Field>
+        </div>
+        <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('btq.save')}</button></div>
+      </form>}
+      {order.payments.length > 0 && <><h3 className="form-section-title">{t('btq.paymentsMade')}</h3>
+        <ul className="history-list">{order.payments.map((p) => <li key={p.id}>{formatDate(p.paidOn, language)} · {money(p.amount)} · {t(`btq.method.${p.method}`)}</li>)}</ul></>}
+    </section>
+  </DetailView>;
+}
+
+// ---- cash ---------------------------------------------------------------------------
+
+function CashTab({ fetchJson, onMessage, onError, changed, can, go, query }) {
+  const { t, language } = useI18n();
+  const [busy, run] = useBusy();
+  const [tick, setTick] = useState(0);
+  const [current] = useLoad(fetchJson, '/api/boutique/cash/sessions/current', tick, onError);
+  const [sessions] = useLoad(fetchJson, '/api/boutique/cash/sessions', tick, onError);
+  const [openForm, setOpenForm] = useState({ openingCash: '0' });
+  const [move, setMove] = useState({ kind: 'payout', amount: '', reason: '' });
+  const [close, setClose] = useState({ countedCash: '', counted: {}, note: '' });
+  const openId = query.get('session');
+  const refresh = () => { setTick((n) => n + 1); changed(); };
+  const post = (path, body, done) => run(async () => { try { await fetchJson(path, { method: 'POST', body: JSON.stringify(body) }); onMessage(done); refresh(); } catch (error) { onError(error.message); } });
+
+  return <>
+    {openId && <SessionDetail sessionId={openId} fetchJson={fetchJson} onError={onError} onClose={() => go('cash')} />}
+    {can.sell && (current ? <Panel title={t('btq.myTill')} subtitle={`${t('btq.openedAt')} ${formatDate(current.openedAt, language)}`}>
+      <div className="metric-grid metric-grid-4">
+        <Metric label={t('btq.openingCash')} value={money(current.openingCash)} />
+        <Metric label={t('btq.cashTaken')} value={money(current.figures.cashTaken)} />
+        <Metric label={t('btq.change')} value={money(current.figures.changeGiven)} />
+        <Metric label={t('btq.cashRefunded')} value={money(current.figures.cashRefunded)} />
+        <Metric label={t('btq.cashExpenses')} value={money(current.figures.cashExpenses)} />
+        <Metric label={t('btq.payouts')} value={money(current.figures.payouts)} />
+        <Metric label={t('btq.cashIn')} value={money(current.figures.cashIn)} />
+        <Metric label={t('btq.expectedCash')} value={money(current.expectedCash)} tone="strong" />
+      </div>
+      <div className="detail-facts">{Object.entries(current.expectedByMethod).map(([method, value]) => <Fact key={method} label={t(`btq.method.${method}`)} value={money(value)} />)}</div>
+      {current.movements.length > 0 && <ul className="history-list">{current.movements.map((m) => <li key={m.id}>{t(`btq.cashKind.${m.kind}`)} · {money(m.amount)} · {m.reason}</li>)}</ul>}
+      <form className="decision-form" onSubmit={(e) => { e.preventDefault(); post(`/api/boutique/cash/sessions/${current.id}/movements`, move, t('btq.saved')); setMove({ kind: 'payout', amount: '', reason: '' }); }}>
+        <h3 className="form-section-title">{t('btq.cashMovement')}</h3>
+        <div className="form-grid">
+          <Field label={t('btq.movementKind')}><select value={move.kind} onChange={(e) => setMove({ ...move, kind: e.target.value })}><option value="payout">{t('btq.cashKind.payout')}</option><option value="cash_in">{t('btq.cashKind.cash_in')}</option></select></Field>
+          <Field label={t('btq.amount')}><input type="number" min="1" required value={move.amount} onChange={(e) => setMove({ ...move, amount: e.target.value })} /></Field>
+          <Field label={t('btq.reason')} wide><input required maxLength="1000" value={move.reason} onChange={(e) => setMove({ ...move, reason: e.target.value })} /></Field>
+        </div>
+        <div className="form-submit-bar"><button className="secondary-btn" type="submit" disabled={busy}>{t('btq.save')}</button></div>
+      </form>
+      <form className="decision-form" onSubmit={(e) => { e.preventDefault(); post(`/api/boutique/cash/sessions/${current.id}/close`, { countedCash: close.countedCash, countedByMethod: close.counted, note: close.note }, t('btq.tillClosed')); }}>
+        <h3 className="form-section-title">{t('btq.closeTill')}</h3>
+        <p className="field-hint">{t('btq.closeHint')}</p>
+        <div className="form-grid">
+          <Field label={t('btq.countedCash')}><input type="number" min="0" required value={close.countedCash} onChange={(e) => setClose({ ...close, countedCash: e.target.value })} /></Field>
+          {Object.keys(current.expectedByMethod).map((method) => <Field key={method} label={`${t(`btq.method.${method}`)} (${t('btq.counted')})`}><input type="number" min="0" value={close.counted[method] || ''} onChange={(e) => setClose({ ...close, counted: { ...close.counted, [method]: e.target.value } })} /></Field>)}
+          <Field label={t('field.notes')} wide><input maxLength="1000" value={close.note} onChange={(e) => setClose({ ...close, note: e.target.value })} /></Field>
+        </div>
+        {close.countedCash !== '' && <p className="field-hint">{fill(t('btq.varianceWillBe'), { amount: money(Number(close.countedCash) - current.expectedCash) })}</p>}
+        <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('btq.closeTill')}</button></div>
+      </form>
+    </Panel> : <form className="form-panel" onSubmit={(e) => { e.preventDefault(); post('/api/boutique/cash/sessions', openForm, t('btq.tillOpened')); }}>
+      <div className="panel-header"><div><h2>{t('btq.openTill')}</h2><span>{t('btq.openTillHint')}</span></div></div>
+      <div className="form-grid"><Field label={t('btq.openingCash')}><input type="number" min="0" required value={openForm.openingCash} onChange={(e) => setOpenForm({ openingCash: e.target.value })} /></Field></div>
+      <div className="form-submit-bar"><button className="primary-btn big-action" type="submit" disabled={busy}>{t('btq.openTill')}</button></div>
+    </form>)}
+    <Panel title={t('btq.tillHistory')}>
+      {sessions?.length ? <div className="table-wrap"><table className="card-table">
+        <thead><tr><th>{t('btq.cashier')}</th><th>{t('btq.openedAt')}</th><th>{t('field.status')}</th><th>{t('btq.openingCash')}</th><th>{t('btq.expectedCash')}</th><th>{t('btq.countedCash')}</th><th>{t('btq.variance')}</th></tr></thead>
+        <tbody>{sessions.map((s) => <tr key={s.id} className="clickable-row" onClick={() => go('cash', { session: s.id })}>
+          <td className="card-title-cell"><strong>{s.openedByName}</strong></td>
+          <td data-label={t('btq.openedAt')}>{formatDate(s.openedAt, language)}</td>
+          <td data-label={t('field.status')}><Badge tone={s.status === 'open' ? 'active' : 'done'}>{t(`btq.sessionStatus.${s.status}`)}</Badge></td>
+          <td data-label={t('btq.openingCash')}>{money(s.openingCash)}</td>
+          <td data-label={t('btq.expectedCash')}>{s.expectedCash === null ? '—' : money(s.expectedCash)}</td>
+          <td data-label={t('btq.countedCash')}>{s.countedCash === null ? '—' : money(s.countedCash)}</td>
+          <td data-label={t('btq.variance')}>{s.cashVariance === null ? '—' : <span className={s.cashVariance < 0 ? 'over-budget' : undefined}>{money(s.cashVariance)}</span>}</td>
+        </tr>)}</tbody>
+      </table></div> : <Empty>{t('btq.noSessions')}</Empty>}
+    </Panel>
+  </>;
+}
+
+function SessionDetail({ sessionId, fetchJson, onError, onClose }) {
+  const { t, language } = useI18n();
+  const [session] = useLoad(fetchJson, `/api/boutique/cash/sessions/${encodeURIComponent(sessionId)}`, 0, onError);
+  if (!session) return <DetailView onClose={onClose} label={t('btq.till')}><div className="loading-state"><span className="spinner" /></div></DetailView>;
+  const f = session.figures || {};
+  return <DetailView onClose={onClose} label={t('btq.till')}>
+    <section className="panel detail-panel">
+      <div className="panel-header"><div><h2>{session.openedByName}</h2><span>{formatDate(session.openedAt, language)} · {t(`btq.sessionStatus.${session.status}`)}{session.closedByName && ` · ${session.closedByName}`}</span></div>
+        <button className="text-btn" type="button" onClick={onClose}>{t('action.close')}</button></div>
+      <div className="detail-facts">
+        <Fact label={t('btq.openingCash')} value={money(session.openingCash)} />
+        <Fact label={t('btq.cashTaken')} value={money(f.cashTaken)} />
+        <Fact label={t('btq.change')} value={money(f.changeGiven)} />
+        <Fact label={t('btq.cashRefunded')} value={money(f.cashRefunded)} />
+        <Fact label={t('btq.cashExpenses')} value={money(f.cashExpenses)} />
+        <Fact label={t('btq.payouts')} value={money(f.payouts)} />
+        <Fact label={t('btq.cashIn')} value={money(f.cashIn)} />
+        <Fact label={t('btq.expectedCash')} value={money(session.expectedCash)} />
+        <Fact label={t('btq.countedCash')} value={session.countedCash === null ? '—' : money(session.countedCash)} />
+        <Fact label={t('btq.variance')} value={session.cashVariance === null ? '—' : money(session.cashVariance)} />
+      </div>
+      <h3 className="form-section-title">{t('btq.otherMethods')}</h3>
+      <div className="detail-facts">{Object.entries(session.expectedByMethod).map(([method, value]) => <Fact key={method} label={t(`btq.method.${method}`)}
+        value={`${money(value)}${session.countedByMethod[method] !== undefined && session.countedByMethod[method] !== null ? ` / ${money(session.countedByMethod[method])}` : ''}`} />)}</div>
+      {session.movements.length > 0 && <ul className="history-list">{session.movements.map((m) => <li key={m.id}>{t(`btq.cashKind.${m.kind}`)} · {money(m.amount)} · {m.reason}</li>)}</ul>}
+      {session.note && <p className="admin-note">{session.note}</p>}
+    </section>
+  </DetailView>;
+}
+
+// ---- expenses -----------------------------------------------------------------------
+
+function ExpensesTab({ fetchJson, onMessage, onError, changed, can, overview }) {
+  const { t, language } = useI18n();
+  const dialog = useDialog();
+  const [busy, run] = useBusy();
+  const [tick, setTick] = useState(0);
+  const [expenses] = useLoad(fetchJson, '/api/boutique/expenses', tick, onError);
+  const [form, setForm] = useState({ category: EXPENSE_CATEGORIES[0], description: '', amount: '', method: 'Cash', spentOn: todayLocal(), fromTill: false });
+  const refresh = () => { setTick((n) => n + 1); changed(); };
+  const submit = (e) => { e.preventDefault(); run(async () => { try { await fetchJson('/api/boutique/expenses', { method: 'POST', body: JSON.stringify(form) }); onMessage(t('btq.saved')); setForm({ ...form, description: '', amount: '' }); refresh(); } catch (error) { onError(error.message); } }); };
+  const voidExpense = (expense) => run(async () => {
+    const reason = await dialog.prompt({ title: t('btq.voidExpense'), label: t('btq.reason'), required: true, minLength: 10, multiline: true });
+    if (reason === null) return;
+    try { await fetchJson(`/api/boutique/expenses/${expense.id}/void`, { method: 'POST', body: JSON.stringify({ reason }) }); onMessage(t('btq.saved')); refresh(); } catch (error) { onError(error.message); }
+  });
+  return <>
+    {can.manage && <form className="form-panel" onSubmit={submit}>
+      <div className="panel-header"><div><h2>{t('btq.recordExpense')}</h2><span>{t('btq.expenseHint')}</span></div></div>
+      <div className="form-grid">
+        <Field label={t('field.category')}><select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>{EXPENSE_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}</select></Field>
+        <Field label={t('btq.amount')}><input type="number" min="1" required value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} /></Field>
+        <Field label={t('btq.method')}><select value={form.method} onChange={(e) => setForm({ ...form, method: e.target.value, fromTill: e.target.value === 'Cash' ? form.fromTill : false })}>{BOUTIQUE_PAYMENT_METHODS.map((m) => <option key={m} value={m}>{t(`btq.method.${m}`)}</option>)}</select></Field>
+        <Field label={t('table.date')}><input type="date" required value={form.spentOn} onChange={(e) => setForm({ ...form, spentOn: e.target.value })} /></Field>
+        <Field label={t('field.description')} wide><input required maxLength="1000" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field>
+        {form.method === 'Cash' && overview.mySessionId && <label className="check-field"><input type="checkbox" checked={form.fromTill} onChange={(e) => setForm({ ...form, fromTill: e.target.checked })} /><span>{t('btq.fromTill')}</span></label>}
+      </div>
+      <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('btq.recordExpense')}</button></div>
+    </form>}
+    <Panel title={t('btq.tab.expenses')} subtitle={expenses ? money(expenses.filter((e) => e.status === 'active').reduce((s, e) => s + e.amount, 0)) : ''}>
+      {expenses?.length ? <div className="table-wrap"><table className="card-table">
+        <thead><tr><th>{t('field.description')}</th><th>{t('field.category')}</th><th>{t('table.date')}</th><th>{t('btq.method')}</th><th>{t('btq.amount')}</th><th>{t('field.status')}</th><th>{t('expense.recordedBy')}</th>{can.decide && <th>{t('table.actions')}</th>}</tr></thead>
+        <tbody>{expenses.map((x) => <tr key={x.id} className={x.status === 'voided' ? 'btq-voided' : undefined}>
+          <td className="card-title-cell"><strong>{x.description}</strong>{x.voidReason && <small>{x.voidReason}</small>}</td>
+          <td data-label={t('field.category')}>{x.category}</td><td data-label={t('table.date')}>{formatDate(x.spentOn, language)}</td>
+          <td data-label={t('btq.method')}>{t(`btq.method.${x.method}`)}{x.sessionId && ` · ${t('btq.fromTill')}`}</td>
+          <td data-label={t('btq.amount')}>{money(x.amount)}</td>
+          <td data-label={t('field.status')}><Badge tone={x.status === 'active' ? 'done' : 'stopped'}>{t(`btq.expenseStatus.${x.status}`)}</Badge></td>
+          <td data-label={t('expense.recordedBy')}>{x.recordedByName}</td>
+          {can.decide && <td className="card-actions">{x.status === 'active' && <button type="button" className="danger-btn" disabled={busy} onClick={() => voidExpense(x)}>{t('btq.voidExpense')}</button>}</td>}
+        </tr>)}</tbody>
+      </table></div> : <Empty>{t('btq.noExpenses')}</Empty>}
+    </Panel>
+  </>;
+}
+
+// ---- the books and the reports ---------------------------------------------------------
+
+function PeriodPicker({ period, setPeriod, withPeriods = true }) {
+  const { t } = useI18n();
+  return <div className="filter-grid">
+    {withPeriods && <Field label={t('btq.period')}><select value={period.period} onChange={(e) => setPeriod({ ...period, period: e.target.value })}>{REPORT_PERIODS.map((p) => <option key={p} value={p}>{t(`btq.period.${p}`)}</option>)}</select></Field>}
+    {period.period === 'daily' && <Field label={t('table.date')}><input type="date" value={period.date} onChange={(e) => setPeriod({ ...period, date: e.target.value })} /></Field>}
+    {period.period === 'weekly' && <Field label={t('btq.weekStarting')}><input type="date" value={period.start} onChange={(e) => setPeriod({ ...period, start: e.target.value })} /></Field>}
+    {period.period === 'monthly' && <Field label={t('btq.month')}><input type="month" value={period.month} onChange={(e) => setPeriod({ ...period, month: e.target.value })} /></Field>}
+    {period.period === 'custom' && <>
+      <Field label={t('btq.from')}><input type="date" value={period.start} onChange={(e) => setPeriod({ ...period, start: e.target.value })} /></Field>
+      <Field label={t('btq.to')}><input type="date" value={period.end} onChange={(e) => setPeriod({ ...period, end: e.target.value })} /></Field>
+    </>}
+  </div>;
+}
+
+function periodQuery(period) {
+  if (period.period === 'daily') return `period=daily&date=${period.date}`;
+  if (period.period === 'weekly') return `period=weekly&start=${period.start}`;
+  if (period.period === 'monthly') return `period=monthly&month=${period.month}`;
+  return `period=custom&start=${period.start}&end=${period.end}`;
+}
+const defaultPeriod = (kind) => {
+  const today = todayLocal();
+  return { period: kind, date: today, start: today.slice(0, 8) + '01', end: today, month: today.slice(0, 7) };
+};
+
+function FinanceGrid({ f }) {
+  const { t } = useI18n();
+  return <>
+    <div className="metric-grid metric-grid-4">
+      <Metric label={t('btq.grossSales')} value={`${money(f.sales.gross)} · ${f.sales.count}`} />
+      <Metric label={t('btq.discounts')} value={money(f.discounts)} />
+      <Metric label={t('btq.returnsValue')} value={money(f.returns.value)} />
+      <Metric label={t('btq.netSales')} value={money(f.netSales)} tone="strong" />
+      <Metric label={t('btq.paymentsReceived')} value={money(f.paymentsReceived)} />
+      <Metric label={t('btq.costOfSales')} value={money(f.costOfSales)} />
+      <Metric label={t('btq.grossProfit')} value={money(f.grossProfit)} tone="strong" />
+      <Metric label={t('btq.expensesTotal')} value={money(f.expenses.total)} />
+      <Metric label={t('btq.netProfit')} value={money(f.netProfit)} tone={f.netProfit < 0 ? 'warn' : 'strong'} />
+      <Metric label={t('btq.inventoryValue')} value={money(f.inventory.value)} />
+      <Metric label={t('btq.purchasesReceived')} value={money(f.purchases.value)} />
+      <Metric label={t('btq.owedToSuppliers')} value={money(f.supplierBalance)} />
+    </div>
+    <p className="field-hint">{t('btq.noDoubleCount')}</p>
+    <div className="table-wrap"><table className="card-table">
+      <thead><tr><th>{t('btq.method')}</th><th>{t('btq.taken')}</th><th>{t('btq.change')}</th><th>{t('btq.refunded')}</th><th>{t('btq.received')}</th></tr></thead>
+      <tbody>{f.paymentsByMethod.map((m) => <tr key={m.method}>
+        <td className="card-title-cell"><strong>{t(`btq.method.${m.method}`)}</strong></td>
+        <td data-label={t('btq.taken')}>{money(m.taken)}</td><td data-label={t('btq.change')}>{money(m.changeGiven)}</td>
+        <td data-label={t('btq.refunded')}>{money(m.refunded)}</td><td data-label={t('btq.received')}>{money(m.received)}</td>
+      </tr>)}</tbody>
+    </table></div>
+  </>;
+}
+
+function BooksTab({ fetchJson, onError }) {
+  const { t } = useI18n();
+  const [period, setPeriod] = useState(() => defaultPeriod('custom'));
+  const [finance] = useLoad(fetchJson, `/api/boutique/finance?${periodQuery(period)}`, 0, onError);
+  return <Panel title={t('btq.tab.books')}>
+    <PeriodPicker period={period} setPeriod={setPeriod} withPeriods={false} />
+    {finance ? <FinanceGrid f={finance} /> : <div className="loading-state"><span className="spinner" /></div>}
+  </Panel>;
+}
+
+function ReportsTab({ fetchJson, onError }) {
+  const { t, language } = useI18n();
+  const [period, setPeriod] = useState(() => defaultPeriod('daily'));
+  const [report] = useLoad(fetchJson, `/api/boutique/reports?${periodQuery(period)}`, 0, onError);
+  const section = (title, rows, head, row) => <Panel title={title}>{rows?.length ? <div className="table-wrap"><table className="card-table"><thead><tr>{head.map((h) => <th key={h}>{h}</th>)}</tr></thead><tbody>{rows.map(row)}</tbody></table></div> : <Empty>{t('btq.nothingInPeriod')}</Empty>}</Panel>;
+  return <>
+    <Panel title={t('btq.tab.reports')} action={t('btq.print')} onAction={() => window.print()}>
+      <PeriodPicker period={period} setPeriod={setPeriod} />
+      {report && <p className="field-hint">{formatDate(report.period.start, language)} – {formatDate(report.period.end, language)}</p>}
+    </Panel>
+    {!report ? <div className="loading-state"><span className="spinner" /></div> : <div className="btq-report">
+      <Panel title={t('btq.profit')}><FinanceGrid f={report.finance} /></Panel>
+      {section(t('btq.salesByDay'), report.salesByDay, [t('table.date'), t('btq.tab.sales'), t('btq.total'), t('btq.discounts')],
+        (r) => <tr key={r.day}><td className="card-title-cell"><strong>{formatDate(r.day, language)}</strong></td><td data-label={t('btq.tab.sales')}>{r.sales}</td><td data-label={t('btq.total')}>{money(r.total)}</td><td data-label={t('btq.discounts')}>{money(r.discounts)}</td></tr>)}
+      {section(t('btq.popularProducts'), report.topProducts, [t('btq.product'), t('btq.pieces'), t('btq.revenue'), t('btq.profit')],
+        (r) => <tr key={r.sku}><td className="card-title-cell"><strong>{r.productName}</strong><small>{r.sku} {variantLabel(r)}</small></td><td data-label={t('btq.pieces')}>{r.pieces}</td><td data-label={t('btq.revenue')}>{money(r.revenue)}</td><td data-label={t('btq.profit')}>{money(r.profit)}</td></tr>)}
+      <div className="dashboard-columns">
+        {section(t('btq.sizeDemand'), report.sizeDemand, [t('btq.size'), t('btq.pieces')], (r) => <tr key={r.size}><td className="card-title-cell"><strong>{r.size}</strong></td><td data-label={t('btq.pieces')}>{r.pieces}</td></tr>)}
+        {section(t('btq.colorDemand'), report.colorDemand, [t('btq.color'), t('btq.pieces')], (r) => <tr key={r.color}><td className="card-title-cell"><strong>{r.color}</strong></td><td data-label={t('btq.pieces')}>{r.pieces}</td></tr>)}
+      </div>
+      {section(t('btq.byType'), report.typeDemand, [t('btq.productType'), t('btq.pieces'), t('btq.revenue')],
+        (r) => <tr key={r.productType}><td className="card-title-cell"><strong>{t(`btq.type.${r.productType}`)}</strong></td><td data-label={t('btq.pieces')}>{r.pieces}</td><td data-label={t('btq.revenue')}>{money(r.revenue)}</td></tr>)}
+      <Panel title={t('btq.inventoryReport')} subtitle={`${report.inventory.pieces} · ${money(report.inventory.value)}`}>
+        {report.inventory.byType.length > 0 && <ul className="history-list">{report.inventory.byType.map((r) => <li key={r.productType}>{t(`btq.type.${r.productType}`)}: {r.pieces} · {money(r.value)}</li>)}</ul>}
+        {report.inventory.lowStock.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('btq.lowStock')}</th><th>{t('btq.stock')}</th><th>{t('btq.reorderLevel')}</th></tr></thead>
+          <tbody>{report.inventory.lowStock.map((v) => <tr key={v.id}><td className="card-title-cell"><strong>{fullName(v)}</strong><small>{v.sku}</small></td><td data-label={t('btq.stock')}>{v.stockQuantity}</td><td data-label={t('btq.reorderLevel')}>{v.reorderLevel}</td></tr>)}</tbody></table></div> : <p className="field-hint">{t('btq.noLowStock')}</p>}
+      </Panel>
+      <Panel title={t('btq.purchasesReport')}>
+        <div className="detail-facts">
+          <Fact label={t('btq.deliveries')} value={report.purchases.receipts} />
+          <Fact label={t('btq.pieces')} value={report.purchases.pieces} />
+          <Fact label={t('btq.purchasesReceived')} value={money(report.purchases.value)} />
+          <Fact label={t('btq.paymentsMade')} value={money(report.purchases.supplierPayments)} />
+          <Fact label={t('btq.owedToSuppliers')} value={money(report.purchases.supplierBalance)} />
+        </div>
+      </Panel>
+      {section(t('btq.expensesByCategory'), report.expensesByCategory, [t('field.category'), t('btq.count'), t('btq.total')],
+        (r) => <tr key={r.category}><td className="card-title-cell"><strong>{r.category}</strong></td><td data-label={t('btq.count')}>{r.count}</td><td data-label={t('btq.total')}>{money(r.total)}</td></tr>)}
+      {section(t('btq.returns'), report.returns, [t('btq.number'), t('table.date'), t('btq.returnKindLabel'), t('btq.value'), t('btq.refund'), t('btq.reason')],
+        (r) => <tr key={r.id}><td className="card-title-cell"><strong>{r.number}</strong><small>{r.saleNumber}</small></td><td data-label={t('table.date')}>{formatDate(r.returnedOn, language)}</td><td data-label={t('btq.returnKindLabel')}>{t(`btq.returnKind.${r.kind}`)}</td><td data-label={t('btq.value')}>{money(r.value)}</td><td data-label={t('btq.refund')}>{money(r.refundTotal)}</td><td data-label={t('btq.reason')}>{r.reason}</td></tr>)}
+      <Panel title={t('btq.reconciliation')} subtitle={fill(t('btq.closedTills'), { count: report.paymentReconciliation.closedSessions })}>
+        <div className="table-wrap"><table className="card-table">
+          <thead><tr><th>{t('btq.method')}</th><th>{t('btq.received')}</th><th>{t('btq.tillExpected')}</th><th>{t('btq.tillCounted')}</th><th>{t('btq.variance')}</th></tr></thead>
+          <tbody>{report.paymentReconciliation.methods.map((m) => <tr key={m.method}>
+            <td className="card-title-cell"><strong>{t(`btq.method.${m.method}`)}</strong></td>
+            <td data-label={t('btq.received')}>{money(m.received)}</td><td data-label={t('btq.tillExpected')}>{money(m.tillExpected)}</td>
+            <td data-label={t('btq.tillCounted')}>{m.tillCounted === null ? '—' : money(m.tillCounted)}</td>
+            <td data-label={t('btq.variance')}>{m.tillVariance === null ? '—' : <span className={m.tillVariance < 0 ? 'over-budget' : undefined}>{money(m.tillVariance)}</span>}</td>
+          </tr>)}</tbody>
+        </table></div>
+      </Panel>
+      {section(t('btq.cashierPerformance'), report.cashierPerformance, [t('btq.cashier'), t('btq.tab.sales'), t('btq.pieces'), t('btq.total'), t('btq.averageSale'), t('btq.discounts'), t('btq.returns'), t('btq.voidedCount')],
+        (r) => <tr key={r.cashierId}><td className="card-title-cell"><strong>{r.name}</strong></td><td data-label={t('btq.tab.sales')}>{r.sales}</td><td data-label={t('btq.pieces')}>{r.pieces}</td><td data-label={t('btq.total')}>{money(r.total)}</td><td data-label={t('btq.averageSale')}>{money(r.average)}</td><td data-label={t('btq.discounts')}>{money(r.discounts)}</td><td data-label={t('btq.returns')}>{r.returns}</td><td data-label={t('btq.voidedCount')}>{r.voided}</td></tr>)}
+    </div>}
+  </>;
+}
+
+// ---- approvals and history ------------------------------------------------------------
+
+function ApprovalsTab({ fetchJson, onMessage, onError, changed, can, go }) {
+  const { t, language } = useI18n();
+  const dialog = useDialog();
+  const [busy, run] = useBusy();
+  const [tick, setTick] = useState(0);
+  const [queue] = useLoad(fetchJson, '/api/boutique/approvals', tick, onError);
+  const refresh = () => { setTick((n) => n + 1); changed(); };
+  const decide = (path, approve, done) => run(async () => {
+    const note = approve ? '' : await dialog.prompt({ title: t('btq.refuse'), label: t('btq.reason'), required: true, minLength: 10, multiline: true });
+    if (note === null) return;
+    try { await fetchJson(path, { method: 'POST', body: JSON.stringify({ approve, note }) }); onMessage(done); refresh(); } catch (error) { onError(error.message); }
+  });
+  if (!queue) return <div className="loading-state"><span className="spinner" /></div>;
+  return <>
+    <Panel title={t('btq.adjustments')} subtitle={String(queue.adjustments.length)}>
+      {queue.adjustments.length ? <ul className="decision-list">{queue.adjustments.map((a) => <li className="decision-card" key={a.id}>
+        <div className="decision-card-main">
+          <span className="decision-card-kind">{t(`btq.kind.${a.kind}`)}</span>
+          <strong>{a.productName} · {a.sku} {variantLabel(a)}</strong>
+          <span className="decision-card-meta">{a.kind === 'count' ? fill(t('btq.countedTo'), { count: a.quantity, delta: a.delta }) : fill(t('btq.piecesChange'), { count: a.quantity })} · {a.requestedByName} · {formatDate(a.createdAt, language)}</span>
+          <p>{a.reason}</p>
+        </div>
+        {can.decide && <div className="decision-card-actions">
+          <button type="button" className="primary-btn" disabled={busy} onClick={() => decide(`/api/boutique/stock/adjustments/${a.id}/decision`, true, t('btq.adjusted'))}>{t('btq.approve')}</button>
+          <button type="button" className="danger-btn" disabled={busy} onClick={() => decide(`/api/boutique/stock/adjustments/${a.id}/decision`, false, t('btq.refused'))}>{t('btq.refuse')}</button>
+        </div>}
+      </li>)}</ul> : <Empty>{t('btq.nothingWaiting')}</Empty>}
+    </Panel>
+    <Panel title={t('btq.voidRequests')} subtitle={String(queue.voids.length)}>
+      {queue.voids.length ? <ul className="decision-list">{queue.voids.map((s) => <li className="decision-card" key={s.id}>
+        <div className="decision-card-main">
+          <span className="decision-card-kind">{t('btq.voidSale')}</span>
+          <strong><button type="button" className="text-btn" onClick={() => go('sales', { sale: s.id })}>{s.number}</button> · {money(s.total)}</strong>
+          <span className="decision-card-meta">{s.cashierName} · {formatDate(s.soldOn, language)}</span>
+          <p>{s.voidReason}</p>
+        </div>
+        {can.decide && <div className="decision-card-actions">
+          <button type="button" className="primary-btn" disabled={busy} onClick={() => decide(`/api/boutique/sales/${s.id}/void-decision`, true, t('btq.voided'))}>{t('btq.approve')}</button>
+          <button type="button" className="danger-btn" disabled={busy} onClick={() => decide(`/api/boutique/sales/${s.id}/void-decision`, false, t('btq.voidRefused'))}>{t('btq.refuse')}</button>
+        </div>}
+      </li>)}</ul> : <Empty>{t('btq.nothingWaiting')}</Empty>}
+    </Panel>
+  </>;
+}
+
+function HistoryTab({ fetchJson, onError }) {
+  const { t, language } = useI18n();
+  const [trail] = useLoad(fetchJson, '/api/boutique/audit?limit=200', 0, onError);
+  const label = (action) => { const key = `btq.trail.${action}`; const text = t(key); return text === key ? action : text; };
+  const detail = (d) => Object.entries(d || {}).filter(([, v]) => v !== null && v !== undefined && v !== '' && typeof v !== 'object').map(([k, v]) => `${k}: ${v}`).join(' · ');
+  return <Panel title={t('btq.tab.history')}>
+    {trail?.length ? <div className="table-wrap"><table className="card-table">
+      <thead><tr><th>{t('table.date')}</th><th>{t('btq.who')}</th><th>{t('btq.what')}</th><th>{t('btq.details')}</th></tr></thead>
+      <tbody>{trail.map((row) => <tr key={row.id}>
+        <td className="card-title-cell"><strong>{formatDate(row.createdAt, language)}</strong><small>{new Date(row.createdAt).toLocaleTimeString(language)}</small></td>
+        <td data-label={t('btq.who')}>{row.actorName || '—'}</td>
+        <td data-label={t('btq.what')}>{label(row.action)}{row.entityId ? ` #${row.entityId}` : ''}</td>
+        <td data-label={t('btq.details')}>{detail(row.details) || '—'}</td>
+      </tr>)}</tbody>
+    </table></div> : <Empty>{t('btq.nothingInPeriod')}</Empty>}
+  </Panel>;
+}
+
+export const BOUTIQUE_TABS = TABS;

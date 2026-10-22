@@ -644,7 +644,9 @@ try {
   section('9. The Director\'s monthly review');
   const review = await api(adminToken, `/api/monthly-plans/review?month=${MONTH}`);
   check('the review loads', review.status === 200, String(review.status));
-  check('  it covers all four business operations', review.body.operations.length === 4,
+  // Every operation, the boutique (Project 5) included: it is a sectors row
+  // like the four, so it has a month on the review like the four.
+  check('  it covers all five business operations', review.body.operations.length === 5,
     String(review.body.operations.length));
   const farmingRow = review.body.operations.find((row) => row.operation === 'farming');
   check('  Farming shows the manager', Boolean(farmingRow.managerName), farmingRow.managerName);
@@ -657,12 +659,15 @@ try {
   check('  and counts the days of work separately', farmingRow.workCount === 2, String(farmingRow.workCount));
   check('  flags expenses with no payment evidence', farmingRow.expensesWithoutEvidence === 3,
     String(farmingRow.expensesWithoutEvidence));
-  check('  the four operations total correctly',
-    review.body.totals.approvedBudget === 4000 + 1000 * 3, String(review.body.totals.approvedBudget));
+  // Farming's $4,000 plus $1,000 for every other operation the loop above
+  // created a month for (the boutique included).
+  const others = BUSINESS_OPERATIONS.length - 1;
+  check('  the operations total correctly',
+    review.body.totals.approvedBudget === 4000 + 1000 * others, String(review.body.totals.approvedBudget));
   // The Director's overview strip reads these, so they have to be there and have
   // to agree with the per-operation rows underneath them.
   check('  and the overview totals committed and the days of work',
-    review.body.totals.committedBudget === 3400 + 1000 * 3
+    review.body.totals.committedBudget === 3400 + 1000 * others
       && review.body.totals.uncommittedBudget === 600
       && review.body.totals.work === 2
       && review.body.totals.workCompleted === 0,
@@ -788,9 +793,19 @@ try {
     names.filter((n) => n.includes('activit')).join(', '));
   check('no second user or manager table', !names.some((n) => /^(managers|admins|staff_users)$/.test(n)),
     names.join(', ').slice(0, 160));
+  // The boutique (Project 5) is the one place the word "payment" is allowed
+  // in a table name: boutique_sale_payments is the cashier's note of HOW the
+  // customer paid, boutique_supplier_payments the note THAT the shop paid, and
+  // boutique_payment_methods which of the four ways the till accepts. They
+  // record money, as the plan's expenses do; nothing in them moves it, and
+  // the boutique suite checks its columns for wallet/gateway/transfer words.
+  const moneyTables = names.filter((n) => !n.startsWith('boutique_'));
   check('no payment, wallet or transaction table',
-    !names.some((n) => /(payment|wallet|transaction|transfer|payout|gateway)/i.test(n)),
-    names.filter((n) => /(payment|wallet|transaction|transfer|payout|gateway)/i.test(n)).join(', '));
+    !moneyTables.some((n) => /(payment|wallet|transaction|transfer|payout|gateway)/i.test(n)),
+    moneyTables.filter((n) => /(payment|wallet|transaction|transfer|payout|gateway)/i.test(n)).join(', '));
+  check('  and the boutique has no wallet, transaction or gateway table either',
+    !names.some((n) => n.startsWith('boutique_') && /(wallet|transaction|transfer|gateway)/i.test(n)),
+    names.filter((n) => n.startsWith('boutique_') && /(wallet|transaction|transfer|gateway)/i.test(n)).join(', '));
   check('the new tables are the ones asked for',
     ['monthly_plans', 'monthly_reports', 'activity_expenses', 'monthly_plan_history'].every((n) => names.includes(n)));
   check('budget change requests reuse the existing table', names.includes('activity_budget_requests'));

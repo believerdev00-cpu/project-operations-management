@@ -111,6 +111,7 @@ Copy `.env.example` to `.env.local` and set at least:
 | `ADMIN_PASSWORD` | the starting password for `admin`, used once by the first migration |
 | `PORT` | defaults to 5000 |
 | `TRUST_PROXY` | only behind a reverse proxy: the number of proxies, usually `1` |
+| `BOUTIQUE_TIMEZONE` | optional; the boutique's calendar day for sales and tills, default `Africa/Kigali` |
 
 Keep `?sslmode=disable` only for a Postgres on the same machine. `CORS_ORIGIN`
 is not needed in production: the page and the API share one origin.
@@ -141,8 +142,13 @@ Two things hold the data, and they must be backed up together:
 - **The database:**
   `"C:\Program Files\PostgreSQL\16\bin\pg_dump.exe" -U ops -h localhost -p 5433 -Fc project_ops -f backup.dump`
   (restore with `pg_restore -U ops -h localhost -p 5433 -d project_ops --clean backup.dump`)
-- **`server/uploads`**: the evidence files. The database only records their
-  names; losing this folder leaves every evidence link answering 404.
+- **`server/uploads`**: the evidence files, and under `server/uploads/boutique`
+  the boutique's product pictures. The database only records their names;
+  losing this folder leaves every evidence link answering 404.
+
+The Boutique Management System (Project 5) keeps everything else -- products,
+sales, stock, suppliers, tills, expenses and its audit trail -- in the same
+database, in the `boutique_*` tables, so one `pg_dump` covers it.
 
 ## Running locally
 

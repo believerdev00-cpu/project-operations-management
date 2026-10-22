@@ -27,6 +27,7 @@ import partnerCommentsRouter from './routes/partnerComments.js';
 import monthlyPlanRouter from './routes/monthlyPlans.js';
 import notificationRouter from './routes/notifications.js';
 import organizationRouter from './routes/organization.js';
+import boutiqueRouter from './routes/boutique.js';
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -59,6 +60,9 @@ function mapProject(row) {
     spentUsd: Number(row.spent_usd || 0),
     activityCount: Number(row.activity_count || 0),
     completedCount: Number(row.completed_count || 0),
+    // 'boutique' on PRJ-BOUTIQUE (Project 5), whose work is the shop at
+    // #/boutique rather than the activity register; NULL on every other row.
+    workspace: row.workspace || null,
     updatedAt: row.updated_at
   };
 }
@@ -837,6 +841,13 @@ app.patch('/api/projects/:id/manager', authMiddleware, asyncRoute(async (req, re
 
 app.delete('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
   if (!isAdmin(req.user)) return res.status(403).json({ message: 'Only the Director can delete projects.' });
+  // A project that opens into a workspace of its own -- the boutique -- is the
+  // anchor of every sale, product and till recorded there; deleting the row
+  // would orphan a business. It is not offered on screen and is refused here.
+  const anchored = await pool.query('SELECT workspace FROM projects WHERE id = $1', [req.params.id]);
+  if (anchored.rowCount && anchored.rows[0].workspace) {
+    return res.status(409).json({ code: 'PROJECT_ANCHORED', message: 'This project is a workspace of its own and cannot be deleted.' });
+  }
   // Deleting a project cascades to its activities and their evidence rows. The
   // stored files are read first so they are removed too, instead of being left
   // in storage with nothing pointing at them.
@@ -900,6 +911,13 @@ app.use('/api/notifications', authMiddleware, notificationRouter);
 // a branch of their own. Internal only -- not on the partner allowlist.
 app.use('/api/organization', authMiddleware, organizationRouter);
 
+// The Boutique Management System (Project 5): products, the till, stock,
+// suppliers, cash and the books, for the Director, the General Manager
+// (read-only) and the boutique's own manager and cashiers. Internal only --
+// not on the partner allowlist; the router's own boutiqueAccess refuses
+// everybody else before any handler runs.
+app.use('/api/boutique', authMiddleware, boutiqueRouter);
+
 // An /api path nothing matched is answered in JSON, not by the SPA fallback
 // below. Handing back index.html would give the client an HTML page where it
 // parses a response body, so a mistyped route would surface as a parse error
@@ -961,7 +979,10 @@ const DATABASE_INPUT_ERRORS = {
   '22001': [400, 'One of the values sent is too long.'],
   '23505': [409, 'A record with those details already exists.'],
   '23503': [409, 'This record is linked to something that no longer exists, or is still in use elsewhere.'],
-  '23514': [400, 'One of the values sent is not allowed.']
+  '23514': [400, 'One of the values sent is not allowed.'],
+  // Two requests met on the same rows in opposite orders and Postgres gave
+  // one of them up. Nothing of it was written; the caller simply tries again.
+  '40P01': [409, 'Another change got in first. Please try again.']
 };
 
 app.use((error, req, res, next) => {
