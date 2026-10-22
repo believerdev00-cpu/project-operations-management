@@ -639,6 +639,10 @@ td .operation-checks { display: grid; gap: 0; }
 .language-picker { display: grid; gap: 6px; margin-bottom: 16px; color: inherit; font-size: .68rem; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
 .language-picker select { min-height: 44px; padding: 6px 9px; font-size: .82rem; }
 .login-card .language-picker { margin: 0 0 20px; color: var(--muted); }
+/* The sign-in language choice: four large buttons, two by two. */
+.language-buttons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0 0 22px; }
+.language-button { min-height: 48px; padding: 10px; color: var(--ink); font-size: 1rem; font-weight: 700; background: #f4f7fa; border: 2px solid var(--line); border-radius: 8px; }
+.language-button.active { color: white; background: var(--blue); border-color: var(--blue); }
 
 /* The one business operation a partner account carries. Not a picker: there is
    nothing to choose between, and the API would refuse any other. */
@@ -1237,4 +1241,30 @@ td .operation-checks { display: grid; gap: 0; }
   .team-grid { grid-template-columns: minmax(0, 1fr); }
   .team-manage .inline-form { grid-template-columns: minmax(0, 1fr); }
   .sharing-row td { display: block; }
+}
+
+/* ---- easy to use without much reading ---------------------------------------
+   The buttons that move work forward carry a picture and are big enough to hit
+   with a thumb in the field; a team member's task reads as three pictures. */
+
+.action-icon { flex: none; width: 1.15em; height: 1.15em; }
+.primary-btn .action-icon, .secondary-btn .action-icon { margin-right: 8px; vertical-align: -0.2em; }
+.big-action { display: inline-flex; align-items: center; justify-content: center; min-height: 52px; padding: 12px 20px; font-size: 1.05rem; }
+.big-action .action-icon { width: 1.35em; height: 1.35em; }
+.plan-write-today { width: 100%; margin: 4px 0 14px; }
+
+.simple-due { display: block; margin-top: 6px; color: var(--ink); font-size: .95rem; font-weight: 700; }
+.simple-steps-wrap { margin: 6px 0 14px; }
+.simple-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; }
+.simple-step { display: grid; justify-items: center; gap: 6px; padding: 10px 4px; color: var(--muted); font-size: .9rem; font-weight: 700; text-align: center; background: #f4f7fa; border: 2px solid var(--line); border-radius: 10px; }
+.simple-step-icon { display: grid; place-items: center; width: 44px; height: 44px; color: var(--muted); background: white; border: 2px solid var(--line); border-radius: 50%; }
+.simple-step-icon .action-icon { width: 22px; height: 22px; }
+.simple-step.current { color: var(--navy); background: var(--blue-soft); border-color: var(--blue); }
+.simple-step.current .simple-step-icon { color: white; background: var(--blue); border-color: var(--blue); }
+.simple-step.done { color: var(--green); background: #eef8f2; border-color: #bfe3cf; }
+.simple-step.done .simple-step-icon { color: white; background: var(--green); border-color: var(--green); }
+.simple-steps-note { margin: 8px 0 0; color: var(--green); font-weight: 700; text-align: center; }
+
+@media (max-width: 640px) {
+  .big-action { width: 100%; }
 }

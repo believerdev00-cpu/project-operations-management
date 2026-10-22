@@ -439,7 +439,7 @@ function LoginScreen({ notice, onSignedIn }) {
 
   return <div className="login-shell"><form className="login-card" onSubmit={submit}>
     <div className="login-brand"><img className="login-logo" src="/logo-mark.png" alt="" /><strong>{t('app.name')}</strong></div>
-    <LanguagePicker language={language} setLanguage={setLanguage} label={t('app.language')} />
+    <LanguagePicker buttons language={language} setLanguage={setLanguage} label={t('app.language')} />
     <h1>{t('auth.signIn')}</h1>
     <p>{t('auth.signInBlurb')}</p>
     {notice && <div className="notice-banner" role="status">{notice}</div>}
@@ -484,7 +484,7 @@ function ChoosePasswordScreen({ token, user, onChosen, onSignOut, onExpired }) {
 
   return <div className="login-shell"><form className="login-card" onSubmit={submit}>
     <div className="login-brand"><img className="login-logo" src="/logo-mark.png" alt="" /><strong>{t('app.name')}</strong></div>
-    <LanguagePicker language={language} setLanguage={setLanguage} label={t('app.language')} />
+    <LanguagePicker buttons language={language} setLanguage={setLanguage} label={t('app.language')} />
     <h1>{t('auth.choosePasswordTitle')}</h1>
     <p>{fill(t('auth.choosePasswordBlurb'), { name: user.name })}</p>
     <label>{t('auth.currentPassword')}<input required type="password" autoComplete="current-password" value={form.current} onChange={(event) => setForm({ ...form, current: event.target.value })} /></label>
@@ -2480,7 +2480,20 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
 
 // Available before sign-in as well as after, because someone who reads no
 // English has to be able to change it before they can read the login form.
-function LanguagePicker({ language, setLanguage, label }) {
+// On the sign-in screens the language is four large buttons, each in its own
+// language, rather than a small dropdown labelled in English: somebody who
+// reads only Kinyarwanda has to be able to find their language before they can
+// read anything else, and a button with "Kinyarwanda" on it needs no reading of
+// the word "Language" first. Inside the app the dropdown stays, in the sidebar.
+function LanguagePicker({ language, setLanguage, label, buttons = false }) {
+  if (buttons) {
+    return <div className="language-buttons" role="radiogroup" aria-label={label}>
+      {LANGUAGES.map((option) => <button key={option.code} type="button" role="radio" lang={option.code}
+        aria-checked={language === option.code}
+        className={language === option.code ? 'language-button active' : 'language-button'}
+        onClick={() => setLanguage(option.code)}>{option.nativeName}</button>)}
+    </div>;
+  }
   return <label className="language-picker">
     <span>{label}</span>
     <select value={language} onChange={(event) => setLanguage(event.target.value)}>

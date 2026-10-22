@@ -406,6 +406,33 @@ export function useBusy() {
   return [busy, run];
 }
 
+// ---- action icons --------------------------------------------------------------
+
+// A picture beside the words on the buttons that move work forward, so the
+// button can be recognised by somebody who reads slowly or not at all: a play
+// arrow starts, a camera takes the proof, a tick says finished, a pencil writes
+// the day down. Decoration only (aria-hidden); the words stay the label.
+const ACTION_ICON_PATHS = {
+  start: 'M8 5v14l11-7L8 5Z',
+  photo: 'M4 8h3l2-3h6l2 3h3v11H4V8Zm8 9a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z',
+  finish: 'M5 12l5 5L20 7',
+  write: 'M4 20h4L19 9l-4-4L4 16v4Zm11-15 4 4',
+  money: 'M12 3v18M16 7.5c0-1.9-1.8-3-4-3s-4 1.1-4 3 1.8 2.6 4 3 4 1.1 4 3-1.8 3-4 3-4-1.1-4-3',
+  open: 'M9 6l6 6-6 6',
+  flag: 'M6 21V4m0 0h11l-2.5 4L17 12H6'
+};
+
+export function ActionIcon({ name }) {
+  const path = ACTION_ICON_PATHS[name];
+  if (!path) return null;
+  return <svg className="action-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+    strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d={path} /></svg>;
+}
+
+// Which picture goes with each next step (the keys nextAction() in journey.jsx
+// returns), so every list and record draws the same one.
+export const STEP_ICONS = { start: 'start', proof: 'photo', finish: 'finish', check: 'finish', open: 'open', send: 'open', decide: 'open' };
+
 // ---- small shared pieces ----------------------------------------------------
 
 // One label-and-value pair in a `.detail-facts` row. The same six lines lived

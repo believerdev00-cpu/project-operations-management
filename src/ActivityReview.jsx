@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { displayLanguage, fill, translate, useI18n, useT } from './i18n.js';
 import { ExpensePanel } from './ExpensePanel.jsx';
 import { FilePicker, Journey, MoneyBar, NextStep, Section, activityJourney, goToSection } from './journey.jsx';
-import { Fact } from './ui.jsx';
+import { ActionIcon, Fact } from './ui.jsx';
 import { worksIn } from '../shared/businessOperations.js';
 import { formatUsd } from './format.js';
 
@@ -35,6 +35,29 @@ const STATUS_FLOW = {
 
 // Mirrors allowedNextStatuses in server/routes/activities.js: work that never
 // needed an approval is never sent back for one, and reopens as Approved.
+// A team member's task in three pictures: start it, photograph it, finish it.
+// Worked out from the same fields as the five-step journey the managers see,
+// so the two can never disagree about where the work is.
+function SimpleSteps({ activity, hasProof, t }) {
+  const handedBack = Boolean(activity.completionSubmittedAt) && activity.status !== 'Completed';
+  const finished = handedBack || activity.status === 'Completed';
+  const started = !['Approved', 'Budget Adjusted', 'Pending Approval', 'Draft'].includes(activity.status);
+  const current = finished ? 3 : !started ? 0 : hasProof ? 2 : 1;
+  // The last step is a flag until it is reached: a tick on a step not yet done
+  // reads as already done.
+  const steps = [['start', t('simple.stepStart')], ['photo', t('simple.stepPhoto')], ['flag', t('simple.stepFinish')]];
+  return <div className="simple-steps-wrap">
+    <ol className="simple-steps">
+      {steps.map(([icon, label], index) => <li key={icon}
+        className={index < current ? 'simple-step done' : index === current ? 'simple-step current' : 'simple-step'}>
+        <span className="simple-step-icon"><ActionIcon name={index < current ? 'finish' : icon} /></span>
+        <span>{label}</span>
+      </li>)}
+    </ol>
+    {finished && <p className="simple-steps-note">{activity.status === 'Completed' ? t('journey.done') : t('simple.sentForCheck')}</p>}
+  </div>;
+}
+
 function allowedNextStatuses(activity) {
   const flow = STATUS_FLOW[activity.status] || [];
   if (activity.approvalRequired) return flow;
@@ -137,8 +160,9 @@ export function deadlineNote(activity, language = 'en') {
   // Built from keys rather than an English sentence, so the flag reads in the
   // viewer's language wherever it is rendered.
   const say = (key) => translate(language, key);
-  if (days < 0) return { tone: 'overdue', text: `${-days} ${say('deadline.days')} ${say('deadline.overdue')}` };
+  if (days < 0) return { tone: 'overdue', text: `${-days} ${say(days === -1 ? 'deadline.day' : 'deadline.days')} ${say('deadline.overdue')}` };
   if (days === 0) return { tone: 'due-soon', text: say('deadline.dueToday') };
+  if (days === 1) return { tone: 'due-soon', text: say('deadline.dueTomorrow') };
   const due = `${say('deadline.dueInDays')} ${days} ${say('deadline.days')}`;
   return { tone: days <= 3 ? 'due-soon' : 'ok', text: due };
 }
@@ -348,6 +372,11 @@ export function ActivityReview({
     : null;
   const handedBack = Boolean(activity.completionSubmittedAt) && activity.status !== 'Completed';
   const assigneeName = activity.assignedToName || t('form.nobodyYet');
+  // A team member gets the task the way somebody standing in a field needs it:
+  // what to do, three picture steps, one big button. The money, the dates and
+  // the record's details are still all here, folded under "More" -- nothing is
+  // taken away, it is only moved out of the way of the job.
+  const simple = user.role === 'staff';
   const spentSoFar = expenseSummary ? expenseSummary.totalSpent : expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
   const hasProof = evidence.length > 0;
   const canReopen = isDirector && monthOpen && ['Rejected', 'Cancelled'].includes(activity.status);
@@ -409,20 +438,20 @@ export function ActivityReview({
   } else if (['Approved', 'Budget Adjusted'].includes(activity.status)) {
     next = managerCanStart
       ? { tone: 'action', title: t('next.readyTitle'), text: t('next.readyText'),
-        actions: <button className="primary-btn" type="button" disabled={busy} onClick={() => onStatus(activity, 'In Progress')}>{t('action.startWork')}</button> }
+        actions: <button className="primary-btn big-action" type="button" disabled={busy} onClick={() => onStatus(activity, 'In Progress')}><ActionIcon name="start" />{t('action.startWork')}</button> }
       : { tone: 'info', title: fill(t('next.readyOther'), { name: assigneeName }), text: '' };
   } else if (carriesIt || (isDirector && canSubmitCompletion)) {
     const sentBack = activity.status === 'Needs Correction';
     next = {
       tone: sentBack ? 'warning' : 'action',
       title: sentBack ? t('journey.sentBack') : t('next.underwayTitle'),
-      text: sentBack ? (activity.adminNote || t('review.sentBackToYou')) : t('next.underwayText'),
+      text: sentBack ? (activity.adminNote || t('review.sentBackToYou')) : (simple ? t('next.underwayTextSimple') : t('next.underwayText')),
       actions: <>
         {/* The one that moves the work on, first and filled in. */}
-        {!hasProof && canAttach && <button className="primary-btn" type="button" onClick={() => goToSection('proof')}>{t('next.addProof')}</button>}
-        {hasProof && canSubmitCompletion && <button className="primary-btn" type="button" disabled={busy} onClick={() => onSubmitCompletion(activity)}>{t('action.submitCompleted')}</button>}
-        {canRecordExpense && <button className="secondary-btn" type="button" onClick={() => goToSection('money')}>{t('expense.record')}</button>}
-        {hasProof && canAttach && <button className="secondary-btn" type="button" onClick={() => goToSection('proof')}>{t('next.addProof')}</button>}
+        {!hasProof && canAttach && <button className="primary-btn big-action" type="button" onClick={() => goToSection('proof')}><ActionIcon name="photo" />{t('next.addProof')}</button>}
+        {hasProof && canSubmitCompletion && <button className="primary-btn big-action" type="button" disabled={busy} onClick={() => onSubmitCompletion(activity)}><ActionIcon name="finish" />{t('action.submitCompleted')}</button>}
+        {canRecordExpense && <button className="secondary-btn" type="button" onClick={() => goToSection('money')}><ActionIcon name="money" />{t('expense.record')}</button>}
+        {hasProof && canAttach && <button className="secondary-btn" type="button" onClick={() => goToSection('proof')}><ActionIcon name="photo" />{t('next.addProof')}</button>}
       </>
     };
   } else {
@@ -442,6 +471,30 @@ export function ActivityReview({
       ? `${t('table.deadline')}: ${formatDate(activity.deadline)}` : null
   ].filter(Boolean).join(' · ');
 
+  const dateForm = <form className="work-date" onSubmit={(event) => { event.preventDefault(); onSchedule(activity, workDate); }}>
+      <label className="form-field">
+        <span>{t('review.whenWillYouDoIt')}</span>
+        <input type="date" value={workDate} onChange={(event) => setWorkDate(event.target.value)} />
+      </label>
+      <button className="secondary-btn" type="submit" disabled={busy || (workDate || '') === (activity.scheduledFor || '')}>
+        {t('action.saveDate')}
+      </button>
+    </form>;
+  const moneyBar = <MoneyBar
+      approved={activity.approvedBudget}
+      requested={activity.requestedBudget}
+      spent={spentSoFar}
+      format={formatUsd}
+      rates={rates}
+      extra={<p className="money-note">
+        {activity.approvedBudget === null
+          ? null
+          : activity.budgetAdjustment
+            ? fill(t('money.changedFrom'), { amount: formatUsd(activity.requestedBudget), change: `${activity.budgetAdjustment > 0 ? '+' : ''}${formatUsd(activity.budgetAdjustment)}` })
+            : null}
+      </p>}
+    />;
+
   return <section className="panel detail-panel activity-review record">
     <div className="panel-header record-header">
       <div>
@@ -449,9 +502,9 @@ export function ActivityReview({
             handed to opens "Clear the scrub on plots 1-3" with no idea which
             activity it serves or why it matters -- and the eyebrow claimed the
             Director had assigned it when it was their own manager. */}
-        <span className="eyebrow">{sectorLabel(activity.sector)} · {activity.parentActivityName
+        <span className="eyebrow">{sectorLabel(activity.sector)}{simple ? null : <> · {activity.parentActivityName
           ? t('review.dayOfWork')
-          : (wasAssigned ? t('review.assignedActivity') : t('review.activityReview'))}</span>
+          : (wasAssigned ? t('review.assignedActivity') : t('review.activityReview'))}</>}</span>
         <h2>{activity.activity}</h2>
         {activity.parentActivityName && <p className="towards-line">
           {fill(t('review.towards'), { activity: activity.parentActivityName })}
@@ -460,12 +513,16 @@ export function ActivityReview({
             folded "details" section, which is the last place somebody standing in
             a field is going to look. */}
         {activity.description && <p className="record-brief">{activity.description}</p>}
-        <span>{peopleLine}{due && due.tone !== 'ok' && <small className={`deadline-flag deadline-${due.tone}`}>{due.text}</small>}</span>
+        {simple
+          ? <span className="simple-due">{activity.deadline
+            ? fill(t('simple.dueBy'), { date: formatDate(activity.deadline) })
+            : null}{due && due.tone !== 'ok' && <small className={`deadline-flag deadline-${due.tone}`}>{due.text}</small>}</span>
+          : <span>{peopleLine}{due && due.tone !== 'ok' && <small className={`deadline-flag deadline-${due.tone}`}>{due.text}</small>}</span>}
       </div>
       <button className="text-btn hide-on-sheet" type="button" onClick={onClose}>{t('action.close')}</button>
     </div>
 
-    <Journey journey={journey} />
+    {simple ? <SimpleSteps activity={activity} hasProof={hasProof} t={t} /> : <Journey journey={journey} />}
 
     <NextStep tone={next.tone} title={next.title} actions={canEdit
       ? <>{next.actions}<button className="secondary-btn" type="button" onClick={() => goToSection('correct')}>
@@ -485,32 +542,13 @@ export function ActivityReview({
       <CorrectionForm key={`${activity.id}:${activity.updatedAt}`} activity={activity} busy={busy} onSave={onEdit} />
     </Section>}
 
-    {canSetDate && <form className="work-date" onSubmit={(event) => { event.preventDefault(); onSchedule(activity, workDate); }}>
-      <label className="form-field">
-        <span>{t('review.whenWillYouDoIt')}</span>
-        <input type="date" value={workDate} onChange={(event) => setWorkDate(event.target.value)} />
-      </label>
-      <button className="secondary-btn" type="submit" disabled={busy || (workDate || '') === (activity.scheduledFor || '')}>
-        {t('action.saveDate')}
-      </button>
-    </form>}
+    {!simple && canSetDate && dateForm}
 
-    <MoneyBar
-      approved={activity.approvedBudget}
-      requested={activity.requestedBudget}
-      spent={spentSoFar}
-      format={formatUsd}
-      rates={rates}
-      extra={<p className="money-note">
-        {activity.approvedBudget === null
-          ? null
-          : activity.budgetAdjustment
-            ? fill(t('money.changedFrom'), { amount: formatUsd(activity.requestedBudget), change: `${activity.budgetAdjustment > 0 ? '+' : ''}${formatUsd(activity.budgetAdjustment)}` })
-            : null}
-      </p>}
-    />
+    {!simple && moneyBar}
 
-    <Section id="details" title={t('section.details')} defaultOpen>
+    <Section id="details" title={simple ? t('simple.more') : t('section.details')} defaultOpen={!simple}>
+      {simple && moneyBar}
+      {simple && canSetDate && dateForm}
       <div className="detail-facts">
         <Fact label={t('field.project')} value={activity.projectName || activity.projectId} />
         <Fact label={t('table.category')} value={categoryLabel(activity.category, t)} />
@@ -572,7 +610,7 @@ export function ActivityReview({
 
     {/* What was actually spent against this activity, and asking for more. */}
     {onRecordExpense && <Section id="money" title={t('section.money')} count={expenses.length || null}
-      defaultOpen={canRecordExpense || expenses.length > 0}>
+      defaultOpen={simple ? expenses.length > 0 : (canRecordExpense || expenses.length > 0)}>
       <ExpensePanel
         activity={activity}
         expenses={expenses}
@@ -608,6 +646,7 @@ export function ActivityReview({
           that already had nine. What it is for is now a question inside the one
           form, which is the only thing that actually differed between them. */}
       {canAttach && <EvidenceUpload
+        workPhotoFirst={simple}
         expenses={expenses}
         busy={busy}
         onUpload={(formData) => onUpload(activity, formData)}
@@ -923,13 +962,15 @@ export function ApprovalPanel({ record, sectorLabel }) {
 // the expense itself carries the amount. A receipt is linked to an expense --
 // the most recent one without a receipt is suggested -- so the month's review
 // can count expenses that have their paperwork.
-export function EvidenceUpload({ onUpload, expenses = [], busy = false }) {
+export function EvidenceUpload({ onUpload, expenses = [], busy = false, workPhotoFirst = false }) {
   const t = useT();
   // What the file is for. This was the only real difference between the two
   // forms this replaces, so it is the first question rather than a heading the
   // reader had to notice they were underneath.
-  const [evidenceType, setEvidenceType] = useState('payment');
-  const [kind, setKind] = useState('Receipt');
+  // A team member is nearly always photographing the work itself, so for them
+  // that is the starting answer; a receipt is still one choice away.
+  const [evidenceType, setEvidenceType] = useState(workPhotoFirst ? 'activity' : 'payment');
+  const [kind, setKind] = useState(workPhotoFirst ? 'Photograph' : 'Receipt');
   const suggestedId = expenses.find((expense) => !expense.evidenceCount)?.id;
   const [expenseId, setExpenseId] = useState(suggestedId ? String(suggestedId) : '');
   const [note, setNote] = useState('');

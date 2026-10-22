@@ -177,7 +177,7 @@ const STRINGS = {
   'do.fix': { en: 'Put it right', rw: 'Bikosore', fr: 'Corriger', sw: 'Rekebisha' },
   'do.monthClosed': { en: 'Month closed', rw: 'Ukwezi kwarafunzwe', fr: 'Mois clôturé', sw: 'Mwezi umefungwa' },
   'do.waitingForMonth': { en: 'Waiting for the budget', rw: 'Ategereje ingengo y\'imari', fr: 'En attente du budget', sw: 'Inasubiri bajeti' },
-  'action.submitCompleted': { en: 'Send for final check', rw: 'Ohereza isuzuma rya nyuma', fr: 'Envoyer pour vérification finale', sw: 'Tuma kwa ukaguzi wa mwisho' },
+  'action.submitCompleted': { en: 'I have finished', rw: 'Narangije', fr: 'J’ai terminé', sw: 'Nimemaliza' },
   'action.recordFigures': { en: 'Record the money', rw: 'Andika amafaranga', fr: 'Enregistrer les montants', sw: 'Rekodi pesa' },
   'action.runReport': { en: 'Run report', rw: 'Kora raporo', fr: 'Générer le rapport', sw: 'Tengeneza ripoti' },
   'action.generateReport': { en: 'Generate report', rw: 'Tanga raporo', fr: 'Générer le rapport', sw: 'Tengeneza ripoti' },
@@ -698,6 +698,8 @@ const STRINGS = {
   'deadline.dueToday': { en: 'Due today', rw: 'Bigomba kurangira uyu munsi', fr: 'À rendre aujourd’hui', sw: 'Inatakiwa leo' },
   'deadline.dueInDays': { en: 'Due in', rw: 'Bisigaje', fr: 'Échéance dans', sw: 'Inabaki' },
   'deadline.days': { en: 'days', rw: 'iminsi', fr: 'jours', sw: 'siku' },
+  'deadline.day': { en: 'day', rw: 'umunsi', fr: 'jour', sw: 'siku' },
+  'deadline.dueTomorrow': { en: 'Due tomorrow', rw: 'Bigomba kurangira ejo', fr: 'À rendre demain', sw: 'Inatakiwa kesho' },
 
   // ---- audit trail field labels --------------------------------------------
   'trail.approvedBudget': { en: 'Budget', rw: 'Ingengo y’imari', fr: 'Budget', sw: 'Bajeti' },
@@ -1538,7 +1540,16 @@ const STRINGS = {
   'home.toCheckHeading': { en: 'Work to check ({count})', rw: 'Imirimo yo kugenzura ({count})', fr: 'Travail à vérifier ({count})', sw: 'Kazi ya kukagua ({count})' },
   'home.tileManagerChecks': { en: 'Waiting for a project manager’s check', rw: 'Bitegereje igenzura ry’umuyobozi w’umushinga', fr: 'En attente de la vérification d’un chef de projet', sw: 'Inasubiri ukaguzi wa meneja wa mradi' },
   'gm.tileFinalChecks': { en: 'Waiting for the Director’s final check', rw: 'Bitegereje igenzura rya nyuma ry’Umuyobozi', fr: 'En attente de la vérification finale du Directeur', sw: 'Inasubiri ukaguzi wa mwisho wa Mkurugenzi' },
-  'history.Checked by manager': { en: 'Checked by the project manager', rw: 'Byagenzuwe n’umuyobozi w’umushinga', fr: 'Vérifié par le chef de projet', sw: 'Imekaguliwa na meneja wa mradi' }
+  'history.Checked by manager': { en: 'Checked by the project manager', rw: 'Byagenzuwe n’umuyobozi w’umushinga', fr: 'Vérifié par le chef de projet', sw: 'Imekaguliwa na meneja wa mradi' },
+  // ---- easy to use: a team member's task, a manager's day ----
+  'simple.stepStart': { en: 'Start', rw: 'Tangira', fr: 'Commencer', sw: 'Anza' },
+  'simple.stepPhoto': { en: 'Photo', rw: 'Ifoto', fr: 'Photo', sw: 'Picha' },
+  'simple.stepFinish': { en: 'Finished', rw: 'Byarangiye', fr: 'Terminé', sw: 'Imekamilika' },
+  'simple.sentForCheck': { en: 'Sent. Your manager will check it.', rw: 'Byoherejwe. Umuyobozi wawe azabigenzura.', fr: 'Envoyé. Votre responsable va le vérifier.', sw: 'Imetumwa. Meneja wako ataikagua.' },
+  'simple.dueBy': { en: 'Finish by {date}', rw: 'Rangiza bitarenze {date}', fr: 'À terminer avant le {date}', sw: 'Maliza kabla ya {date}' },
+  'simple.more': { en: 'More', rw: 'Ibindi', fr: 'Plus', sw: 'Zaidi' },
+  'next.underwayTextSimple': { en: 'Take a photo of the work. When it is finished, press “I have finished”.', rw: 'Fata ifoto y’umurimo. Nurangiza, kanda “Narangije”.', fr: 'Prenez une photo du travail. Quand il est fini, appuyez sur « J’ai terminé ».', sw: 'Piga picha ya kazi. Ukimaliza, bonyeza “Nimemaliza”.' },
+  'plan.writeToday': { en: 'Write today’s work', rw: 'Andika akazi k’uyu munsi', fr: 'Écrire le travail du jour', sw: 'Andika kazi ya leo' }
 };
 
 // A missing language falls back to English, and an unknown key to itself, so a

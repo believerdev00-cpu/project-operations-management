@@ -4,7 +4,7 @@ import { OTHER_CATEGORY, categoriesForOperation } from '../shared/categories.js'
 import { DAY_COLUMNS } from '../shared/dailyReport.js';
 import { displayLanguage, fill, useI18n } from './i18n.js';
 import { EvidenceList, EvidenceUpload, categoryLabel, trailActionLabel } from './ActivityReview.jsx';
-import { DetailView, Fact, useBusy, useDialog } from './ui.jsx';
+import { ActionIcon, DetailView, Fact, useBusy, useDialog } from './ui.jsx';
 import { formatDate, formatUsd, todayLocal } from './format.js';
 import { ExpensePanel } from './ExpensePanel.jsx';
 import { FilePicker, activityJourney, formatLocal, journeyLabel, journeyTone, nextAction } from './journey.jsx';
@@ -1122,7 +1122,7 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
 
     {/* Started: the day's report, at the top, because that is what the manager
         came here to do. */}
-    {started && canWork && open && !finished && <form className="decision-form day-form" onSubmit={submit}>
+    {started && canWork && open && !finished && <form id="day-form" className="decision-form day-form" onSubmit={submit}>
       <h3 className="form-section-title">{t('plan.dailyReport')}</h3>
       <p className="field-hint">{t('plan.dailyReportHint')}</p>
       {/* The fields run in DAY_COLUMNS order under the same headers the plan's
@@ -1857,6 +1857,15 @@ function PlanDetail({
         Director uses to run the organisation. The twelve-figure grid below is
         the Director's: committed, free to plan, work done, expenses without
         evidence are the review, not the job. */}
+    {/* The one thing a manager comes here to do, first and large: write down
+        today's work. It jumps to the form (or to Start, on a month not begun)
+        further down, below the month's objectives. */}
+    {canWorkMonth && open && <button type="button" className="primary-btn big-action plan-write-today" onClick={() => {
+      const target = document.getElementById('day-form') || document.querySelector('.month-start, .month-submit');
+      target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      target?.querySelector('input, textarea, select, button')?.focus({ preventScroll: true });
+    }}><ActionIcon name="write" />{t('plan.writeToday')}</button>}
+
     {!isDirector && <div className="detail-facts manager-facts">
       <Fact label={t('table.status')} value={<span className={`status-badge ${planTone(plan.status)}`}>{t(`monthly.planStatus.${plan.status}`)}</span>} />
       <Fact label={t('monthly.month')} value={fill(t('plan.period'), {

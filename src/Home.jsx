@@ -3,6 +3,7 @@ import { BUSINESS_OPERATIONS, operationName, operationsOf, worksIn } from '../sh
 import { fill, useI18n } from './i18n.js';
 import { MoneyBar, activityJourney, journeyLabel, journeyTone, nextAction } from './journey.jsx';
 import { todayLocal } from './format.js';
+import { ActionIcon, STEP_ICONS } from './ui.jsx';
 
 // How many of the newest manager-raised activities the Director's Home lists.
 const LATEST_FROM_MANAGERS = 5;
@@ -740,8 +741,8 @@ export function WorkList({ items, user, t, language, onOpen, onStart, busy }) {
         </button>
         {!step.done && <div className="work-card-do">
           {oneTap
-            ? <button type="button" className="primary-btn" disabled={busy} onClick={() => onStart(activity)}>{step.label}</button>
-            : <button type="button" className="primary-btn" onClick={() => onOpen(activity.id)}>{step.label}</button>}
+            ? <button type="button" className="primary-btn big-action" disabled={busy} onClick={() => onStart(activity)}><ActionIcon name="start" />{step.label}</button>
+            : <button type="button" className="primary-btn big-action" onClick={() => onOpen(activity.id)}><ActionIcon name={STEP_ICONS[step.key]} />{step.label}</button>}
         </div>}
       </li>;
     })}
