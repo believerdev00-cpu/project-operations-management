@@ -61,6 +61,11 @@ check(`${new Set(literal).size} literal keys all defined`, undefinedKeys.length 
 // first (`const key = \`trail.${field}\``), which a t(...)-anchored pattern
 // would miss and report as an unused family.
 const templates = [...allSource.matchAll(/`([a-zA-Z][a-zA-Z.]*)\.\$\{/g)].map((m) => m[1]);
+// Keys built by gluing a value straight onto a dotted name, with no dot
+// between: t(`form.priority${level}`) reaches form.priorityLow/Medium/High.
+// Missing this pattern let three keys still in use be reported -- and
+// deleted -- as unused, and the screen printed "form.priorityMedium".
+const gluedTemplates = [...allSource.matchAll(/`([a-zA-Z]+\.[a-zA-Z.]*[a-zA-Z])\$\{/g)].map((m) => m[1]);
 const badPrefixes = [...new Set(templates)].filter(
   (prefix) => !i18n.translationKeys().some((key) => key.startsWith(`${prefix}.`))
 );
@@ -78,6 +83,8 @@ const FAMILIES = {
   'estatus.': ['Pending', 'Partial', 'Complete'],
   'cost.': ['transport', 'fuel', 'accommodation', 'meals', 'handling', 'other'],
   'pmethod.': ['Cash', 'Bank Transfer', 'Mobile Money', 'Cheque', 'Credit', 'Other'],
+  // Glued, not dotted: t(`form.priority${level}`) in MonthlyPlans.jsx.
+  'form.priority': ['Low', 'Medium', 'High'],
   'monthly.planStatus.': ['Draft', 'Confirmed', 'In Progress', 'Completed', 'Closed'],
   'day.': DAY_COLUMNS,
   'monthend.status.': ['Submitted', 'Accepted', 'Returned'],
@@ -101,7 +108,8 @@ const usedSomewhere = (key) => {
   if (allSource.includes(`'${key}'`)) return true;
   // Reached through a template: t(`status.${...}`) covers every status.* key.
   const prefix = key.slice(0, key.lastIndexOf('.') + 1);
-  return templates.some((template) => `${template}.` === prefix);
+  if (templates.some((template) => `${template}.` === prefix)) return true;
+  return gluedTemplates.some((template) => key.startsWith(template) && key.length > template.length);
 };
 const unused = i18n.translationKeys().filter((key) => !usedSomewhere(key));
 check(`no unused keys`, unused.length === 0, unused.join(', '));

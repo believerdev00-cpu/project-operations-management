@@ -285,6 +285,9 @@ const STRINGS = {
   'form.allStatuses': { en: 'All statuses', rw: 'Aho bigeze hose', fr: 'Tous les statuts', sw: 'Hali zote' },
   'form.allRoles': { en: 'All roles', rw: 'Inshingano zose', fr: 'Tous les rôles', sw: 'Majukumu yote' },
   'form.nobodyYet': { en: 'Nobody yet', rw: 'Nta wundi', fr: 'Personne pour l’instant', sw: 'Hakuna bado' },
+  'form.priorityLow': { en: 'Low', rw: 'Bike', fr: 'Faible', sw: 'Chini' },
+  'form.priorityMedium': { en: 'Medium', rw: 'Biringaniye', fr: 'Moyenne', sw: 'Wastani' },
+  'form.priorityHigh': { en: 'High', rw: 'Byinshi', fr: 'Élevée', sw: 'Juu' },
   'form.searchProjects': { en: 'Search projects', rw: 'Shakisha imishinga', fr: 'Rechercher des projets', sw: 'Tafuta miradi' },
   'form.searchUsers': { en: 'Search users', rw: 'Shakisha abakoresha', fr: 'Rechercher des utilisateurs', sw: 'Tafuta watumiaji' },
 
