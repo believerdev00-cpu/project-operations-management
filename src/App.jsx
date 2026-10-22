@@ -30,7 +30,7 @@ import ActivityReview, {
   ACTIVITY_STATUSES, MIN_CORRECTION_NOTE, approvalTone, approverName, categoryLabel,
   deadlineNote, formatDate, statusTone
 } from './ActivityReview.jsx';
-import { formatUsd } from './format.js';
+import { DATE_STYLE, dateLocale, formatUsd } from './format.js';
 import {
   ALL_OPERATIONS, DetailView, DialogProvider, ErrorBoundary, MINIMUM_PASSWORD_LENGTH, OperationChecks, PHONE_QUERY, buildHash, trapFocus, useBusy, useDialog,
   useHashRoute, useMediaQuery, useScrollLock
@@ -104,7 +104,7 @@ function formatRwf(value) {
 }
 
 function formatShortDate(value) {
-  return value ? new Date(value).toLocaleDateString(displayLanguage()) : '—';
+  return value ? new Date(value).toLocaleDateString(dateLocale(displayLanguage()), DATE_STYLE) : '—';
 }
 
 function round2(value) {
@@ -2021,6 +2021,18 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     }
   };
 
+  // Opening Reports shows this week's report straight away, rather than an
+  // empty page waiting for a press on Generate. Once per visit to the page;
+  // changing the dates or the operation still needs Generate.
+  const reportOpenedOnce = useRef(false);
+  useEffect(() => {
+    if (view !== 'reports') { reportOpenedOnce.current = false; return; }
+    if (reportOpenedOnce.current || report || reportBusy) return;
+    reportOpenedOnce.current = true;
+    requestReport();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
+
   // The export runs the same scoped query on the server, so a manager's file
   // holds their own working area and nothing more -- and it is the query the
   // report on screen came from, so the file matches what is being read.
@@ -2317,6 +2329,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       </DetailView>}
 
       {!recordOnly && <><section className="toolbar-row"><div className="filter-group">
+        {user.role !== 'staff' && <>
         <label className="sr-only" htmlFor="activity-status-filter">{t('table.status')}</label>
         <select id="activity-status-filter" value={activityStatusFilter} onChange={(event) => setActivityStatusFilter(event.target.value)}>
           <option value="All">{t('form.allStatuses')}</option>
@@ -2337,6 +2350,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         </select>
         <label className="sr-only" htmlFor="activity-project-filter">{t('field.project')}</label>
         <select id="activity-project-filter" value={selectedProjectId} onChange={(event) => setSelectedProjectId(event.target.value)}><option value="">{t('form.allProjects')}</option>{projects.filter((project) => !activityOperation || project.sector === activityOperation).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
+        </>}
         <label className="sr-only" htmlFor="activity-search">{t('form.searchActivities')}</label>
         <input id="activity-search" type="search" placeholder={t('form.searchActivities')} value={activitySearch} onChange={(event) => setActivitySearch(event.target.value)} />
       </div></section>
@@ -2349,6 +2363,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
             : <ActivityTable
               activities={registerPage.items}
               isDirector={isDirector}
+              own={user.role === 'staff'}
               openId={activeRouteActivity}
               onOpen={openActivity}
               empty={t('empty.noActivitiesMatch')}
@@ -2440,6 +2455,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       people={people}
       rate={rate}
       planId={routeId}
+      startCreating={view === 'monthly' && route.query.get('filter') === 'create'}
       onStartWork={(activity) => changeActivityStatus(activity, 'In Progress')}
       onOpenActivity={openActivity}
       onOpenPlan={openPlanRoute}
@@ -2693,25 +2709,33 @@ function ProjectTable({ projects, managers, isDirector, busy, onShowActivities, 
   </tbody></table></div> : <EmptyState>{empty}</EmptyState>;
 }
 
-function ActivityTable({ activities, isDirector, openId, onOpen, empty }) {
+// `own` is a team member's list of their own work: the "Assigned to" column
+// would name them on every row, so it says when each is due instead.
+function ActivityTable({ activities, isDirector, own = false, openId, onOpen, empty }) {
   const t = useT();
   return activities.length ? <div className="table-wrap"><table className="card-table"><thead><tr>
-    <th>{t('table.activity')}</th><th>{t('table.category')}</th><th>{t('field.activityDate')}</th><th>{t('activities.originalBudget')}</th><th>{t('approval.approved')}</th><th>{t('activities.adjustment')}</th><th>{t('table.status')}</th><th>{t('field.evidence')}</th><th>{t('people.requestedBy')}</th><th>{t('people.assignedTo')}</th><th>{t('table.actions')}</th>
+    <th>{t('table.activity')}</th><th>{t('table.category')}</th><th>{t('field.activityDate')}</th><th>{t('activities.originalBudget')}</th><th>{t('approval.approved')}</th><th>{t('activities.adjustment')}</th><th>{t('table.status')}</th><th>{t('field.evidence')}</th><th>{t('people.requestedBy')}</th><th>{own ? t('table.deadline') : t('people.assignedTo')}</th><th>{t('table.actions')}</th>
   </tr></thead><tbody>
     {activities.map((activity) => {
-      const awaiting = activity.status === 'Pending Approval' || (activity.completionSubmittedAt && activity.status !== 'Completed');
+      // Work still with the project manager's check already says so in its badge;
+      // "Sent for final check" under it would contradict it.
+      const withManager = activity.completionCheckerId && !activity.managerCheckedAt;
+      const awaiting = activity.status === 'Pending Approval' || (activity.completionSubmittedAt && activity.status !== 'Completed' && !withManager);
       const due = deadlineNote(activity, displayLanguage());
       return <tr key={activity.id} className={activity.id === openId ? 'row-selected' : undefined}>
         <td className="card-title-cell"><strong>{activity.activity}</strong><small>{activity.description || t('review.noDescription')}</small></td>
         <td className="card-optional" data-label={t('table.category')}>{categoryLabel(activity.category, t)}</td>
         <td className="card-optional" data-label={t('field.activityDate')}>{activity.scheduledFor ? formatDate(activity.scheduledFor) : <span className="muted-cell">&mdash;</span>}</td>
-        <td className="card-optional" data-label={t('activities.originalBudget')}>{formatUsd(activity.requestedBudget)}</td>
+        {/* Work the Director handed out was never asked for, so it has no
+            original figure and no "adjustment" -- showing $0.00 then the whole
+            budget as a red increase read as an overspend. */}
+        <td className="card-optional" data-label={t('activities.originalBudget')}>{Number(activity.requestedBudget) ? formatUsd(activity.requestedBudget) : <span className="muted-cell">&mdash;</span>}</td>
         {/* In the local currencies as well, at the rate the record carries. */}
         <td data-label={t('approval.approved')}>{activity.approvedBudget === null
           ? <span className="muted-cell">{fill(t('activities.askedForAmount'), { amount: formatUsd(activity.requestedBudget) })}</span>
           : <>{formatUsd(activity.approvedBudget)}<small>{localPair(activity.approvedBudget, ratesOf(activity))}</small></>}</td>
-        <td data-label={t('activities.adjustment')} className={activity.budgetAdjustment ? 'card-optional over-budget' : 'card-optional'}>
-          {activity.budgetAdjustment ? `${activity.budgetAdjustment > 0 ? '+' : ''}${formatUsd(activity.budgetAdjustment)}` : <span className="muted-cell">&mdash;</span>}
+        <td data-label={t('activities.adjustment')} className={activity.budgetAdjustment && Number(activity.requestedBudget) ? 'card-optional over-budget' : 'card-optional'}>
+          {activity.budgetAdjustment && Number(activity.requestedBudget) ? `${activity.budgetAdjustment > 0 ? '+' : ''}${formatUsd(activity.budgetAdjustment)}` : <span className="muted-cell">&mdash;</span>}
         </td>
         {/* A pending record always names the person it is pending on, so the
             register never presents "Pending" as if anyone could act on it. */}
@@ -2723,11 +2747,15 @@ function ActivityTable({ activities, isDirector, openId, onOpen, empty }) {
         <td className="card-optional" data-label={t('people.requestedBy')}>{activity.createdByName || <span className="muted-cell">&mdash;</span>}</td>
         {/* Who the work sits with, and how its deadline stands. An overdue
             record is flagged here, not only inside the review screen. */}
-        <td data-label={t('people.assignedTo')}>{activity.assignedToName
+        {own
+          ? <td data-label={t('table.deadline')}>{activity.deadline
+            ? <><strong>{formatDate(activity.deadline)}</strong>{due && due.tone !== 'ok' && <small className={`deadline-flag deadline-${due.tone}`}>{due.text}</small>}</>
+            : <span className="muted-cell">&mdash;</span>}</td>
+          : <td data-label={t('people.assignedTo')}>{activity.assignedToName
           ? <><strong>{activity.assignedToName}</strong>{activity.deadline && <small className={due && due.tone !== 'ok' ? `deadline-flag deadline-${due.tone}` : undefined}>
             {formatDate(activity.deadline)}{due && due.tone !== 'ok' ? ` · ${due.text}` : ''}
           </small>}</>
-          : <span className="muted-cell">{t('table.unassigned')}</span>}</td>
+          : <span className="muted-cell">{t('table.unassigned')}</span>}</td>}
         <td className="card-actions">
           <button className="text-btn" onClick={() => onOpen(activity.id)} type="button">{isDirector ? t('approval.review') : t('action.open')}</button>
         </td>

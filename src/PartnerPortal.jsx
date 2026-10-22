@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { operationName } from '../shared/businessOperations.js';
 import { categoryLabel } from './ActivityReview.jsx';
+import { DATE_STYLE, dateLocale } from './format.js';
 
 // External Business Partner / Business Operation Access.
 //
@@ -34,7 +35,7 @@ function formatDate(value, language) {
   const text = String(value).slice(0, 10);
   const [year, month, day] = text.split('-').map(Number);
   if (!year || !month || !day) return text;
-  return new Date(year, month - 1, day).toLocaleDateString(language);
+  return new Date(year, month - 1, day).toLocaleDateString(dateLocale(language), DATE_STYLE);
 }
 
 function formatDateTime(value, language) {

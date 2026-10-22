@@ -4,7 +4,7 @@ import { ExpensePanel } from './ExpensePanel.jsx';
 import { FilePicker, Journey, MoneyBar, NextStep, Section, activityJourney, goToSection } from './journey.jsx';
 import { ActionIcon, Fact } from './ui.jsx';
 import { worksIn } from '../shared/businessOperations.js';
-import { formatUsd } from './format.js';
+import { DATE_STYLE, dateLocale, formatUsd } from './format.js';
 
 // The Director's review screen for one activity, and the same record as the
 // manager sees it -- whether they raised it themselves or the Director handed
@@ -145,7 +145,7 @@ export function formatDate(value) {
   const parts = dateParts(value);
   if (!parts) return value ? String(value) : '—';
   return new Date(parts[0], parts[1] - 1, parts[2])
-    .toLocaleDateString(displayLanguage(), { day: 'numeric', month: 'long', year: 'numeric' });
+    .toLocaleDateString(dateLocale(displayLanguage()), DATE_STYLE);
 }
 
 // How the deadline should read on screen: overdue, close, or simply a date.
@@ -489,7 +489,7 @@ export function ActivityReview({
       extra={<p className="money-note">
         {activity.approvedBudget === null
           ? null
-          : activity.budgetAdjustment
+          : activity.budgetAdjustment && Number(activity.requestedBudget)
             ? fill(t('money.changedFrom'), { amount: formatUsd(activity.requestedBudget), change: `${activity.budgetAdjustment > 0 ? '+' : ''}${formatUsd(activity.budgetAdjustment)}` })
             : null}
       </p>}

@@ -424,6 +424,7 @@ function TeamCard({ team, open, people, user, canChangeSupervisor, t, language, 
 function CreateTeamForm({ projects, people, canChooseSupervisor, t, language, busy, onCreate }) {
   const empty = { projectId: projects[0]?.id || '', name: '', description: '', supervisorId: '' };
   const [form, setForm] = useState(empty);
+  const [open, setOpen] = useState(false);
   const project = projects.find((row) => row.id === form.projectId);
   const supervisors = people.filter((person) => person.role === 'manager' && person.status === 'active'
     && project && (person.coversAllSectors || worksIn(person, project.sector)));
@@ -436,8 +437,14 @@ function CreateTeamForm({ projects, people, canChooseSupervisor, t, language, bu
       description: form.description,
       ...(canChooseSupervisor && form.supervisorId ? { supervisorId: Number(form.supervisorId) } : {})
     });
-    if (saved) setForm({ ...empty, projectId: form.projectId });
+    if (saved) { setForm({ ...empty, projectId: form.projectId }); setOpen(false); }
   };
+
+  if (!open) {
+    return <div className="button-row create-team-open">
+      <button className="secondary-btn" type="button" onClick={() => setOpen(true)}>{t('org.createTeam')}</button>
+    </div>;
+  }
 
   return <form className="form-panel" onSubmit={submit}>
     <div className="panel-header"><div>
@@ -468,7 +475,10 @@ function CreateTeamForm({ projects, people, canChooseSupervisor, t, language, bu
         <textarea rows="2" maxLength={2000} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
       </label>
     </div>
-    <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy || !form.name.trim() || !form.projectId}>{t('org.createTeam')}</button></div>
+    <div className="form-submit-bar">
+      <button className="primary-btn" type="submit" disabled={busy || !form.name.trim() || !form.projectId}>{t('org.createTeam')}</button>
+      <button className="text-btn" type="button" onClick={() => setOpen(false)}>{t('action.cancel')}</button>
+    </div>
   </form>;
 }
 

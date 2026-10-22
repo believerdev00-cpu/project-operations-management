@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { BUSINESS_OPERATIONS, operationName, operationsOf, worksIn } from '../shared/businessOperations.js';
 import { fill, useI18n } from './i18n.js';
 import { MoneyBar, activityJourney, journeyLabel, journeyTone, nextAction } from './journey.jsx';
-import { todayLocal } from './format.js';
+import { DATE_STYLE, dateLocale, todayLocal } from './format.js';
 import { ActionIcon, STEP_ICONS } from './ui.jsx';
 
 // How many of the newest manager-raised activities the Director's Home lists.
@@ -91,7 +91,6 @@ export default function Home({
   const { language, t } = useI18n();
   const isDirector = user.role === 'super-admin';
   const isManager = user.role === 'manager';
-  const approves = isDirector || isManager;
   // A team member's home is the list of their work and nothing else. It used to
   // be the same page as everybody's: one lonely tile under a "To do" heading,
   // then the whole business operation's approved budget and spend -- figures
@@ -177,30 +176,10 @@ export default function Home({
   };
 
   const counts = summary || {};
+  // The month at a glance: how many months are live and how much of their
+  // work is moving or finished. What needs acting on is not repeated here --
+  // it is said once, as a sentence, in "Needs your attention" above.
   const tiles = [
-    approves && {
-      id: 'approvals', count: approvalCount, tone: approvalCount ? 'urgent' : 'calm',
-      title: t('home.tileApprovals'),
-      onClick: () => onGo('approval-queue')
-    },
-    !isDirector && {
-      id: 'work', count: counts.myOpenWork || 0, tone: counts.myOpenWork ? 'active' : 'calm',
-      title: t('home.tileWork'),
-      onClick: () => onGo('activities', 'work')
-    },
-    (isDirector || user.role === 'manager') && {
-      id: 'checks', count: counts.finalChecksWaiting || 0, tone: counts.finalChecksWaiting ? 'active' : 'calm',
-      title: isDirector ? t('home.tileChecks') : t('home.tileChecksManager'),
-      onClick: () => onGo('activities', 'final-check')
-    },
-    isDirector && {
-      id: 'reports', count: counts.monthEndReportsWaiting || 0, tone: counts.monthEndReportsWaiting ? 'active' : 'calm',
-      title: t('home.tileMonthEnd'),
-      onClick: () => onGo('approval-queue')
-    },
-    // The organisation at a glance (section 1 and 11 of the brief): how many
-    // months are live, how much of their work is moving, finished, or late.
-    // The counts are the objectives on every open month, from /api/summary.
     isDirector && {
       id: 'plans', count: counts.activePlans || 0, tone: 'calm',
       title: t('home.tileActivePlans'),
@@ -216,23 +195,22 @@ export default function Home({
       title: t('home.tileCompleted'),
       onClick: () => onGo('monthly')
     },
-    isDirector && {
-      id: 'overdue', count: counts.overdueWork || 0, tone: counts.overdueWork ? 'urgent' : 'calm',
-      title: t('home.tileOverdue'),
-      onClick: () => onGo('monthly')
-    },
   ].filter(Boolean);
 
   // "Needs your attention": the same counts as sentences, each one a link. A
   // Director who reads one line and presses it has done the whole dashboard.
   const attention = isDirector ? [
-    counts.monthEndReportsWaiting > 0 && { id: 'reports', text: fill(t('home.attentionReports'), { count: counts.monthEndReportsWaiting }), go: () => onGo('approval-queue') },
-    counts.finalChecksWaiting > 0 && { id: 'checks', text: fill(t('home.attentionChecks'), { count: counts.finalChecksWaiting }), go: () => onGo('activities', 'final-check') },
-    approvalCount > 0 && { id: 'approvals', text: fill(t('home.attentionApprovals'), { count: approvalCount }), go: () => onGo('approval-queue') },
-    counts.overdueWork > 0 && { id: 'overdue', text: fill(t('home.attentionOverdue'), { count: counts.overdueWork }), go: () => onGo('monthly') },
-    counts.budgetChangesPending > 0 && { id: 'budget', text: fill(t('home.attentionBudget'), { count: counts.budgetChangesPending }), go: () => onGo('activities') },
-    counts.activePlans > 0 && { id: 'active', text: fill(t('home.attentionActive'), { count: counts.activePlans }), go: () => onGo('monthly') }
+    counts.monthEndReportsWaiting > 0 && { id: 'reports', text: fill(t(counts.monthEndReportsWaiting === 1 ? 'home.attentionReportsOne' : 'home.attentionReports'), { count: counts.monthEndReportsWaiting }), go: () => onGo('approval-queue') },
+    counts.finalChecksWaiting > 0 && { id: 'checks', text: fill(t(counts.finalChecksWaiting === 1 ? 'home.attentionChecksOne' : 'home.attentionChecks'), { count: counts.finalChecksWaiting }), go: () => onGo('activities', 'final-check') },
+    approvalCount > 0 && { id: 'approvals', text: fill(t(approvalCount === 1 ? 'home.attentionApprovalsOne' : 'home.attentionApprovals'), { count: approvalCount }), go: () => onGo('approval-queue') },
+    counts.overdueWork > 0 && { id: 'overdue', text: fill(t(counts.overdueWork === 1 ? 'home.attentionOverdueOne' : 'home.attentionOverdue'), { count: counts.overdueWork }), go: () => onGo('monthly') },
+    counts.budgetChangesPending > 0 && { id: 'budget', text: fill(t(counts.budgetChangesPending === 1 ? 'home.attentionBudgetOne' : 'home.attentionBudget'), { count: counts.budgetChangesPending }), go: () => onGo('activities') }
   ].filter(Boolean) : [];
+
+  // The newest work managers added, less anything already shown above it as a
+  // decision or a final check -- one record, one place on the page.
+  const shownAbove = new Set([...(approvalItems || []), ...(finalChecks || [])].map((item) => item.id));
+  const latestElsewhere = latestFromManagers.filter((item) => !shownAbove.has(item.id));
 
   // What the system told this manager and they have not opened yet, shown as
   // cards at the top of their home: a new plan, work returned, a report
@@ -246,7 +224,9 @@ export default function Home({
     ...(isManager ? ['plan_assigned', 'report_returned', 'report_accepted', 'plan_changed'] : []),
     ...(isManager || isWorker ? ORGANIZATION_ALERTS : [])
   ];
-  const alerts = (notices?.items || []).filter((notice) => !notice.read && alertKinds.includes(notice.kind)).slice(0, 4);
+  const listedToCheck = new Set(toCheck.map((item) => item.id));
+  const alerts = (notices?.items || []).filter((notice) => !notice.read && alertKinds.includes(notice.kind)
+    && !(notice.kind === 'work_to_check' && listedToCheck.has(notice.activityId))).slice(0, 4);
 
 
   // The operations this account covers: all four for the Director or an
@@ -317,13 +297,9 @@ export default function Home({
           workflow. A manager keeps their own two. */}
       {isDirector
         ? <div className="home-quick home-quick-director">
-          <button className="primary-btn" type="button" onClick={() => onGo('monthly')}>{t('home.createPlan')}</button>
+          <button className="primary-btn" type="button" onClick={() => onGo('monthly', 'create')}>{t('home.createPlan')}</button>
           <button className="secondary-btn" type="button" onClick={() => onGo('approval-queue')}>{t('home.reviewWork')}</button>
-          <button className="secondary-btn" type="button" onClick={() => onGo('users')}>{t('home.viewManagers')}</button>
-          <button className="secondary-btn" type="button" onClick={() => onGo('reports')}>{t('home.viewReports')}</button>
-          <button className="secondary-btn" type="button" onClick={() => onGo('monthly')}>{t('home.viewBudgets')}</button>
-          {canAddActivity && <button className="text-btn" type="button" onClick={onAddActivity}>{t('action.assignActivity')}</button>}
-          {canAddMovement && <button className="text-btn" type="button" onClick={onAddMovement}>{t('home.newTrip')}</button>}
+          {canAddActivity && <button className="secondary-btn" type="button" onClick={onAddActivity}>{t('action.assignActivity')}</button>}
         </div>
         : !isManager && (canAddActivity || canAddMovement) && <div className="home-quick">
           {canAddActivity && <button className="primary-btn" type="button" onClick={onAddActivity}>{t('action.raiseActivity')}</button>}
@@ -418,8 +394,10 @@ export default function Home({
             once the month is done -- hand it in. */}
         {!closed && (submitted
           ? <p className="my-month-note">{t('monthend.waitingReview')}</p>
-          : <button className="primary-btn my-month-record" type="button" onClick={() => onOpenPlan(myMonth.id)}>
-            {allDone || myMonth.status === 'Completed' ? t('home.actionSubmit') : t('home.recordTodaysWork')}
+          : <button className="primary-btn big-action my-month-record" type="button" onClick={() => onOpenPlan(myMonth.id)}>
+            {allDone || myMonth.status === 'Completed'
+              ? <><ActionIcon name="finish" />{t('home.actionSubmit')}</>
+              : <><ActionIcon name="write" />{t('plan.writeToday')}</>}
           </button>)}
       </section>;
     })}
@@ -457,10 +435,10 @@ export default function Home({
       <WorkList items={finalChecks} user={user} t={t} language={language} onOpen={onOpenActivity} />
     </>}
 
-    {isDirector && latestFromManagers.length > 0 && <>
+    {isDirector && latestElsewhere.length > 0 && <>
       <h3 className="home-heading">{t('home.latestFromManagers')}</h3>
       <p className="field-hint">{t('home.latestFromManagersHint')}</p>
-      <WorkList items={latestFromManagers} user={user} t={t} language={language} onOpen={onOpenActivity} />
+      <WorkList items={latestElsewhere} user={user} t={t} language={language} onOpen={onOpenActivity} />
     </>}
 
     {/* WHAT HAPPENED. The Director does not ask a manager how the month is
@@ -667,7 +645,7 @@ export function ReviewQueue({ fetchJson, reloadKey, user, onOpenActivity, onOpen
             <span className="work-card-text">
               <strong>{operationName(plan.operation, language)} · {monthLabel(plan.month, language)}</strong>
               <small>{plan.managerName || '—'}
-                {plan.report?.submittedAt ? ` · ${fill(t('home.submittedOn'), { date: new Date(plan.report.submittedAt).toLocaleDateString(language) })}` : ''}
+                {plan.report?.submittedAt ? ` · ${fill(t('home.submittedOn'), { date: new Date(plan.report.submittedAt).toLocaleDateString(dateLocale(language), DATE_STYLE) })}` : ''}
                 {plan.overallProgress !== null && plan.overallProgress !== undefined ? ` · ${plan.overallProgress}%` : ''}</small>
             </span>
             <span className="status-badge tone-waiting">{t('monthend.status.Submitted')}</span>

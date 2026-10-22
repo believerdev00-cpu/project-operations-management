@@ -5,7 +5,7 @@ import { DAY_COLUMNS } from '../shared/dailyReport.js';
 import { displayLanguage, fill, useI18n } from './i18n.js';
 import { EvidenceList, EvidenceUpload, categoryLabel, trailActionLabel } from './ActivityReview.jsx';
 import { ActionIcon, DetailView, Fact, useBusy, useDialog } from './ui.jsx';
-import { formatDate, formatUsd, todayLocal } from './format.js';
+import { DATE_STYLE, dateLocale, formatDate, formatUsd, todayLocal } from './format.js';
 import { ExpensePanel } from './ExpensePanel.jsx';
 import { FilePicker, activityJourney, formatLocal, journeyLabel, journeyTone, nextAction } from './journey.jsx';
 import { objectiveState, objectiveStateTone } from './Home.jsx';
@@ -92,7 +92,7 @@ const emptyActivity = {
 
 export default function MonthlyPlans({
   user, fetchJson, upload, onOpenFile, managers, people = [], rate = null, onStartWork, onOpenActivity,
-  planId = null, onOpenPlan, onClosePlan, onChanged, onMessage, onError
+  planId = null, onOpenPlan, onClosePlan, onChanged, onMessage, onError, startCreating = false
 }) {
   const { language, t } = useI18n();
   const dialog = useDialog();
@@ -110,6 +110,15 @@ export default function MonthlyPlans({
   // asked of the server, not picked out of the newest page of the register.
   const [offPlan, setOffPlan] = useState([]);
   const [newPlan, setNewPlan] = useState(emptyPlan);
+  // The create form is opened on purpose -- from its button, or from Home's
+  // "Create monthly plan" -- instead of sitting open above every month the
+  // Director came here to read.
+  const [creating, setCreating] = useState(startCreating);
+  useEffect(() => {
+    if (!startCreating) return;
+    setCreating(true);
+    requestAnimationFrame(() => document.getElementById('create-plan')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  }, [startCreating]);
   const [activityForm, setActivityForm] = useState(emptyActivity);
   // The day-by-day work the manager is assigning, keyed by the planned activity
   // it belongs to -- so two forms open at once cannot write into each other.
@@ -295,6 +304,7 @@ export default function MonthlyPlans({
         });
         onMessage(fill(t('msg.planCreated'), { operation: operationName(plan.operation, language), month: monthLabel(month, language) }));
         setNewPlan(emptyPlan);
+        setCreating(false);
         await load();
         onChanged?.();
         onOpenPlan?.(plan.id);
@@ -644,7 +654,11 @@ export default function MonthlyPlans({
         </table></div> : <div className="empty-state"><strong>{t('monthly.noPlans')}</strong><span>{t('table.noData')}</span></div>}
       </section>
 
-      {unplanned.length > 0 && <form className="form-panel" onSubmit={createPlan}>
+      {unplanned.length > 0 && !creating && <div className="button-row">
+        <button className="primary-btn" type="button" onClick={() => setCreating(true)}>{t('monthly.createPlan')}</button>
+      </div>}
+
+      {unplanned.length > 0 && creating && <form id="create-plan" className="form-panel" onSubmit={createPlan}>
         <div className="panel-header"><div>
           <h2>{t('monthly.createPlan')}</h2>
           <span>{monthLabel(month, language)}</span>
@@ -727,7 +741,10 @@ export default function MonthlyPlans({
         </details>
         <p className="field-hint">{t('plan.createHintObjectives')}</p>
         {!managerOptions.length && <p className="decision-hint">{t('form.noManagerCovers')}</p>}
-        <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy || !managerOptions.length}>{t('monthly.createPlan')}</button></div>
+        <div className="form-submit-bar">
+          <button className="primary-btn" type="submit" disabled={busy || !managerOptions.length}>{t('monthly.createPlan')}</button>
+          <button className="text-btn" type="button" onClick={() => setCreating(false)}>{t('action.cancel')}</button>
+        </div>
       </form>}
     </>}
 
@@ -1840,7 +1857,7 @@ function PlanDetail({
           {t('monthly.responsibleManager')}: {plan.managerName || '—'}
           {/* Who handed the month over, and when: the manager's "assigned by". */}
           {plan.assignedByName && plan.assignedAt
-            ? ` · ${fill(t('plan.assignedBy'), { name: plan.assignedByName, date: new Date(plan.assignedAt).toLocaleDateString(language) })}`
+            ? ` · ${fill(t('plan.assignedBy'), { name: plan.assignedByName, date: new Date(plan.assignedAt).toLocaleDateString(dateLocale(language), DATE_STYLE) })}`
             : plan.confirmedByName ? ` · ${t('monthly.planStatus.Confirmed')}: ${plan.confirmedByName}` : ''}
         </span>
       </div>
@@ -1925,7 +1942,9 @@ function PlanDetail({
     {/* A month with no activities on it is a heading and a budget: the manager
         opening it has nothing to do and no way to know why. Said here, where the
         Director is looking, instead of leaving them to find the form below. */}
-    {isDirector && open && !activities.length && <p className="next-step next-step-action plan-next">
+    {/* Only for a month with nothing in it at all: a month run by its
+        objectives has its work, and was told it had none. */}
+    {isDirector && open && !activities.length && !(detail.objectives || []).length && <p className="next-step next-step-action plan-next">
       <strong>{t('monthly.nextAddActivities')}</strong>
       <span>{t('monthly.nextAddActivitiesText')}</span>
     </p>}
@@ -2043,11 +2062,15 @@ function PlanDetail({
     </div>}
 
     {/* Section 10: who runs the month, and what the Director noted about it. */}
-    {isDirector && open && <form className="decision-form" onSubmit={(event) => {
+    {/* The Director's tools on an open month -- change who runs it, add a
+        planned activity, fold in approved work -- each folded under its own
+        name, so the month reads as the month and not as four forms. */}
+    {isDirector && open && <details className="form-more plan-tool">
+      <summary>{t('monthly.planSettings')}</summary>
+      <form className="decision-form" onSubmit={(event) => {
       event.preventDefault();
       if (hasSettingsChanges) onUpdatePlan(plan, settingsChanges);
     }}>
-      <h3 className="form-section-title">{t('monthly.planSettings')}</h3>
       <div className="form-grid">
         <label className="form-field"><span>{t('monthly.responsibleManager')}</span>
           <select value={settings.managerId} onChange={(event) => setSettings({ ...settings, managerId: event.target.value })}>
@@ -2091,11 +2114,12 @@ function PlanDetail({
       </div>
       {settingsChanges.managerId !== undefined && <p className="decision-hint">{t('monthly.managerChangeHint')}</p>}
       <div className="form-submit-bar"><button className="secondary-btn" type="submit" disabled={busy || !hasSettingsChanges}>{t('movement.saveChanges')}</button></div>
-    </form>}
+    </form></details>}
 
     {/* Section 1: the Director builds the month's activities. */}
-    {isDirector && open && <form className="decision-form" onSubmit={onAddActivity}>
-      <h3 className="form-section-title">{t('monthly.addActivity')}</h3>
+    {isDirector && open && <details className="form-more plan-tool">
+      <summary>{t('monthly.addActivity')}</summary>
+      <form className="decision-form" onSubmit={onAddActivity}>
       <div className="form-grid">
         <label className="form-field"><span>{t('field.activity')}</span>
           <input required maxLength="200" value={activityForm.activity} onChange={(event) => setActivityForm({ ...activityForm, activity: event.target.value })} />
@@ -2132,11 +2156,11 @@ function PlanDetail({
       </div>
       <p className="field-hint">{fill(t('monthly.freeToPlan'), { amount: formatUsd(plan.uncommittedBudget) })}</p>
       <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('monthly.addActivity')}</button></div>
-    </form>}
+    </form></details>}
 
     {/* Section 4: approved work the Director may fold into this month. */}
-    {isDirector && open && offPlanActivities.length > 0 && <>
-      <h3 className="form-section-title">{t('monthly.attachActivity')}</h3>
+    {isDirector && open && offPlanActivities.length > 0 && <details className="form-more plan-tool">
+      <summary>{fill(t('monthly.attachActivityCount'), { count: offPlanActivities.length })}</summary>
       <p className="detail-notes muted-cell">{t('monthly.offPlanHint')}</p>
       <div className="table-wrap"><table className="card-table">
         <thead><tr>
@@ -2152,7 +2176,7 @@ function PlanDetail({
           </button></td>
         </tr>)}</tbody>
       </table></div>
-    </>}
+    </details>}
 
     {/* Section 11: the manager's account of the month. */}
     <h3 className="form-section-title">{t('monthend.title')}</h3>
@@ -2235,13 +2259,15 @@ function PlanDetail({
       <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('monthend.submit')}</button></div>
     </form>}
 
-    {isDirector && <h3 className="form-section-title">{t('monthly.planHistory')}</h3>}
-    {!isDirector ? null : history.length ? <ul className="history-list">{history.map((entry) => <li key={entry.id}>
+    {isDirector && <details className="form-more plan-tool">
+      <summary>{fill(t('monthly.planHistoryCount'), { count: history.length })}</summary>
+    {history.length ? <ul className="history-list">{history.map((entry) => <li key={entry.id}>
       <strong>{trailActionLabel(entry.action, t)}</strong>
       {entry.field && <span> {planTrailValue(entry.field, entry.oldValue, t)} &rarr; {planTrailValue(entry.field, entry.newValue, t)}</span>}
       <small>{entry.actorName} · {new Date(entry.createdAt).toLocaleString(language)}</small>
       {entry.note && <small className="justification">{entry.note}</small>}
     </li>)}</ul> : <div className="empty-state"><strong>{t('empty.noHistory')}</strong><span>{t('empty.noHistoryHint')}</span></div>}
+    </details>}
   </section>;
 }
 

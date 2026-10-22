@@ -40,9 +40,21 @@ export function todayLocal() {
 // takes no language, and PartnerPortal's echoes the raw text back when it
 // cannot parse it instead of an em dash. Those differences are behaviour per
 // screen, so they were left where they are rather than quietly merged here.
+// One way to write a date on every screen: "23 Oct 2026", day first, the
+// month as a word in the reader's language. Screens used to mix "10/21/2026",
+// "October 23, 2026" and "23 Oct 2026" -- and an all-number date reads as the
+// 10th of the 21st month to anybody used to day-first dates, which is how
+// dates are written in Rwanda. English is given the day-first form for the
+// same reason; the other three languages write it that way already.
+export const DATE_STYLE = { day: 'numeric', month: 'short', year: 'numeric' };
+
+export function dateLocale(language) {
+  return language === 'en' ? 'en-GB' : language;
+}
+
 export function formatDate(value, language) {
   if (!value) return '—';
   const [year, month, day] = String(value).slice(0, 10).split('-').map(Number);
   if (!year || !month || !day) return '—';
-  return new Date(year, month - 1, day).toLocaleDateString(language);
+  return new Date(year, month - 1, day).toLocaleDateString(dateLocale(language), DATE_STYLE);
 }

@@ -3,6 +3,7 @@ import { ApprovalPanel, approverName, canApproveRecord, decisionIsOpen, formatTr
 import { displayLanguage, fill, translate, useT } from './i18n.js';
 import { BUSINESS_OPERATIONS, operationName, operationsOf, runsTrips } from '../shared/businessOperations.js';
 import { DetailView, Fact, useBusy, useDialog } from './ui.jsx';
+import { DATE_STYLE, dateLocale } from './format.js';
 import { FilePicker, Journey, MoneyBar, NextStep, Section, goToSection, journeyLabel, journeyTone, movementJourney } from './journey.jsx';
 
 // Logistics & Facilitation module.
@@ -101,7 +102,7 @@ function formatDate(value) {
   if (!value) return '—';
   const [year, month, day] = String(value).slice(0, 10).split('-').map(Number);
   if (!year || !month || !day) return '—';
-  return new Date(year, month - 1, day).toLocaleDateString(displayLanguage(), { day: '2-digit', month: 'short', year: 'numeric' });
+  return new Date(year, month - 1, day).toLocaleDateString(dateLocale(displayLanguage()), DATE_STYLE);
 }
 
 function formatDateTime(value) {
