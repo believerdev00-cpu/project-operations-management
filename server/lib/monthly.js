@@ -192,9 +192,25 @@ export function openWorkSql(values, alias = 'a', userId) {
     AND ${alias}.completion_submitted_at IS NULL)`;
 }
 
-// Finished work handed back and waiting for the Director's final check.
+// Finished work handed back and waiting for the Director's final check. A team
+// member's work reaches it only once their project manager has checked it
+// (completion_checker_id / manager_checked_at); until then it is in
+// MANAGER_CHECK_SQL instead, so the two queues never hold the same record.
 export const FINAL_CHECK_SQL = (alias = 'a') =>
-  `(${alias}.completion_submitted_at IS NOT NULL AND ${alias}.status <> 'Completed')`;
+  `(${alias}.completion_submitted_at IS NOT NULL AND ${alias}.status <> 'Completed'
+    AND (${alias}.completion_checker_id IS NULL OR ${alias}.manager_checked_at IS NOT NULL))`;
+
+// Finished work handed back by a team member and still waiting for their
+// project manager to check it.
+export const MANAGER_CHECK_SQL = (alias = 'a') =>
+  `(${alias}.completion_submitted_at IS NOT NULL AND ${alias}.status <> 'Completed'
+    AND ${alias}.completion_checker_id IS NOT NULL AND ${alias}.manager_checked_at IS NULL)`;
+
+// The same, narrowed to the one manager it is waiting on.
+export function myChecksSql(values, alias = 'a', userId) {
+  values.push(userId);
+  return `(${MANAGER_CHECK_SQL(alias)} AND ${alias}.completion_checker_id = $${values.length})`;
+}
 
 export function isLive(status) {
   return !DEAD_STATUSES.includes(status);

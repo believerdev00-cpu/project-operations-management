@@ -28,9 +28,10 @@ import {
 import { canApprove, decisionOpen, pendingForMeSql, resolveDirector, APPROVER_ROLE_LABELS } from '../lib/approvals.js';
 import { PAYMENT_METHODS } from '../db/monthlySchema.js';
 import {
-  DEAD_STATUSES, FINAL_CHECK_SQL, OVER_BUDGET_MESSAGE, canDeleteExpense, canRecordExpense, cents, openWorkSql,
-  fitsRemaining, fromCents
+  DEAD_STATUSES, FINAL_CHECK_SQL, MANAGER_CHECK_SQL, OVER_BUDGET_MESSAGE, canDeleteExpense, canRecordExpense, cents, myChecksSql,
+  openWorkSql, fitsRemaining, fromCents
 } from '../lib/monthly.js';
+import { checkerFor, personRow } from '../lib/organization.js';
 import { round2 } from '../lib/rates.js';
 import { notify, notifyDirectors } from '../lib/notifications.js';
 import { MAX_EVIDENCE_BYTES, MAX_EVIDENCE_FILES, MAX_EVIDENCE_LABEL, deleteFile, readFile, saveFile, storedFileName } from '../lib/storage.js';
@@ -264,6 +265,11 @@ export function mapActivity(row) {
     reviewedByName: row.reviewed_by_name ?? null,
     reviewedAt: row.reviewed_at ?? null,
     completionSubmittedAt: row.completion_submitted_at ?? null,
+    // A team member's finished work is checked by their project manager before
+    // the Director's final check: who that is, and whether they have.
+    completionCheckerId: row.completion_checker_id ?? null,
+    completionCheckerName: row.completion_checker_name ?? null,
+    managerCheckedAt: row.manager_checked_at ?? null,
     completedAt: row.completed_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -335,6 +341,7 @@ function mapHistory(row) {
 
 const SELECT_ACTIVITY = `
   SELECT a.*, p.name AS project_name, r.name AS reviewed_by_name, m.name AS assigned_to_name,
+         (SELECT c.name FROM users c WHERE c.id = a.completion_checker_id) AS completion_checker_name,
          COALESCE((SELECT SUM(e.amount) FROM activity_expenses e WHERE e.activity_id = a.id), 0) AS actual_spent,
          (SELECT COUNT(*) FROM activity_expenses e WHERE e.activity_id = a.id)::int AS expense_count,
          (SELECT COUNT(*) FROM activity_evidence ev WHERE ev.activity_id = a.id AND ev.evidence_type = 'payment')::int AS payment_evidence_count,
@@ -374,9 +381,13 @@ async function loadActivity(id, user) {
   // person's own approval stays readable either way, or they could be handed a
   // decision they cannot open.
   projectScope(user, 'a.project_id', values, scopeFilters, { assignedColumn: 'a.assigned_to' });
-  const scope = scopeFilters.length
-    ? `(${scopeFilters.join(' AND ')} OR ${pendingForMeSql(user, values, 'a')})`
-    : '';
+  let scope = '';
+  if (scopeFilters.length) {
+    values.push(user.id);
+    const checker = `$${values.length}`;
+    scope = `(${scopeFilters.join(' AND ')} OR ${pendingForMeSql(user, values, 'a')}
+      OR a.completion_checker_id = ${checker})`;
+  }
   const result = await pool.query(
     `${SELECT_ACTIVITY} WHERE a.id = $1${scope ? ` AND ${scope}` : ''}`,
     values
@@ -531,7 +542,7 @@ router.get('/', asyncRoute(async (req, res) => {
   // work handed back, and budget changes waiting for an answer.
   if (awaiting === 'review') {
     filters.push(`(a.status = 'Pending Approval'
-      OR (a.completion_submitted_at IS NOT NULL AND a.status <> 'Completed')
+      OR ${FINAL_CHECK_SQL('a')}
       OR EXISTS (SELECT 1 FROM activity_budget_requests b WHERE b.activity_id = a.id AND b.status = 'Pending'))`);
   }
   // Everything sitting on this manager's desk: work waiting on their approval,
@@ -547,13 +558,21 @@ router.get('/', asyncRoute(async (req, res) => {
   }
   if (awaiting === 'work') filters.push(openWorkSql(values, 'a', req.user.id));
   if (awaiting === 'final-check') filters.push(FINAL_CHECK_SQL('a'));
+  // A project manager's own queue: finished work their team members handed
+  // in, waiting for them to check. Like the approval queue, it is about the
+  // reader personally, so the scope below does not narrow it.
+  const checkQueue = awaiting === 'check';
+  if (checkQueue) filters.push(myChecksSql(values, 'a', req.user.id));
+  // Everything still waiting for a manager's check, in the reader's scope --
+  // what the General Manager follows.
+  if (awaiting === 'manager-check') filters.push(MANAGER_CHECK_SQL('a'));
   // Approved, live work that no monthly plan has taken in yet: what the Director
   // may attach to a month. Asked of the server rather than filtered out of the
   // newest page of the register, which silently missed anything older.
   if (unplanned === '1' || unplanned === 'true') {
     filters.push(`(a.monthly_plan_id IS NULL AND a.approval_status = 'approved' AND a.status NOT IN ('Rejected', 'Cancelled'))`);
   }
-  if (!approvalQueue) {
+  if (!approvalQueue && !checkQueue) {
     managerScope(req.user, 'a.sector', values, filters);
     projectScope(req.user, 'a.project_id', values, filters, { assignedColumn: 'a.assigned_to' });
   }
@@ -1641,13 +1660,20 @@ router.post('/:id/completion', asyncRoute(async (req, res) => {
   }
 
   const note = optionalText(req.body?.note, 2000);
+  // A team member's finished work goes to the project manager above them
+  // before the Director sees it (checkerFor). Work a manager hands back, or a
+  // team member with nobody to check it, goes straight to the Director.
+  const checker = req.user.role === 'staff'
+    ? await checkerFor(pool, await personRow(pool, req.user.id), existing.project_id)
+    : null;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const handedBack = await client.query(
-      `UPDATE activities SET completion_submitted_at = NOW(), evidence_status = 'Complete', updated_at = NOW()
+      `UPDATE activities SET completion_submitted_at = NOW(), evidence_status = 'Complete',
+              completion_checker_id = $3, manager_checked_at = NULL, manager_checked_by = NULL, updated_at = NOW()
        WHERE id = $1 AND status = $2::text AND completion_submitted_at IS NULL`,
-      [existing.id, existing.status]
+      [existing.id, existing.status, checker?.id ?? null]
     );
     if (!handedBack.rowCount) {
       await safeRollback(client);
@@ -1656,13 +1682,23 @@ router.post('/:id/completion', asyncRoute(async (req, res) => {
     await logHistory(client, existing.id, req.user, [
       { action: 'Completion submitted', field: 'completionSubmittedAt', oldValue: existing.completion_submitted_at, newValue: 'submitted for review', note }
     ]);
-    // Finished work is waiting for the Director's final check, and the Director
-    // is told so rather than left to find it in a list.
-    await notifyDirectors(client, {
-      kind: 'work_submitted',
-      params: { activity: existing.activity, operation: existing.sector, managerName: req.user.name },
-      link: `#/activities/${existing.id}`, activityId: existing.id, actor: req.user
-    });
+    if (checker) {
+      // With the project manager first; the Director hears once it is checked.
+      await notify(client, {
+        userId: checker.id,
+        kind: 'work_to_check',
+        params: { activity: existing.activity, operation: existing.sector, managerName: req.user.name },
+        link: `#/activities/${existing.id}`, activityId: existing.id, actor: req.user
+      });
+    } else {
+      // Finished work is waiting for the Director's final check, and the
+      // Director is told so rather than left to find it in a list.
+      await notifyDirectors(client, {
+        kind: 'work_submitted',
+        params: { activity: existing.activity, operation: existing.sector, managerName: req.user.name },
+        link: `#/activities/${existing.id}`, activityId: existing.id, actor: req.user
+      });
+    }
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -1672,6 +1708,94 @@ router.post('/:id/completion', asyncRoute(async (req, res) => {
   }
 
   res.json(mapActivity(await loadActivity(existing.id, req.user)));
+}));
+
+// The project manager's check of a team member's finished work.
+//
+//   accept: true   -- the work is passed on to the Director's final check.
+//   accept: false  -- it goes back to the team member as Needs Correction,
+//                     with a reason of at least MIN_CORRECTION_NOTE characters.
+//
+// Only the manager the work names as its checker may do it, or the General
+// Manager standing in for them. The Director does not need to: their final
+// check can take the work at any point, as it always could. Passing the check
+// is not completing the work -- only the Director sets Completed.
+router.post('/:id/check', asyncRoute(async (req, res) => {
+  const existing = await loadActivity(req.params.id, req.user);
+  const accept = req.body?.accept;
+  if (typeof accept !== 'boolean') return res.status(400).json({ message: 'Say whether the work passes your check.' });
+  const isChecker = existing.completion_checker_id !== null && Number(existing.completion_checker_id) === Number(req.user.id);
+  if (!isChecker && req.user.role !== 'general-manager') {
+    return res.status(403).json({ message: 'Only the project manager checking this work can pass it on or send it back.' });
+  }
+  assertPlanOpen(existing);
+  if (!existing.completion_submitted_at || existing.status === 'Completed'
+    || existing.completion_checker_id === null || existing.manager_checked_at) {
+    return res.status(409).json({ message: 'This work is not waiting for a manager’s check.' });
+  }
+  const note = optionalText(req.body?.note, 2000);
+  if (!accept) {
+    const problem = correctionNoteProblem(note, existing.admin_note);
+    if (problem) return res.status(400).json({ message: problem });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    if (accept) {
+      const checked = await client.query(
+        `UPDATE activities SET manager_checked_at = NOW(), manager_checked_by = $2, updated_at = NOW()
+          WHERE id = $1 AND completion_submitted_at IS NOT NULL AND manager_checked_at IS NULL AND status <> 'Completed'`,
+        [existing.id, req.user.id]
+      );
+      if (!checked.rowCount) {
+        await safeRollback(client);
+        return res.status(409).json({ message: 'This activity changed a moment ago. Refresh and try again.' });
+      }
+      await logHistory(client, existing.id, req.user, [
+        { action: 'Checked by manager', field: 'managerCheckedAt', oldValue: null, newValue: 'passed to the Director', note }
+      ]);
+      // Now it is the Director's, and they are told -- naming the person who
+      // did the work, as the hand-in always has.
+      await notifyDirectors(client, {
+        kind: 'work_submitted',
+        params: { activity: existing.activity, operation: existing.sector, managerName: existing.assigned_to_name || req.user.name },
+        link: `#/activities/${existing.id}`, activityId: existing.id, actor: req.user
+      });
+    } else {
+      const returned = await client.query(
+        `UPDATE activities
+            SET status = 'Needs Correction', completion_submitted_at = NULL,
+                completion_checker_id = NULL, manager_checked_at = NULL, manager_checked_by = NULL,
+                evidence_status = CASE WHEN evidence_status = 'Complete' THEN 'Partial' ELSE evidence_status END,
+                admin_note = $3, reviewed_by = $4, reviewed_at = NOW(), updated_at = NOW()
+          WHERE id = $1 AND status = $2::text AND completion_submitted_at IS NOT NULL AND manager_checked_at IS NULL`,
+        [existing.id, existing.status, note, req.user.id]
+      );
+      if (!returned.rowCount) {
+        await safeRollback(client);
+        return res.status(409).json({ message: 'This activity changed a moment ago. Refresh and try again.' });
+      }
+      await logHistory(client, existing.id, req.user, [
+        { action: 'Status changed', field: 'status', oldValue: existing.status, newValue: 'Needs Correction', note }
+      ]);
+      if (existing.assigned_to) {
+        await notify(client, {
+          userId: existing.assigned_to,
+          kind: 'work_returned',
+          params: { activity: existing.activity, operation: existing.sector, reason: note },
+          link: `#/activities/${existing.id}`, activityId: existing.id, actor: req.user
+        });
+      }
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+  res.json(mapActivity(await reloadActivity(existing.id)));
 }));
 
 // ---- assignment -----------------------------------------------------------

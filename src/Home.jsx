@@ -21,12 +21,13 @@ const LATEST_FROM_MANAGERS = 5;
 
 // The organisation's notices worth a card on Home rather than only a line
 // under the bell.
-const ORGANIZATION_ALERTS = ['team_added', 'escalation_raised', 'escalation_escalated', 'escalation_resolved', 'escalation_rejected'];
+const ORGANIZATION_ALERTS = ['work_to_check', 'team_added', 'escalation_raised', 'escalation_escalated', 'escalation_resolved', 'escalation_rejected'];
 
 // What the button on a Home alert card says: where it takes the reader.
 function alertButton(kind, t) {
   if (kind === 'plan_assigned' || kind === 'plan_changed') return t('home.viewPlan');
   if (kind === 'team_added') return t('home.openTeam');
+  if (kind === 'work_to_check') return t('do.checkWork');
   if (kind.startsWith('escalation_')) return t('home.openIssue');
   return t('home.openRecord');
 }
@@ -101,6 +102,8 @@ export default function Home({
   const [myWork, setMyWork] = useState(null);
   const [recent, setRecent] = useState([]);
   const [finalChecks, setFinalChecks] = useState(null);
+  // A project manager's: their team members' finished work waiting for them.
+  const [toCheck, setToCheck] = useState([]);
   // The five newest records managers put into the register, whatever state
   // they are in, so the latest arrivals are in front of the Director in order.
   // The whole history is the report export.
@@ -128,9 +131,11 @@ export default function Home({
       // correct; the rest of the record is in the month itself.
       isWorker ? Promise.resolve({ updates: [] })
         : fetchJson(isManager ? '/api/monthly-plans/updates?limit=1&mine=1' : '/api/monthly-plans/updates?limit=5'),
-      isDirector ? fetchJson(`/api/activities?raisedBy=managers&limit=${LATEST_FROM_MANAGERS}`) : Promise.resolve([])
-    ]).then(([planResult, workResult, checkResult, doneResult, updateResult, latestResult]) => {
+      isDirector ? fetchJson(`/api/activities?raisedBy=managers&limit=${LATEST_FROM_MANAGERS}`) : Promise.resolve([]),
+      isManager ? fetchJson('/api/activities?awaiting=check&limit=10') : Promise.resolve([])
+    ]).then(([planResult, workResult, checkResult, doneResult, updateResult, latestResult, toCheckResult]) => {
       if (request !== latest.current) return;
+      setToCheck(toCheckResult.status === 'fulfilled' ? toCheckResult.value : []);
       setLatestFromManagers(latestResult.status === 'fulfilled' ? latestResult.value : []);
       setUpdates(updateResult.status === 'fulfilled' ? updateResult.value.updates || [] : []);
       setRecent(doneResult.status === 'fulfilled' ? doneResult.value : []);
@@ -348,6 +353,13 @@ export default function Home({
         </button>
       </li>)}
     </ul>}
+
+    {/* A team member's finished work is checked here before the Director
+        sees it: the project manager's own queue, one press from the record. */}
+    {isManager && toCheck.length > 0 && <>
+      <h3 className="home-heading">{fill(t('home.toCheckHeading'), { count: toCheck.length })}</h3>
+      <WorkList items={toCheck} user={user} t={t} language={language} onOpen={onOpenActivity} />
+    </>}
 
     {issuesWaiting > 0 && <div className="home-alerts"><div className="home-alert home-alert-escalation">
       <span>{fill(t('home.attentionIssues'), { count: issuesWaiting })}</span>

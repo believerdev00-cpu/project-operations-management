@@ -139,6 +139,37 @@ export async function nextDeskFor(db, person, projectId = null) {
   return directorOffice(db);
 }
 
+// The project manager who checks a team member's finished work before the
+// Director sees it: the manager they report to, else the lead of their team on
+// that project, else the project's own manager. Only an active manager --
+// never the General Manager or the Director, who are later in the chain -- and
+// null when there is none, in which case the work goes straight to the
+// Director as it always did.
+export async function checkerFor(db, person, projectId) {
+  if (person.role !== 'staff') return null;
+  const manager = async (id) => {
+    if (!id) return null;
+    const found = await db.query("SELECT id, name FROM users WHERE id = $1 AND role = 'manager' AND status = 'active'", [id]);
+    return found.rows[0] || null;
+  };
+  const boss = await manager(person.manager_id);
+  if (boss) return boss;
+  if (!projectId) return null;
+  const lead = await db.query(
+    `SELECT COALESCE(t.supervisor_id, p.manager_id) AS lead_id
+       FROM team_members tm
+       JOIN teams t ON t.id = tm.team_id AND t.status = 'active'
+       JOIN projects p ON p.id = t.project_id
+      WHERE tm.user_id = $1 AND t.project_id = $2
+      ORDER BY t.id LIMIT 1`,
+    [person.id, projectId]
+  );
+  const teamLead = await manager(lead.rows[0]?.lead_id);
+  if (teamLead) return teamLead;
+  const project = await db.query('SELECT manager_id FROM projects WHERE id = $1', [projectId]);
+  return manager(project.rows[0]?.manager_id);
+}
+
 // The holder's own row, for working out where they would pass an issue next.
 export async function personRow(db, id) {
   const result = await db.query(

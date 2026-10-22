@@ -34,7 +34,10 @@ export function activityJourney(activity) {
     case 'On Hold': current = activity.approvalStatus === 'approved' ? 1 : 0; side = 'paused'; break;
     default: current = 0;
   }
-  return { steps, current, side };
+  // A team member's finished work sits with their project manager before the
+  // Director's final check; lists say so rather than "Final check".
+  const withManager = handedBack && Boolean(activity.completionCheckerId) && !activity.managerCheckedAt;
+  return { steps, current, side, withManager };
 }
 
 // Movement: asked for -> approved -> money handed over -> under way -> done.
@@ -56,6 +59,7 @@ export function movementJourney(movement) {
 // no room for the whole journey.
 export function journeyLabel(journey, t) {
   if (journey.side) return t(`journey.${journey.side}`);
+  if (journey.withManager) return t('journey.withManager');
   return t(`journey.${journey.steps[journey.current]}`);
 }
 
@@ -133,6 +137,14 @@ export function nextAction(activity, user, t) {
       : { key: 'none', label: t('journey.draft'), done: true };
   }
   if (handedBack) {
+    // A team member's work is checked by their project manager first; only
+    // then is it the Director's (FINAL_CHECK_SQL / MANAGER_CHECK_SQL).
+    const withManager = activity.completionCheckerId && !activity.managerCheckedAt;
+    if (withManager) {
+      return Number(activity.completionCheckerId) === Number(user.id)
+        ? { key: 'check', label: t('do.checkWork') }
+        : { key: 'none', label: t('journey.withManager'), done: true };
+    }
     return isDirector
       ? { key: 'check', label: t('do.check') }
       : { key: 'none', label: t('journey.handedBack'), done: true };

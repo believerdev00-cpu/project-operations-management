@@ -84,7 +84,7 @@ const FAMILIES = {
   // Every event the server can write a notification for (NOTIFICATION_KINDS in
   // server/db/monthlySchema.js) needs a sentence in every language.
   'notice.kind.': ['plan_assigned', 'plan_changed', 'change_requested', 'report_submitted', 'report_accepted',
-    'report_returned', 'work_submitted', 'work_approved', 'work_returned', 'partner_comment',
+    'report_returned', 'work_submitted', 'work_to_check', 'work_approved', 'work_returned', 'partner_comment',
     'team_added', 'escalation_raised', 'escalation_escalated', 'escalation_resolved', 'escalation_rejected',
     'escalation_comment', 'partner_shared'],
   // The organisation (server/db/organizationSchema.js): every escalation kind,

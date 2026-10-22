@@ -79,8 +79,8 @@ async function activity(projectId, sector, { assignedTo = null, name } = {}) {
   const id = `ZZTEST-ORG-${Math.random().toString(36).slice(2, 10)}`;
   await pool.query(
     `INSERT INTO activities (id, project_id, sector, category, activity, description, status, approval_status,
-                             approval_required, externally_visible, assigned_to, approved_budget)
-     VALUES ($1, $2, $3, 'ZZTEST', $4, 'Automated test record.', 'Approved', 'approved', FALSE, TRUE, $5, 10)`,
+                             approval_required, externally_visible, assigned_to, approved_budget, cost_usd)
+     VALUES ($1, $2, $3, 'ZZTEST', $4, 'Automated test record.', 'Approved', 'approved', FALSE, TRUE, $5, 10, 10)`,
     [id, projectId, sector, name || `ZZTEST ${id}`, assignedTo]
   );
   created.activities.push(id);
@@ -341,6 +341,55 @@ async function run() {
   check('the General Manager approves it', approved.status === 200 && approved.body.status === 'resolved', approved);
   const directorRaise = await send(director.token, 'POST', '/api/escalations', { title: 'ZZTEST' });
   check('the Director has nobody to raise to', directorRaise.status === 403, directorRaise);
+
+  // ---- 4b. finished work ---------------------------------------------------------
+  section("4b. a team member's finished work is checked by their project manager first");
+  const done = await activity(PROJECT_IDS.mining, 'mining', { assignedTo: staffA.id, name: 'ZZTEST finished by staff' });
+  await pool.query("UPDATE activities SET status = 'In Progress', evidence_required = FALSE WHERE id = $1", [done]);
+  const handIn = await send(staffA.token, 'POST', `/api/activities/${done}/completion`, {});
+  check('the team member hands the work in', handIn.status === 200, handIn);
+  check('...and it names their project manager as its checker', handIn.body.completionCheckerId === pmA.id, handIn.body);
+  const directorQueue = await api(director.token, '/api/activities?awaiting=final-check&limit=200');
+  check("it is not yet in the Director's final check", !(directorQueue.body || []).some((row) => row.id === done));
+  const pmQueue = await api(pmA.token, '/api/activities?awaiting=check&limit=200');
+  check("it is in the project manager's check queue", (pmQueue.body || []).some((row) => row.id === done));
+  const pmSummary = await api(pmA.token, '/api/summary');
+  check('...and counted for them', pmSummary.body.summary?.workToCheck >= 1);
+  const gmFollows = await api(gm.token, '/api/summary');
+  check('the General Manager sees it waiting for a manager', gmFollows.body.summary?.managerChecksWaiting >= 1);
+  const toldChecker = await pool.query("SELECT 1 FROM notifications WHERE user_id = $1 AND kind = 'work_to_check'", [pmA.id]);
+  check('the project manager was told', toldChecker.rowCount === 1);
+  const otherPm = await send(pmB.token, 'POST', `/api/activities/${done}/check`, { accept: true });
+  check('another project manager cannot check it', otherPm.status === 403 || otherPm.status === 404, otherPm);
+  const selfCheck = await send(staffA.token, 'POST', `/api/activities/${done}/check`, { accept: true });
+  check('the team member cannot check their own work', selfCheck.status === 403, selfCheck);
+  const vague = await send(pmA.token, 'POST', `/api/activities/${done}/check`, { accept: false, note: 'redo' });
+  check('sending it back needs a real reason', vague.status === 400, vague);
+  const back = await send(pmA.token, 'POST', `/api/activities/${done}/check`, { accept: false, note: 'The photos do not show the finished trench.' });
+  check('the project manager sends it back with a reason', back.status === 200 && back.body.status === 'Needs Correction'
+    && back.body.completionSubmittedAt === null, back.body);
+  const toldStaff = await pool.query("SELECT 1 FROM notifications WHERE user_id = $1 AND kind = 'work_returned'", [staffA.id]);
+  check('the team member is told why', toldStaff.rowCount >= 1);
+  await send(staffA.token, 'PATCH', `/api/activities/${done}/status`, { status: 'In Progress' });
+  const handInAgain = await send(staffA.token, 'POST', `/api/activities/${done}/completion`, {});
+  check('the team member hands it in again', handInAgain.status === 200 && handInAgain.body.completionCheckerId === pmA.id, handInAgain);
+  const passed = await send(pmA.token, 'POST', `/api/activities/${done}/check`, { accept: true, note: 'Looks right.' });
+  check('the project manager passes it on', passed.status === 200 && passed.body.managerCheckedAt, passed.body);
+  const twiceChecked = await send(pmA.token, 'POST', `/api/activities/${done}/check`, { accept: true });
+  check('it cannot be checked twice', twiceChecked.status === 409, twiceChecked);
+  const nowWithDirector = await api(director.token, '/api/activities?awaiting=final-check&limit=200');
+  check("now it is in the Director's final check", (nowWithDirector.body || []).some((row) => row.id === done));
+  const toldDirector = await pool.query("SELECT 1 FROM notifications WHERE user_id = $1 AND kind = 'work_submitted' AND activity_id = $2", [director.id, done]);
+  check('and the Director was told', toldDirector.rowCount >= 1);
+  const pmCompletes = await send(pmA.token, 'PATCH', `/api/activities/${done}/decision`, { status: 'Completed' });
+  check('the project manager still cannot mark it done', pmCompletes.status === 403, pmCompletes);
+  const finished = await send(director.token, 'PATCH', `/api/activities/${done}/decision`, { status: 'Completed' });
+  check('the Director gives the final check', finished.status === 200 && finished.body.status === 'Completed', finished.body);
+  const managerWork = await activity(PROJECT_IDS.mining, 'mining', { assignedTo: pmA.id, name: 'ZZTEST finished by manager' });
+  await pool.query("UPDATE activities SET status = 'In Progress', evidence_required = FALSE WHERE id = $1", [managerWork]);
+  const managerHandIn = await send(pmA.token, 'POST', `/api/activities/${managerWork}/completion`, {});
+  check("a manager's own finished work still goes straight to the Director", managerHandIn.status === 200
+    && managerHandIn.body.completionCheckerId === null, managerHandIn.body);
 
   // ---- 5. partners -----------------------------------------------------------------
   section('5. partners stay outside, and see only what was shared');

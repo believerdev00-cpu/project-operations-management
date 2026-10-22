@@ -278,7 +278,21 @@ const statements = [
      granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
      PRIMARY KEY (partner_id, project_id)
    )`,
-  `CREATE INDEX IF NOT EXISTS partner_projects_project_idx ON partner_projects(project_id)`
+  `CREATE INDEX IF NOT EXISTS partner_projects_project_idx ON partner_projects(project_id)`,
+
+  // ---- a team member's finished work is checked by their project manager ----
+  //
+  // When a team member hands work back, it goes to the project manager above
+  // them before the Director's final check: completion_checker_id names that
+  // manager, manager_checked_at/by record that they passed it on. Work handed
+  // back by a manager (or with nobody to check it) has no checker and goes
+  // straight to the Director, exactly as before. Every existing row has none,
+  // so nothing already waiting for the Director moves.
+  `ALTER TABLE activities ADD COLUMN IF NOT EXISTS completion_checker_id INTEGER REFERENCES users(id) ON DELETE SET NULL`,
+  `ALTER TABLE activities ADD COLUMN IF NOT EXISTS manager_checked_at TIMESTAMPTZ`,
+  `ALTER TABLE activities ADD COLUMN IF NOT EXISTS manager_checked_by INTEGER REFERENCES users(id) ON DELETE SET NULL`,
+  `CREATE INDEX IF NOT EXISTS activities_checker_idx ON activities(completion_checker_id)
+     WHERE completion_submitted_at IS NOT NULL AND manager_checked_at IS NULL`
 ];
 
 export async function migrateOrganizationModule(pool) {

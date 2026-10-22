@@ -494,6 +494,7 @@ export const NOTIFICATION_KINDS = [
   'report_accepted',    // to the manager: the month was accepted and closed
   'report_returned',    // to the manager: the report came back, with the reason
   'work_submitted',     // to the Director: finished work waits for the final check
+  'work_to_check',      // to a project manager: a team member's finished work waits for their check
   'work_approved',      // to the person carrying the work: it was marked done
   'work_returned',      // to the person carrying the work: it came back, with the reason
   'partner_comment',    // to the Director: an external partner wrote to them

@@ -173,7 +173,7 @@ export function ActivityReview({
   detail, user, onOpenFile, sectorLabel, managers = [], busy = false,
   onClose, onDecision, onStatus, onAssign, onUpload, onRemoveEvidence, onSubmitCompletion, onApprove, onReject,
   onVisibility, onRecordExpense, onRemoveExpense, onRequestBudget, onDecideBudget, onDelete, onSendDraft,
-  onFinish, onSendBack, onReopen, onSchedule, onEdit
+  onFinish, onSendBack, onReopen, onSchedule, onEdit, onManagerCheck
 }) {
   const { language, t } = useI18n();
   const { activity, evidence, history, expenses = [], expenseSummary = null, budgetRequests = [] } = detail;
@@ -377,6 +377,25 @@ export function ActivityReview({
       : { tone: 'info', title: fill(t('next.waitingFor'), { name: approverName(activity, sectorLabel, t) }), text: t('next.waitingForText') };
   } else if (activity.status === 'Completed') {
     next = { tone: 'done', title: t('journey.done'), text: activity.completedAt ? fill(t('next.doneOn'), { date: formatDateTime(activity.completedAt) }) : '' };
+  } else if (handedBack && activity.completionCheckerId && !activity.managerCheckedAt) {
+    // A team member's finished work, with their project manager for a check
+    // before the Director's. The checker passes it on or sends it back; the
+    // Director may still take it at the final check, as they always could.
+    const iCheck = Number(activity.completionCheckerId) === Number(user.id) || user.role === 'general-manager';
+    const checkName = activity.completionCheckerName || t('role.manager');
+    next = iCheck
+      ? { tone: 'action', title: t('next.managerCheckTitle'), text: t('next.managerCheckText'),
+        actions: <>
+          <button className="primary-btn" type="button" disabled={busy} onClick={() => onManagerCheck?.(activity, true)}>{t('action.passToDirector')}</button>
+          <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onManagerCheck?.(activity, false)}>{t('action.sendBack')}</button>
+        </> }
+      : isDirector
+        ? { tone: 'info', title: fill(t('next.withManagerTitle'), { name: checkName }), text: t('next.withManagerDirector'),
+          actions: <>
+            <button className="secondary-btn" type="button" disabled={busy} onClick={() => onFinish(activity)}>{t('action.markDone')}</button>
+            <button className="danger-btn outlined" type="button" disabled={busy} onClick={() => onSendBack(activity)}>{t('action.sendBack')}</button>
+          </> }
+        : { tone: 'info', title: fill(t('next.withManagerTitle'), { name: checkName }), text: t('next.withManagerText') };
   } else if (handedBack) {
     next = isDirector
       ? { tone: 'action', title: t('next.finalCheckTitle'), text: t('next.finalCheckText'),

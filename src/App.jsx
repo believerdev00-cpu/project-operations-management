@@ -1021,7 +1021,11 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         : ['dashboard', 'activities', 'escalations'];
   // An address naming a page this account does not have -- a manager following
   // a Director's link to #/users -- lands on the home page instead of a blank page.
-  const view = navItems.some(([id]) => id === route.view) ? route.view : 'dashboard';
+  // A manager has no work register, but they do open single records: the work
+  // a team member handed in for their check, from Home or a notification. That
+  // one address is let through, and the page shows the record and nothing else.
+  const recordOnly = isManager && route.view === 'activities' && Boolean(route.id) && route.id !== 'new';
+  const view = navItems.some(([id]) => id === route.view) || recordOnly ? route.view : 'dashboard';
   const routeId = route.id;
   // #/activities/new is the add form, not a record called "new".
   const creatingActivity = view === 'activities' && routeId === 'new' && canAddActivity;
@@ -1119,6 +1123,8 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     if (activityStatusFilter === 'Awaiting review') params.set('awaiting', 'review');
     else if (activityStatusFilter === 'My work') params.set('awaiting', 'work');
     else if (activityStatusFilter === 'Final check') params.set('awaiting', 'final-check');
+    else if (activityStatusFilter === 'To check') params.set('awaiting', 'check');
+    else if (activityStatusFilter === 'Manager check') params.set('awaiting', 'manager-check');
     else if (activityStatusFilter === 'Assigned to me') params.set('assignedTo', 'me');
     else if (activityStatusFilter !== 'All') params.set('status', activityStatusFilter);
     if (selectedProjectId) params.set('projectId', selectedProjectId);
@@ -1238,7 +1244,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   }, [activeRouteActivity, showActivity]);
 
   const openActivity = (activityId) => navigate(buildHash('activities', activityId));
-  const closeActivity = () => navigate(buildHash('activities'));
+  const closeActivity = () => navigate(buildHash(recordOnly ? 'dashboard' : 'activities'));
 
   // After a change: the lists always, the detail only if it is still the one
   // being read -- approving from the dashboard must not quietly open a review
@@ -1255,7 +1261,8 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const filterFromAddress = view === 'activities' ? route.query.get('filter') : null;
   useEffect(() => {
     if (!filterFromAddress) return;
-    setActivityStatusFilter(filterFromAddress === 'work' ? 'My work' : filterFromAddress === 'final-check' ? 'Final check' : 'All');
+    const fromAddress = { work: 'My work', 'final-check': 'Final check', 'to-check': 'To check', 'manager-check': 'Manager check' };
+    setActivityStatusFilter(fromAddress[filterFromAddress] || 'All');
     navigate(buildHash('activities'), { replace: true });
   }, [filterFromAddress, navigate]);
 
@@ -1683,6 +1690,40 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       notify(t('msg.sentBack'));
       await refreshActivity(activity.id);
     } catch (sendBackError) { fail(sendBackError.message); }
+  });
+
+  // A project manager's check of a team member's finished work: pass it on to
+  // the Director, or send it back with what to fix (same floor as the
+  // Director's own send-back, which the API holds to as well).
+  const managerCheckActivity = act(async (activity, accept) => {
+    let note = '';
+    if (accept) {
+      const confirmed = await dialog.confirm({
+        title: t('action.passToDirector'),
+        message: `${activity.activity}. ${t('msg.passToDirectorBody')}`,
+        confirmLabel: t('action.passToDirector')
+      });
+      if (!confirmed) return;
+    } else {
+      note = await dialog.prompt({
+        title: t('action.sendBack'),
+        message: activity.activity,
+        label: t('msg.sendBackReason'),
+        required: true,
+        minLength: MIN_CORRECTION_NOTE,
+        multiline: true,
+        confirmLabel: t('action.sendBack')
+      });
+      if (note === null) return;
+    }
+    setError('');
+    try {
+      await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/check`, {
+        method: 'POST', body: JSON.stringify({ accept, note })
+      });
+      notify(accept ? t('msg.passedToDirector') : t('msg.sentBack'));
+      await refreshActivity(activity.id);
+    } catch (checkError) { fail(checkError.message); }
   });
 
   // Refused or cancelled work comes back for a decision -- or, when it never
@@ -2238,14 +2279,14 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     </>;
   } else if (view === 'activities') {
     content = <>
-      <section className="context-strip">
+      {!recordOnly && <section className="context-strip">
         {/* Each role is told what this page is FOR them. A team member used to be
             shown the manager's description of it. */}
         <div><span className="eyebrow">{t('activities.eyebrow')}</span>
           <h2>{isDirector || isManager || isGeneral ? t('activities.title') : t('nav.myActivities')}</h2>
           <p>{isDirector ? t('activities.directorBlurb') : isGeneral ? t('activities.generalBlurb') : isManager ? t('activities.managerBlurb') : t('activities.staffBlurb')}</p></div>
         {canAddActivity && <button className="primary-btn" type="button" onClick={addActivity}>{isDirector ? t('action.assignActivity') : t('action.raiseActivity')}</button>}
-      </section>
+      </section>}
 
       {creatingActivity && <DetailView onClose={closeActivity} label={isDirector ? t('action.assignActivity') : t('action.raiseActivity')}>
         <ActivityForm
@@ -2298,15 +2339,19 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
           onSchedule={scheduleActivity}
           onFinish={finishActivity}
           onSendBack={sendBackActivity}
+          onManagerCheck={managerCheckActivity}
           onReopen={reopenActivity}
         />
       </DetailView>}
 
-      <section className="toolbar-row"><div className="filter-group">
+      {!recordOnly && <><section className="toolbar-row"><div className="filter-group">
         <label className="sr-only" htmlFor="activity-status-filter">{t('table.status')}</label>
         <select id="activity-status-filter" value={activityStatusFilter} onChange={(event) => setActivityStatusFilter(event.target.value)}>
           <option value="All">{t('form.allStatuses')}</option>
           {!isDirector && !isGeneral && <option value="My work">{t('home.tileWork')}</option>}
+          {/* Finished work at each of its two checks: the project manager's, then the Director's. */}
+          {user.role === 'manager' && <option value="To check">{t('home.tileToCheck')}</option>}
+          {(isDirector || isGeneral) && <option value="Manager check">{t('home.tileManagerChecks')}</option>}
           <option value="Final check">{t('home.tileChecks')}</option>
           <option value="Awaiting review">{t('activities.awaitingReview')}</option>
           {!isDirector && !isGeneral && <option value="Assigned to me">{t('activities.assignedToMe')}</option>}
@@ -2335,7 +2380,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
             {registerPage.loading ? t('app.loading') : t('action.loadMore')}
           </button>
         </div>}
-      </Panel>
+      </Panel></>}
 
     </>;
   } else if (view === 'reports') {

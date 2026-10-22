@@ -377,6 +377,16 @@ try {
   check('  which puts it in front of the Director, not the team member',
     Boolean(handedBack.body.completionSubmittedAt) && handedBack.body.status !== 'Completed',
     String(handedBack.body.status));
+  // A team member's finished work goes to their project manager first (they
+  // report to the Farming manager), and reaches the Director once it is passed on.
+  check('  which names their project manager as its checker',
+    handedBack.body.completionCheckerId === managers.farming.id, String(handedBack.body.completionCheckerId));
+  const beforeCheck = await api(adminToken, '/api/activities?awaiting=final-check&limit=50');
+  check('  and is not yet the Director\'s', !beforeCheck.body.some((item) => item.id === day1.body.id));
+  const passedOn = await api(managers.farming.token, `/api/activities/${day1.body.id}/check`, {
+    method: 'POST', body: JSON.stringify({ accept: true })
+  });
+  check('  the project manager passes it on', passedOn.status === 200, `${passedOn.status} ${passedOn.body.message}`);
   const directorChecks = await api(adminToken, '/api/activities?awaiting=final-check&limit=50');
   check('  and the Director sees it waiting',
     directorChecks.body.some((item) => item.id === day1.body.id), String(directorChecks.status));

@@ -14,7 +14,7 @@ import { asyncRoute, hasFullScope, isAdmin, managerScope, operationsOf, operatio
 import { TRIPS_OPERATION, runsTrips } from '../shared/businessOperations.js';
 import { pendingForMeSql } from './lib/approvals.js';
 import { getCurrentRate } from './lib/rates.js';
-import { FINAL_CHECK_SQL, openWorkSql } from './lib/monthly.js';
+import { FINAL_CHECK_SQL, MANAGER_CHECK_SQL, myChecksSql, openWorkSql } from './lib/monthly.js';
 import { deleteFile } from './lib/storage.js';
 import movementRouter, { mapMovement } from './routes/movements.js';
 import rateRouter from './routes/rates.js';
@@ -429,6 +429,10 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
     `SELECT
        (SELECT COUNT(*) FROM activities a WHERE ${openWorkSql(workValues, 'a', req.user.id)})::int AS my_open_work,
        (SELECT COUNT(*) FROM activities a WHERE ${FINAL_CHECK_SQL('a')}${scoped ? ' AND a.sector = ANY($1::text[])' : ''})::int AS final_checks,
+       -- A team member's finished work waiting for a project manager's check:
+       -- every such record in scope, and the ones waiting on this account.
+       (SELECT COUNT(*) FROM activities a WHERE ${MANAGER_CHECK_SQL('a')}${scoped ? ' AND a.sector = ANY($1::text[])' : ''})::int AS manager_checks,
+       (SELECT COUNT(*) FROM activities a WHERE ${myChecksSql(workValues, 'a', req.user.id)})::int AS my_checks,
        (SELECT COUNT(*) FROM monthly_reports r JOIN monthly_plans p ON p.id = r.plan_id
          WHERE r.status = 'Submitted' AND p.status <> 'Closed'${scoped ? ' AND p.sector = ANY($1::text[])' : ''})::int AS month_end_reports`,
     workValues
@@ -588,6 +592,8 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
       activitiesAssignedToMe: reviewQueue.rows[0].assigned_to_me,
       myOpenWork: homeCounts.rows[0].my_open_work,
       finalChecksWaiting: homeCounts.rows[0].final_checks,
+      managerChecksWaiting: homeCounts.rows[0].manager_checks,
+      workToCheck: homeCounts.rows[0].my_checks,
       monthEndReportsWaiting: homeCounts.rows[0].month_end_reports,
       // The month at a glance (see planCounts above).
       activePlans: planRow.active_plans,

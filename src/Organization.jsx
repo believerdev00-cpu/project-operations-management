@@ -501,6 +501,9 @@ export function GeneralManagerHome({ user, summary, sectorRows, fetchJson, reloa
     { id: 'plans', count: counts.activePlans || 0, tone: 'calm', title: t('home.tileActivePlans'), go: () => onGo('monthly') },
     { id: 'progress', count: counts.objectivesInProgress || 0, tone: counts.objectivesInProgress ? 'active' : 'calm', title: t('home.tileInProgress'), go: () => onGo('monthly') },
     { id: 'done', count: counts.objectivesCompleted || 0, tone: 'calm', title: t('home.tileCompleted'), go: () => onGo('monthly') },
+    // Finished work at its two checks: with a project manager, then with the Director.
+    { id: 'manager-checks', count: counts.managerChecksWaiting || 0, tone: counts.managerChecksWaiting ? 'active' : 'calm', title: t('home.tileManagerChecks'), go: () => onGo('activities', 'manager-check') },
+    { id: 'final-checks', count: counts.finalChecksWaiting || 0, tone: counts.finalChecksWaiting ? 'active' : 'calm', title: t('gm.tileFinalChecks'), go: () => onGo('activities', 'final-check') },
     { id: 'reports', count: counts.monthEndReportsWaiting || 0, tone: counts.monthEndReportsWaiting ? 'active' : 'calm', title: t('gm.tileReportsWithDirector'), go: () => onGo('reports') }
   ];
 
