@@ -50,7 +50,7 @@ const router = express.Router();
 //
 // null when neither exists -- the report then prints exactly as it did before,
 // which is the right failure for a decoration.
-const LOGO_CANDIDATES = ['../../public/logo.png', '../../dist/logo.png'];
+const LOGO_CANDIDATES = ['../../public/logo-mark.png', '../../dist/logo-mark.png'];
 let resolvedLogo;
 function logoPath() {
   if (resolvedLogo !== undefined) return resolvedLogo;
@@ -68,7 +68,7 @@ function logoPath() {
   // Vercel's file tracing cannot follow, so without that entry the logo is
   // simply absent from the deployment and every printed report loses its mark.
   if (!resolvedLogo) {
-    for (const candidate of ['public/logo.png', 'dist/logo.png']) {
+    for (const candidate of ['public/logo-mark.png', 'dist/logo-mark.png']) {
       const file = resolve(process.cwd(), candidate);
       if (existsSync(file)) { resolvedLogo = file; break; }
     }
@@ -957,7 +957,7 @@ function headerRow(sheet, rowNumber) {
 async function buildWorkbook(report, language = 'en') {
   const { t, w } = wordsFor(language);
   const workbook = new ExcelJS.Workbook();
-  workbook.creator = 'Gisuma Project Operations';
+  workbook.creator = 'Project Management System';
   workbook.created = new Date();
 
   const work = report.monthlyWork || emptyMonthlyWork();

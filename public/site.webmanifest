@@ -1,6 +1,6 @@
 {
-  "name": "Gisuma Project Operations Management",
-  "short_name": "Gisuma Ops",
+  "name": "Project Management System",
+  "short_name": "Projects",
   "description": "Project operations management for mining, agriculture and farming.",
   "icons": [
     { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },

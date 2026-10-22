@@ -43,7 +43,11 @@ h1:focus, h2:focus { outline: none; }
 
 .login-shell { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 24px 16px; background: linear-gradient(140deg, #eef5fb, #f8fafc); }
 .login-card { width: min(100%, 420px); padding: 36px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); }
-.login-logo { display: block; width: min(100%, 300px); height: auto; margin: 0 auto 26px; }
+/* The mark, with the system's name written beside it rather than baked into
+   the image -- the name is translated, and an image cannot be. */
+.login-brand { display: grid; justify-items: center; gap: 10px; margin: 0 auto 26px; text-align: center; }
+.login-brand strong { color: var(--navy); font-size: 1.25rem; line-height: 1.25; }
+.login-logo { display: block; width: 96px; height: auto; }
 .eyebrow { display: block; color: var(--blue); font-size: .7rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
 .login-card h1 { margin: 10px 0 8px; color: var(--navy); font-size: 2.2rem; }
 .login-card p { margin: 0 0 28px; color: var(--muted); line-height: 1.55; }

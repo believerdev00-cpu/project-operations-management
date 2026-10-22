@@ -50,13 +50,13 @@ export function knownLanguage(value) {
 
 const STRINGS = {
   // ---- shell ---------------------------------------------------------------
-  'app.name': { en: 'Gisuma', rw: 'Gisuma', fr: 'Gisuma', sw: 'Gisuma' },
-  'app.subtitle': { en: 'Project Operations', rw: 'Imicungire y’Ibikorwa', fr: 'Gestion des opérations', sw: 'Usimamizi wa Shughuli' },
+  'app.name': { en: 'Project Management System', rw: 'Sisitemu y’Imicungire y’Imishinga', fr: 'Système de gestion de projets', sw: 'Mfumo wa Usimamizi wa Miradi' },
+  'app.subtitle': { en: 'Mining · Agriculture · Farming', rw: 'Ubucukuzi · Ubuhinzi · Ubworozi', fr: 'Mines · Agronomie · Élevage', sw: 'Madini · Kilimo · Ufugaji' },
   'app.workspace': { en: 'Workspace', rw: 'Ahakorerwa', fr: 'Espace de travail', sw: 'Eneo la kazi' },
   'app.signedInAs': { en: 'Signed in as', rw: 'Winjiye nka', fr: 'Connecté en tant que', sw: 'Umeingia kama' },
   'app.signOut': { en: 'Sign out', rw: 'Sohoka', fr: 'Se déconnecter', sw: 'Toka' },
   'app.language': { en: 'Language', rw: 'Ururimi', fr: 'Langue', sw: 'Lugha' },
-  'app.operationsControl': { en: 'Gisuma', rw: 'Gisuma', fr: 'Gisuma', sw: 'Gisuma' },
+  'app.operationsControl': { en: 'Project Management', rw: 'Imicungire y’Imishinga', fr: 'Gestion de projets', sw: 'Usimamizi wa Miradi' },
   'app.loading': { en: 'Getting your work…', rw: 'Turashaka akazi kawe…', fr: 'Chargement de votre travail…', sw: 'Tunapata kazi yako…' },
   'app.dismiss': { en: 'Dismiss', rw: 'Funga', fr: 'Fermer', sw: 'Funga' },
   'app.businessOperation': { en: 'Operation', rw: 'Urwego', fr: 'Secteur', sw: 'Sekta' },

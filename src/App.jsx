@@ -437,7 +437,7 @@ function LoginScreen({ notice, onSignedIn }) {
   };
 
   return <div className="login-shell"><form className="login-card" onSubmit={submit}>
-    <img className="login-logo" src="/logo.png" srcSet="/logo.png 1x, /logo@2x.png 2x" alt={t('app.name')} />
+    <div className="login-brand"><img className="login-logo" src="/logo-mark.png" alt="" /><strong>{t('app.name')}</strong></div>
     <LanguagePicker language={language} setLanguage={setLanguage} label={t('app.language')} />
     <h1>{t('auth.signIn')}</h1>
     <p>{t('auth.signInBlurb')}</p>
@@ -482,7 +482,7 @@ function ChoosePasswordScreen({ token, user, onChosen, onSignOut, onExpired }) {
   };
 
   return <div className="login-shell"><form className="login-card" onSubmit={submit}>
-    <img className="login-logo" src="/logo.png" srcSet="/logo.png 1x, /logo@2x.png 2x" alt={t('app.name')} />
+    <div className="login-brand"><img className="login-logo" src="/logo-mark.png" alt="" /><strong>{t('app.name')}</strong></div>
     <LanguagePicker language={language} setLanguage={setLanguage} label={t('app.language')} />
     <h1>{t('auth.choosePasswordTitle')}</h1>
     <p>{fill(t('auth.choosePasswordBlurb'), { name: user.name })}</p>
@@ -647,7 +647,7 @@ function AppShell({
       onKeyDown={drawerActive ? (event) => trapFocus(event, sidebar.current, closeDrawer) : undefined}
     >
       <div className="sidebar-top">
-        <div className="brand-lockup"><img className="brand-logo" src="/logo-mark.png" alt="" /><div><strong>{t('app.name')}</strong><span>{subtitle}</span></div></div>
+        <div className="brand-lockup"><img className="brand-logo" src="/logo-mark.png" alt="" /><div><strong>{t('app.operationsControl')}</strong><span>{subtitle}</span></div></div>
         <button className="icon-btn drawer-close" type="button" onClick={closeDrawer} aria-label={t('app.closeMenu')}>&times;</button>
       </div>
       {nav.length > 0 && <nav aria-label={navLabel}>
