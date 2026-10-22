@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BUSINESS_OPERATIONS, operationName, operationsOf, worksIn } from '../shared/businessOperations.js';
 import { fill, useI18n } from './i18n.js';
 import { useBusy, useDialog } from './ui.jsx';
-import { EscalationList } from './Escalations.jsx';
 
 // The organisation is not a page of its own: it is how the rest of the system
 // works, so its pieces sit where the work is done.
@@ -482,21 +481,11 @@ function CreateTeamForm({ projects, people, canChooseSupervisor, t, language, bu
 // because the organisation is part of the job rather than a page of its own.
 // Every number links to the page that lists it; nothing here can decide an
 // approval, which is the Director's.
-export function GeneralManagerHome({ user, summary, sectorRows, fetchJson, reloadKey, onGo, onOpenEscalation, onMessage, onError, onChanged }) {
+export function GeneralManagerHome({ user, summary, sectorRows, fetchJson, reloadKey, onGo, onMessage, onError, onChanged }) {
   const { language, t } = useI18n();
-  const [issues, setIssues] = useState(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetchJson('/api/escalations?box=waiting&state=open&limit=5').catch(() => []).then((waiting) => {
-      if (!cancelled) setIssues(waiting);
-    });
-    return () => { cancelled = true; };
-  }, [fetchJson, reloadKey]);
 
   const counts = summary || {};
   const tiles = [
-    { id: 'issues', count: counts.escalationsAwaitingMe || 0, tone: counts.escalationsAwaitingMe ? 'urgent' : 'calm', title: t('gm.tileIssues'), go: () => onGo('escalations') },
     { id: 'overdue', count: counts.overdueWork || 0, tone: counts.overdueWork ? 'urgent' : 'calm', title: t('home.tileOverdue'), go: () => onGo('monthly') },
     { id: 'plans', count: counts.activePlans || 0, tone: 'calm', title: t('home.tileActivePlans'), go: () => onGo('monthly') },
     { id: 'progress', count: counts.objectivesInProgress || 0, tone: counts.objectivesInProgress ? 'active' : 'calm', title: t('home.tileInProgress'), go: () => onGo('monthly') },
@@ -514,8 +503,7 @@ export function GeneralManagerHome({ user, summary, sectorRows, fetchJson, reloa
         <p>{fill(t('gm.hello'), { name: user.name })}</p>
       </div>
       <div className="home-quick">
-        <button className="primary-btn" type="button" onClick={() => onGo('escalations')}>{t('gm.openIssues')}</button>
-        <button className="secondary-btn" type="button" onClick={() => onGo('reports')}>{t('home.viewReports')}</button>
+        <button className="primary-btn" type="button" onClick={() => onGo('reports')}>{t('home.viewReports')}</button>
       </div>
     </section>
 
@@ -525,11 +513,6 @@ export function GeneralManagerHome({ user, summary, sectorRows, fetchJson, reloa
         <span className="home-tile-text">{tile.title}</span>
       </button>)}
     </div>
-
-    <h3 className="home-heading">{t('gm.issuesHeading')}</h3>
-    {issues === null
-      ? <div className="compact-loading"><span className="spinner" /></div>
-      : <EscalationList items={issues} t={t} language={language} onOpen={onOpenEscalation} empty={t('esc.emptyWaiting')} />}
 
     <h3 className="home-heading">{t('gm.operationsHeading')}</h3>
     <div className="table-wrap"><table className="card-table">

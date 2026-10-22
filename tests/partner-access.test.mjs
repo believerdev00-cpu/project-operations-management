@@ -67,7 +67,6 @@ const INTERNAL_ENDPOINTS = [
   ['GET', '/api/summary'],
   ['GET', '/api/projects'],
   ['GET', '/api/activities?limit=100'],
-  ['GET', '/api/approvals'],
   ['GET', '/api/managers'],
   ['GET', '/api/users'],
   ['GET', '/api/approval-queue'],

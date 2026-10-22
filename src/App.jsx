@@ -22,7 +22,6 @@ const MonthlyPlans = lazy(() => import('./MonthlyPlans.jsx'));
 const TeamsSection = lazy(() => import('./Organization.jsx').then((module) => ({ default: module.TeamsSection })));
 const OrganizationSection = lazy(() => import('./Organization.jsx').then((module) => ({ default: module.OrganizationSection })));
 const GeneralManagerHome = lazy(() => import('./Organization.jsx').then((module) => ({ default: module.GeneralManagerHome })));
-const EscalationsPage = lazy(() => import('./Escalations.jsx'));
 import { LANGUAGES, LanguageContext, displayLanguage, fill, setDisplayLanguage, useI18n, useLanguage, useT } from './i18n.js';
 import { BUSINESS_OPERATIONS, operationName, operationsOf, runsTrips, worksIn } from '../shared/businessOperations.js';
 import { OPERATIONS_WITH_CATEGORIES, OTHER_CATEGORY } from '../shared/categories.js';
@@ -74,7 +73,6 @@ const emptyActivity = { projectId: '', sector: 'agriculture', categoryChoice: ''
 // The statuses that mean assigned work is still on the manager's desk. Closed
 // and refused records drop out of their queue.
 const OPEN_ASSIGNMENT_STATUSES = ['Pending Approval', 'Approved', 'Budget Adjusted', 'In Progress', 'Needs Correction'];
-const emptyApproval = { title: '', sector: 'agriculture', amount: '', owner: '', priority: 'Medium', requestedBy: '', justification: '' };
 // `sectors` is what a manager runs (several are allowed); `sector` is a team
 // member's one operation. accountPayload() sends whichever the role uses.
 const emptyAccount = { username: '', name: '', password: '', role: 'manager', sector: '', sectors: [], managerId: '' };
@@ -515,8 +513,6 @@ const NAV_ICON_PATHS = {
   more: 'M5 12h.01M12 12h.01M19 12h.01',
   users: 'M16 19v-1a4 4 0 0 0-8 0v1M12 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7 8v-1a3 3 0 0 0-2-2.8M17 5.2a3 3 0 0 1 0 5.6',
   partners: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm-9 9h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9Z',
-  // An arrow going up: something passed up the line.
-  escalations: 'M12 20V5M6 11l6-6 6 6M5 20h14'
 };
 
 function NavIcon({ id }) {
@@ -859,7 +855,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const [notices, setNotices] = useState({ items: [], unread: 0 });
   const [projects, setProjects] = useState([]);
   const [activities, setActivities] = useState([]);
-  const [approvals, setApprovals] = useState([]);
   const [managers, setManagers] = useState([]);
   // Everybody who can be handed work: this operation's managers and its team
   // members. A separate list from `managers`, which answers "who runs this?" and
@@ -894,7 +889,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // form is adding a new one. One form for both, so the two cannot drift.
   const [editingProject, setEditingProject] = useState(null);
   const [activityForm, setActivityForm] = useState(emptyActivity);
-  const [approvalForm, setApprovalForm] = useState(emptyApproval);
   const [accountForm, setAccountForm] = useState(emptyAccount);
   const [userSearch, setUserSearch] = useState('');
   const [userRoleFilter, setUserRoleFilter] = useState('All');
@@ -925,8 +919,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // comes from the API's own count of the same predicate the queue runs, so the
   // two can never drift apart.
   const approvalCount = summary.summary?.approvalsAwaitingMe ?? approvalQueue.total ?? 0;
-  // Issues waiting on this account to settle or pass up the line.
-  const escalationCount = summary.summary?.escalationsAwaitingMe ?? 0;
   // Five things people use every day, and the rest under "More". Nine items at
   // one level, with two of them both called some form of "approvals", was the
   // first thing the client found confusing. Only people who approve anything --
@@ -953,8 +945,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       ['activities', t('nav.activities'), 0, 'main', t('nav.activities')],
       ['movements', t('nav.trips'), 0, 'main', t('nav.shortTrips')],
       ['reports', t('nav.reports'), 0, 'review'],
-      ['approvals', t('nav.approvals'), 0, 'review'],
-      ['escalations', t('nav.escalations'), escalationCount, 'review'],
       ['projects', t('nav.projects'), 0, 'manage'],
       ['users', t('nav.users'), 0, 'manage'],
       ['partners', t('nav.partners'), partnerInbox.unread, 'manage']
@@ -966,7 +956,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     // People and Partners are the Director's and are not offered.
     navItems = [
       ['dashboard', t('nav.home'), 0, 'main', t('nav.home')],
-      ['escalations', t('nav.escalations'), escalationCount, 'main', t('nav.shortIssues')],
       ['monthly', t('nav.monthlyPlans'), 0, 'main', t('nav.shortBudget')],
       ['activities', t('nav.activities'), 0, 'review'],
       ['reports', t('nav.reports'), 0, 'review']
@@ -994,8 +983,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     // General Manager. Their teams are on Home, beside the month they run.
     navItems = [
       ['dashboard', t('nav.home'), 0, 'main', t('nav.home')],
-      ['monthly', t('nav.myPlan'), 0, 'main', t('nav.shortMyPlan')],
-      ['escalations', t('nav.escalations'), escalationCount, 'main', t('nav.shortIssues')]
+      ['monthly', t('nav.myPlan'), 0, 'main', t('nav.shortMyPlan')]
     ];
   } else {
     // A team member has one job: the work they were given. Two pages, and the
@@ -1005,8 +993,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     // manager, not into a void. Their team is on My work.
     navItems = [
       ['dashboard', t('nav.myWork'), 0, 'main', t('nav.myWork')],
-      ['activities', t('nav.myActivities'), 0, 'main', t('nav.myActivities')],
-      ['escalations', t('nav.reportIssue'), escalationCount, 'main', t('nav.shortIssues')]
+      ['activities', t('nav.myActivities'), 0, 'main', t('nav.myActivities')]
     ];
   }
   // The bar along the bottom of a phone. Someone who works in Movements &
@@ -1015,10 +1002,10 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const bottomNav = isDirector
     ? ['dashboard', 'approval-queue', 'monthly', 'activities']
     : isGeneral
-      ? ['dashboard', 'escalations', 'monthly', 'activities']
+      ? ['dashboard', 'monthly', 'activities', 'reports']
       : isManager
-        ? ['dashboard', 'monthly', 'escalations']
-        : ['dashboard', 'activities', 'escalations'];
+        ? ['dashboard', 'monthly']
+        : ['dashboard', 'activities'];
   // An address naming a page this account does not have -- a manager following
   // a Director's link to #/users -- lands on the home page instead of a blank page.
   // A manager has no work register, but they do open single records: the work
@@ -1048,7 +1035,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     setRefreshing(true);
     const results = await Promise.allSettled([
       fetchJson('/api/summary'), fetchJson('/api/projects'), fetchJson('/api/activities?limit=200'),
-      fetchJson('/api/approvals'), fetchJson('/api/managers'), fetchJson('/api/approval-queue'),
+      fetchJson('/api/managers'), fetchJson('/api/approval-queue'),
       fetchJson('/api/people'),
       // Only the Director may read these two registers; nobody else is asked
       // for them, rather than being refused and the refusal ignored.
@@ -1061,9 +1048,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     if (requestNumber !== latestLoad.current) return;
     setRefreshing(false);
 
-    const [summaryResult, projectResult, activityResult, approvalResult, managerResult, queueResult, peopleResult, userResult, partnerResult, rateResult, noticeResult, inboxResult] = results;
+    const [summaryResult, projectResult, activityResult, managerResult, queueResult, peopleResult, userResult, partnerResult, rateResult, noticeResult, inboxResult] = results;
     if (noticeResult.status === 'fulfilled') setNotices(noticeResult.value);
-    const criticalFailure = [summaryResult, projectResult, activityResult, approvalResult].find((result) => result.status === 'rejected');
+    const criticalFailure = [summaryResult, projectResult, activityResult].find((result) => result.status === 'rejected');
     if (criticalFailure) {
       setLoadState((current) => (current === 'ready' ? 'ready' : 'failed'));
       fail(criticalFailure.reason.message);
@@ -1074,7 +1061,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     setSummary(summaryResult.value);
     setProjects(projectResult.value);
     setActivities(activityResult.value);
-    setApprovals(approvalResult.value);
     setManagers(managerResult.status === 'fulfilled' ? managerResult.value : []);
     setPeople(peopleResult.status === 'fulfilled' ? peopleResult.value : []);
     setApprovalQueue(queueResult.status === 'fulfilled' ? queueResult.value : emptyQueue);
@@ -1186,16 +1172,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     document.getElementById('page-title')?.focus({ preventScroll: true });
     if (Date.now() - lastLoadedAt.current > 15000) loadData();
   }, [view, loadData]);
-
-  // The requester is whoever is signed in, and a manager's request belongs to
-  // their own sector, so neither is left for the user to type.
-  useEffect(() => {
-    setApprovalForm((current) => ({
-      ...current,
-      requestedBy: user.name,
-      sector: !isDirector && user.sector ? user.sector : current.sector
-    }));
-  }, [user, isDirector]);
 
   // ---- the open activity --------------------------------------------------------
 
@@ -1353,28 +1329,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       ...(Array.isArray(choice) ? { sectors: chosen } : { sector: choice }),
       managerId: keepsManager ? manager.id : null
     });
-  });
-
-  const decideApproval = act(async (approval, status) => {
-    // A decline without a reason leaves the manager with no idea what to fix,
-    // so the note is required to decline and optional to approve.
-    const declining = status === 'Rejected';
-    const note = await dialog.prompt({
-      title: declining ? t('msg.declineTitle') : t('msg.approveTitle'),
-      message: approval.title,
-      label: declining ? t('msg.declineReason') : t('msg.noteForRequester'),
-      required: declining,
-      multiline: true,
-      danger: declining,
-      confirmLabel: declining ? t('action.decline') : t('approval.approve')
-    });
-    if (note === null) return;
-    setError('');
-    try {
-      await fetchJson(`/api/approvals/${encodeURIComponent(approval.id)}`, { method: 'PATCH', body: JSON.stringify({ status, decisionNote: note }) });
-      notify(declining ? t('msg.requestDeclined') : t('msg.requestApproved'));
-      await loadData();
-    } catch (decisionError) { fail(decisionError.message); }
   });
 
   const chooseFormProject = (projectId) => {
@@ -2104,7 +2058,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     .filter((activity) => activity.assignedTo === user.id && OPEN_ASSIGNMENT_STATUSES.includes(activity.status))
     .sort((left, right) => (left.deadline || '9999-12-31').localeCompare(right.deadline || '9999-12-31')),
   [activities, user.id]);
-  const pendingApprovals = approvals.filter((approval) => approval.status === 'Pending');
   const formProject = projects.find((project) => project.id === activityForm.projectId);
   const usd = Number(activityForm.costUsd || 0);
   // A sector manager may only file against their own sector; the API enforces
@@ -2122,7 +2075,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const dashboardMetrics = [
     [t('metric.projects'), summary.summary?.totalProjects || 0],
     [t('metric.activitiesInProgress'), summary.summary?.activeOperations || 0],
-    [t('metric.pendingApprovals'), summary.summary?.approvalsPending || 0],
     [t('metric.completionRate'), `${summary.summary?.completionRate || 0}%`],
     ...(typeof summary.summary?.registeredUsers === 'number' ? [[t('metric.registeredUsers'), summary.summary.registeredUsers]] : []),
     // The API counts only what is actually waiting on the manager -- work they
@@ -2140,8 +2092,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const closePlanRoute = useCallback(() => navigate(buildHash('monthly')), [navigate]);
   const openMovementRoute = useCallback((movementId) => navigate(buildHash('movements', movementId)), [navigate]);
   const closeMovementRoute = useCallback(() => navigate(buildHash('movements')), [navigate]);
-  const openEscalationRoute = useCallback((id) => navigate(buildHash('escalations', id)), [navigate]);
-  const closeEscalationRoute = useCallback(() => navigate(buildHash('escalations')), [navigate]);
   const openQueueItem = (item) => (item.ref ? navigate(buildHash('movements', item.id)) : openActivity(item.id));
   const onModuleChanged = useCallback(() => { loadData(); }, [loadData]);
 
@@ -2181,22 +2131,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       fetchJson={fetchJson}
       reloadKey={summary}
       onGo={go}
-      onOpenEscalation={openEscalationRoute}
       onMessage={notify}
       onError={fail}
       onChanged={onModuleChanged}
-    />;
-  } else if (view === 'escalations') {
-    content = <EscalationsPage
-      user={user}
-      fetchJson={fetchJson}
-      projects={projects}
-      openId={routeId}
-      onOpen={openEscalationRoute}
-      onClose={closeEscalationRoute}
-      onChanged={onModuleChanged}
-      onMessage={notify}
-      onError={fail}
     />;
   } else if (view === 'dashboard') {
     content = <><Home
@@ -2416,19 +2353,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         onPrint={isDirector ? () => window.print() : null}
         onClose={() => setReport(null)}
       />
-    </>;
-  } else if (view === 'approvals') {
-    content = <>
-      <section className="toolbar-row"><div className="filter-group">
-        <label className="sr-only" htmlFor="approval-sector-filter">{t('app.businessOperation')}</label>
-        <select id="approval-sector-filter" value={sectorFilter} onChange={(event) => setSectorFilter(event.target.value)}><option value="All">{t('app.allOperations')}</option>{sectors.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}</select>
-      </div></section>
-      <Panel title={t('panel.approvalRegister')} subtitle={`${approvals.length}`}>
-        <ApprovalTable approvals={approvals.filter((approval) => sectorFilter === 'All' || approval.sector === sectorFilter)} canDecide={isDirector} busy={actionBusy} onDecide={decideApproval} empty={t('empty.noApprovalRecords')} />
-      </Panel>
-      {/* A request is raised by a sector manager and decided by the Director,
-          who therefore has nobody to raise one to. */}
-      {isManager && <ApprovalForm form={approvalForm} setForm={setApprovalForm} sectorOptions={sectorOptions} busy={actionBusy} onSubmit={(event) => submit(event, '/api/approvals', approvalForm, t('msg.requestSent'), () => setApprovalForm({ ...emptyApproval, sector: sectorOptions[0]?.id || emptyApproval.sector, requestedBy: user.name }))} />}
     </>;
   } else if (view === 'users') {
     content = <>
@@ -2758,29 +2682,6 @@ function ActivityTable({ activities, isDirector, openId, onOpen, empty }) {
   </tbody></table></div> : <EmptyState>{empty}</EmptyState>;
 }
 
-function ApprovalTable({ approvals, canDecide, busy, onDecide, empty }) {
-  const t = useT();
-  return approvals.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('field.whatIsNeeded')}</th><th>{t('app.businessOperation')}</th><th>{t('field.amount')}</th><th>{t('field.organizationOwner')}</th><th>{t('field.priority')}</th><th>{t('table.status')}</th><th>{t('field.requestedBy')}</th><th>{t('field.added')}</th><th>{t('approval.yourDecision')}</th></tr></thead><tbody>
-    {approvals.map((approval) => <tr key={approval.id}>
-      <td className="card-title-cell"><strong>{approval.title}</strong>{approval.justification && <small className="justification">{approval.justification}</small>}<small>{approval.id}</small></td>
-      <td data-label={t('app.businessOperation')}>{sectorName(approval.sector)}</td>
-      <td data-label={t('field.amount')}>{formatRwf(approval.amount)}</td>
-      <td data-label={t('field.organizationOwner')}>{approval.owner}</td>
-      <td data-label={t('field.priority')}><span className="priority-badge">{t(`form.priority${approval.priority}`)}</span></td>
-      <td data-label={t('table.status')}><span className={`status-badge status-${approval.status.toLowerCase()}`}>{t(`approval.${approval.status.toLowerCase()}`)}</span></td>
-      <td data-label={t('field.requestedBy')}>{approval.requestedBy}</td>
-      <td data-label={t('field.added')}>{formatShortDate(approval.createdAt)}</td>
-      <td className="card-actions">
-        {approval.status === 'Pending'
-          ? (canDecide
-            ? <div className="decision-actions"><button className="text-btn" disabled={busy} onClick={() => onDecide(approval, 'Approved')} type="button">{t('approval.approve')}</button><button className="danger-btn" disabled={busy} onClick={() => onDecide(approval, 'Rejected')} type="button">{t('action.decline')}</button></div>
-            : <span className="muted-cell">{t('approval.awaitingDirector')}</span>)
-          : <div className="decision-trail"><strong>{approval.decidedBy || t('approval.recorded')}</strong>{approval.decidedAt && <small>{formatShortDate(approval.decidedAt)}</small>}{approval.decisionNote && <small className="justification">{approval.decisionNote}</small>}</div>}
-      </td>
-    </tr>)}
-  </tbody></table></div> : <EmptyState>{empty}</EmptyState>;
-}
-
 function Field({ label, wide, children }) { return <label className={wide ? 'form-field form-field-wide' : 'form-field'}><span>{label}</span>{children}</label>; }
 
 function AccountForm({ form, setForm, managers, generalManagers = [], busy, language, onSubmit }) {
@@ -2980,28 +2881,6 @@ function ActivityForm({ form, setForm, projects, selectedProject, managers, isDi
   </form>;
 }
 
-function ApprovalForm({ form, setForm, sectorOptions, busy, onSubmit }) {
-  const t = useT();
-  return <form className="form-panel" onSubmit={onSubmit}>
-    <div className="panel-header"><div><h2>{t('form.raiseRequest')}</h2><span>{t('form.raiseRequestBlurb')}</span></div></div>
-    <div className="form-grid">
-      <Field label={t('field.whatIsNeeded')}><input required maxLength="200" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></Field>
-      <Field label={t('app.businessOperation')}><select value={form.sector} onChange={(event) => setForm({ ...form, sector: event.target.value })}>{sectorOptions.map((sector) => <option key={sector.id} value={sector.id}>{sectorName(sector.id)}</option>)}</select></Field>
-      <Field label={t('field.estimatedAmount')}><input required type="number" inputMode="decimal" min="0" value={form.amount} onChange={(event) => setForm({ ...form, amount: event.target.value })} /></Field>
-      <Field label={t('field.organizationOwner')}><input required maxLength="150" value={form.owner} onChange={(event) => setForm({ ...form, owner: event.target.value })} /></Field>
-      <Field label={t('field.priority')}><select value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })}>{[['Low', 'form.priorityLow'], ['Medium', 'form.priorityMedium'], ['High', 'form.priorityHigh']].map(([value, key]) => <option key={value} value={value}>{t(key)}</option>)}</select></Field>
-      <Field label={t('field.requestedBy')}><input readOnly tabIndex={-1} value={form.requestedBy} /></Field>
-      <Field label={t('field.reasonForRequest')}><textarea required rows="3" value={form.justification} onChange={(event) => setForm({ ...form, justification: event.target.value })} /></Field>
-    </div>
-    <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('action.sendForApproval')}</button></div>
-  </form>;
-}
-
-// The Reports section: pick a period, read the figures, take them away.
-//
-// Every number below is computed on the server from the activity register, and
-// the PDF and Excel exports run the very same scoped query, so what a manager
-// downloads is exactly what a manager can see.
 function ReportsSection({
   mode, range, report, busy, sectorLabel, operation, project, operationOptions, projectOptions,
   onOperationChange, onProjectChange, onModeChange, onRangeChange, onGenerate, onExport, onPrint, onClose

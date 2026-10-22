@@ -380,8 +380,6 @@ try {
   const report = await api(adminToken, '/api/reports/activities?period=monthly&month=' + new Date().toISOString().slice(0, 7));
   check('the activity report generates', report.status === 200 && report.body.activitySummary,
     `${report.status} ${report.body.message || ''}`);
-  const approvalsList = await api(adminToken, '/api/approvals');
-  check('the separate approvals register still loads', approvalsList.status === 200 && Array.isArray(approvalsList.body));
   const managerRegister = await api(farmingToken, '/api/activities?limit=100');
   check('a manager still reads only their own area',
     managerRegister.status === 200 && managerRegister.body.every((item) => item.sector === 'farming'));

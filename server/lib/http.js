@@ -102,7 +102,7 @@ export function hasFullScope(user) {
 // it is why they count in hasFullScope above -- but they are NOT the Director:
 // isAdmin stays false for them, so they assign no work, decide no activity or
 // trip approval, export no report and manage no partner. Their own authority is
-// the organisation (teams, membership) and the escalations that reach them.
+// the organisation (teams, membership) and the team members' work they check.
 //
 // Every route that used hasFullScope as permission to ACT rather than to READ
 // (raising a trip, editing one) asks actsAcrossOperations instead, so widening

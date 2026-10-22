@@ -1,6 +1,6 @@
 // End-to-end check of the organisation: the General Manager, reporting lines,
-// teams, escalations, and project-by-project partner sharing -- against the
-// running API and the real database.
+// teams, the project manager's check of finished work, and project-by-project
+// partner sharing -- against the running API and the real database.
 //
 //   1. The Director creates a General Manager; nobody else can create accounts
 //      or change a role, and the General Manager reads every operation but
@@ -9,9 +9,8 @@
 //      partner can never be put in the internal line, and a loop is refused.
 //   3. Teams: a project manager runs teams only in their own projects; only
 //      team members join; a team member on a team is narrowed to its project.
-//   4. Escalations climb staff -> project manager -> General Manager ->
-//      Director, nobody settles their own, a refusal needs a reason, and every
-//      step is on the trail and in somebody's notifications.
+//   4. A team member's finished work is checked by their project manager
+//      before the Director's final check, and only the Director marks it done.
 //   5. A partner reaches none of it, and a project shared with them narrows
 //      their operation to that project.
 //   6. Existing projects and their records are untouched by any of the above.
@@ -90,7 +89,6 @@ async function activity(projectId, sector, { assignedTo = null, name } = {}) {
 const SECOND_PROJECT = 'ZZ-PRJ-MINING-2';
 
 async function cleanup() {
-  await pool.query('DELETE FROM escalations WHERE raised_by = ANY($1::int[])', [created.users]);
   await pool.query('DELETE FROM organization_history WHERE actor_id = ANY($1::int[]) OR subject_user_id = ANY($1::int[])', [created.users]);
   await pool.query("DELETE FROM organization_history WHERE detail->>'teamName' LIKE 'ZZTEST%'");
   // Other suites create ZZTEST accounts with a manager, which writes a
@@ -183,7 +181,7 @@ async function run() {
   check("the General Manager cannot read partners' messages to the Director", gmInbox.status === 403, gmInbox.status);
   const gmSummary = await api(gm.token, '/api/summary');
   check('the General Manager gets the organisation-wide summary', gmSummary.status === 200
-    && gmSummary.body.sectorBreakdown?.length === 4 && typeof gmSummary.body.summary?.escalationsAwaitingMe === 'number', gmSummary.status);
+    && gmSummary.body.sectorBreakdown?.length === 4 && typeof gmSummary.body.summary?.managerChecksWaiting === 'number', gmSummary.status);
 
   // ---- 2. reporting lines --------------------------------------------------------
   section('2. reporting lines follow the hierarchy');
@@ -288,62 +286,8 @@ async function run() {
   const archivedAdd = await send(pmA.token, 'POST', `/api/organization/teams/${teamA2.body.id}/members`, { userId: unteamed.id });
   check('nobody joins an archived team', archivedAdd.status === 409, archivedAdd);
 
-  // ---- 4. escalations -----------------------------------------------------------
-  section('4. an issue climbs the line, and every step is recorded');
-  const raised = await send(staffA.token, 'POST', '/api/escalations', {
-    title: 'ZZTEST the drill is broken', body: 'Needs a spare part.', activityId: workA, priority: 'High'
-  });
-  check('a team member raises an issue on their work', raised.status === 201, raised);
-  check('...and it goes to the project manager they report to', raised.body.holderId === pmA.id && raised.body.holderRole === 'manager', raised.body);
-  const foreignIssue = await send(staffA.token, 'POST', '/api/escalations', { title: 'ZZTEST probe', activityId: workB });
-  check('an issue cannot point at a record the raiser cannot see', foreignIssue.status === 404, foreignIssue);
-  const peek = await api(pmB.token, `/api/escalations/${raised.body.id}`);
-  check("another project's manager cannot read it", peek.status === 404, peek.status);
-  const pmWaiting = await api(pmA.token, '/api/escalations?box=waiting');
-  check("it is in the project manager's queue", pmWaiting.body.some((row) => row.id === raised.body.id));
-  const summaryA = await api(pmA.token, '/api/summary');
-  check('...and counted on their badge', summaryA.body.summary?.escalationsAwaitingMe >= 1);
-  const staffSettles = await send(staffA.token, 'POST', `/api/escalations/${raised.body.id}/resolve`, { note: 'done' });
-  check('the raiser cannot settle their own issue', staffSettles.status === 403, staffSettles);
-  const gmEarly = await send(gm.token, 'POST', `/api/escalations/${raised.body.id}/resolve`, { note: 'done' });
-  check('nobody but the holder settles it', gmEarly.status === 403, gmEarly);
-  const up1 = await send(pmA.token, 'POST', `/api/escalations/${raised.body.id}/escalate`, { note: 'Above my budget.' });
-  check('the project manager passes it to the General Manager', up1.status === 200 && up1.body.holderId === gm.id && up1.body.holderRole === 'general-manager', up1.body);
-  const gmQueue = await api(gm.token, '/api/escalations?box=waiting');
-  check("it is now in the General Manager's queue", gmQueue.body.some((row) => row.id === raised.body.id));
-  const up2 = await send(gm.token, 'POST', `/api/escalations/${raised.body.id}/escalate`, { note: 'Needs the Director.' });
-  check('the General Manager passes it to the Director', up2.status === 200 && up2.body.holderRole === 'director', up2.body);
-  const top = await send(director.token, 'POST', `/api/escalations/${raised.body.id}/escalate`, {});
-  check('there is nobody above the Director', top.status === 409, top);
-  const shortReason = await send(director.token, 'POST', `/api/escalations/${raised.body.id}/reject`, { note: 'no' });
-  check('a refusal without a real reason is refused', shortReason.status === 400 && shortReason.body.code === 'REASON_REQUIRED', shortReason);
-  const rejected = await send(director.token, 'POST', `/api/escalations/${raised.body.id}/reject`, { note: 'Use the spare drill from Haulage.' });
-  check('the Director refuses it with a reason', rejected.status === 200 && rejected.body.status === 'rejected', rejected);
-  const twice = await send(director.token, 'POST', `/api/escalations/${raised.body.id}/resolve`, {});
-  check('a settled issue cannot be settled again', twice.status === 403 || twice.status === 409, twice);
-  const trail = await api(staffA.token, `/api/escalations/${raised.body.id}`);
-  check('the raiser reads the whole trail: raised, passed up twice, refused', trail.status === 200
-    && JSON.stringify(trail.body.events.map((event) => event.action)) === JSON.stringify(['raised', 'escalated', 'escalated', 'rejected'])
-    && trail.body.resolution === 'Use the spare drill from Haulage.', trail.body.events);
-  const told = await pool.query("SELECT kind FROM notifications WHERE user_id = $1 AND kind LIKE 'escalation_%'", [staffA.id]);
-  check('the raiser was told it was refused, with the reason', told.rows.some((row) => row.kind === 'escalation_rejected'));
-  const toldPm = await pool.query("SELECT 1 FROM notifications WHERE user_id = $1 AND kind = 'escalation_raised'", [pmA.id]);
-  const toldGm = await pool.query("SELECT 1 FROM notifications WHERE user_id = $1 AND kind = 'escalation_escalated'", [gm.id]);
-  check("each holder was told when it reached them", toldPm.rowCount >= 1 && toldGm.rowCount >= 1);
-
-  const pmIssue = await send(pmB.token, 'POST', '/api/escalations', { title: 'ZZTEST decision', kind: 'approval', projectId: SECOND_PROJECT });
-  check("a project manager's request goes to the General Manager", pmIssue.status === 201 && pmIssue.body.holderId === gm.id, pmIssue.body);
-  const comment = await send(pmB.token, 'POST', `/api/escalations/${pmIssue.body.id}/comments`, { note: 'More detail.' });
-  check('the raiser can add to an open issue', comment.status === 201, comment);
-  const outsider = await send(pmA.token, 'POST', `/api/escalations/${pmIssue.body.id}/comments`, { note: 'Me too.' });
-  check('somebody who is neither raiser nor holder cannot', outsider.status === 404 || outsider.status === 403, outsider);
-  const approved = await send(gm.token, 'POST', `/api/escalations/${pmIssue.body.id}/resolve`, { note: 'Approved.' });
-  check('the General Manager approves it', approved.status === 200 && approved.body.status === 'resolved', approved);
-  const directorRaise = await send(director.token, 'POST', '/api/escalations', { title: 'ZZTEST' });
-  check('the Director has nobody to raise to', directorRaise.status === 403, directorRaise);
-
-  // ---- 4b. finished work ---------------------------------------------------------
-  section("4b. a team member's finished work is checked by their project manager first");
+  // ---- 4. finished work ----------------------------------------------------------
+  section("4. a team member's finished work is checked by their project manager first");
   const done = await activity(PROJECT_IDS.mining, 'mining', { assignedTo: staffA.id, name: 'ZZTEST finished by staff' });
   await pool.query("UPDATE activities SET status = 'In Progress', evidence_required = FALSE WHERE id = $1", [done]);
   const handIn = await send(staffA.token, 'POST', `/api/activities/${done}/completion`, {});
@@ -393,12 +337,10 @@ async function run() {
 
   // ---- 5. partners -----------------------------------------------------------------
   section('5. partners stay outside, and see only what was shared');
-  for (const path of ['/api/organization', '/api/escalations', '/api/organization/history']) {
+  for (const path of ['/api/organization', '/api/organization/history']) {
     const attempt = await api(partner.token, path);
     check(`a partner cannot reach ${path}`, attempt.status === 403, attempt.status);
   }
-  const partnerRaise = await send(partner.token, 'POST', '/api/escalations', { title: 'ZZTEST' });
-  check('a partner cannot raise an internal issue', partnerRaise.status === 403, partnerRaise.status);
   const partnerNotices = await api(partner.token, '/api/notifications');
   check('a partner reads their own notifications', partnerNotices.status === 200, partnerNotices.status);
   const before = await api(partner.token, '/api/partner/activities');

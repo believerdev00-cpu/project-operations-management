@@ -498,13 +498,8 @@ export const NOTIFICATION_KINDS = [
   'work_approved',      // to the person carrying the work: it was marked done
   'work_returned',      // to the person carrying the work: it came back, with the reason
   'partner_comment',    // to the Director: an external partner wrote to them
-  // The organisation (server/routes/organization.js, escalations.js).
+  // The organisation (server/routes/organization.js, partners.js).
   'team_added',           // to a team member: you were put on a team
-  'escalation_raised',    // to the holder: an issue was raised to you
-  'escalation_escalated', // to the next holder: an issue was passed up to you
-  'escalation_resolved',  // to the raiser: your issue was settled, with the answer
-  'escalation_rejected',  // to the raiser: your issue was refused, with the reason
-  'escalation_comment',   // to the other party: somebody wrote on an issue
   'partner_shared'        // to a partner: a project was shared with you
 ];
 

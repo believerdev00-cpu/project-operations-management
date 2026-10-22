@@ -28,7 +28,7 @@ const check = (label, ok, detail = '') => {
 
 // ui.jsx holds the shared error boundary and dialogs; left off this list, every
 // key only they use was reported as unused, and their JSX went unchecked.
-const FILES = ['App.jsx', 'ui.jsx', 'journey.jsx', 'Home.jsx', 'MovementModule.jsx', 'ActivityReview.jsx', 'PartnerPortal.jsx', 'ExternalPartners.jsx', 'MonthlyPlans.jsx', 'ExpensePanel.jsx', 'Organization.jsx', 'Escalations.jsx']
+const FILES = ['App.jsx', 'ui.jsx', 'journey.jsx', 'Home.jsx', 'MovementModule.jsx', 'ActivityReview.jsx', 'PartnerPortal.jsx', 'ExternalPartners.jsx', 'MonthlyPlans.jsx', 'ExpensePanel.jsx', 'Organization.jsx']
   .map((name) => path.join(root, 'src', name));
 
 const sources = Object.fromEntries(FILES.map((file) => [path.basename(file), fs.readFileSync(file, 'utf8')]));
@@ -85,13 +85,8 @@ const FAMILIES = {
   // server/db/monthlySchema.js) needs a sentence in every language.
   'notice.kind.': ['plan_assigned', 'plan_changed', 'change_requested', 'report_submitted', 'report_accepted',
     'report_returned', 'work_submitted', 'work_to_check', 'work_approved', 'work_returned', 'partner_comment',
-    'team_added', 'escalation_raised', 'escalation_escalated', 'escalation_resolved', 'escalation_rejected',
-    'escalation_comment', 'partner_shared'],
-  // The organisation (server/db/organizationSchema.js): every escalation kind,
-  // status and trail action, and every organisation trail action.
-  'esc.kind.': ['issue', 'approval'],
-  'esc.status.': ['open', 'resolved', 'rejected'],
-  'esc.action.': ['raised', 'escalated', 'commented', 'resolved', 'rejected', 'reopened'],
+    'team_added', 'partner_shared'],
+  // The organisation (server/db/organizationSchema.js): every trail action.
   'org.action.': ['team_created', 'team_updated', 'team_archived', 'team_restored', 'member_added', 'member_removed',
     'leader_changed', 'reporting_changed', 'partner_profile_changed', 'partner_projects_changed'],
   'plan.objectiveState.': ['notStarted', 'inProgress', 'done', 'overdue']

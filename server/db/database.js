@@ -452,7 +452,7 @@ export async function initDatabase() {
     await pool.query(`CREATE INDEX IF NOT EXISTS partner_comments_unread_idx ON partner_comments(read_by_director_at)
       WHERE author_role = 'partner' AND read_by_director_at IS NULL`);
 
-    // The organisation -- reporting lines, teams, escalations and what each
+    // The organisation -- reporting lines, teams, the work check and what each
     // partner is shown project by project -- hangs off users, projects,
     // activities and the partner grants above, so it migrates after all of them.
     await migrateOrganizationModule(pool);

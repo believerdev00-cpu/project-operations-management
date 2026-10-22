@@ -1223,22 +1223,6 @@ td .operation-checks { display: grid; gap: 0; }
 .team-manage .button-row { margin-top: 0; }
 .danger-text { color: var(--red); }
 
-/* ---- issues that climb the line ---------------------------------------------- */
-
-.escalation-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-.escalation-open { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 12px 14px; color: var(--ink); text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
-.escalation-open:hover { border-color: #b9cfe4; background: #fbfdff; }
-.escalation-row.row-selected .escalation-open { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(21, 101, 192, .12); }
-.escalation-main { display: grid; gap: 3px; min-width: 0; }
-.escalation-main strong { overflow-wrap: anywhere; }
-.escalation-main small { color: var(--muted); font-size: .76rem; }
-.escalation-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
-.escalation-meta small { color: var(--muted); font-size: .74rem; }
-.priority-high { color: var(--red); background: #fdecec; }
-.priority-low { color: var(--muted); background: #eef2f6; }
-.escalation-detail .history-list p { margin: 4px 0 0; color: var(--ink); font-size: .84rem; line-height: 1.5; white-space: pre-wrap; }
-.home-alert-escalation { border-left-color: var(--red); }
-
 .sharing-row td { background: #f7fafc; }
 .partner-sharing { display: grid; gap: 4px; padding: 6px 0; }
 
@@ -1252,7 +1236,5 @@ td .operation-checks { display: grid; gap: 0; }
   .org-card-top { min-width: 0; width: 100%; }
   .team-grid { grid-template-columns: minmax(0, 1fr); }
   .team-manage .inline-form { grid-template-columns: minmax(0, 1fr); }
-  .escalation-open { flex-direction: column; align-items: stretch; }
-  .escalation-meta { justify-content: flex-start; }
   .sharing-row td { display: block; }
 }

@@ -1,5 +1,5 @@
-// The organisation: who reports to whom, the teams inside each project, the
-// issues that travel up the line, and what an external partner is shown.
+// The organisation: who reports to whom, the teams inside each project, and
+// what an external partner is shown.
 //
 // THE SHAPE, as the Director drew it:
 //
@@ -24,8 +24,8 @@
 // WHAT THIS IS NOT. Teams do not own activities and do not change who approves
 // what: an activity is still approved through approval_required_from exactly as
 // before. A team is who works on a project, which narrows what its members can
-// read (see projectScope in server/lib/http.js) and decides where the issues
-// they raise go first.
+// read (see projectScope in server/lib/http.js) and who checks their finished
+// work first (checkerFor in server/lib/organization.js).
 
 // Who an account may report to, by its own role. Anything not listed is
 // refused, both by the API and by the trigger below -- so an external partner
@@ -44,16 +44,6 @@ export const REPORTS_TO = {
 };
 
 export const TEAM_STATUSES = ['active', 'archived'];
-
-// An escalation is either an operational problem somebody needs help with, or
-// a decision above the raiser's authority. Both travel the same way: to the
-// person the raiser reports to, then up the line until somebody settles it.
-export const ESCALATION_KINDS = ['issue', 'approval'];
-export const ESCALATION_STATUSES = ['open', 'resolved', 'rejected'];
-export const ESCALATION_PRIORITIES = ['Low', 'Medium', 'High'];
-// Every row of the trail says what happened, in one of these words. The
-// browser translates them (escalation.action.*).
-export const ESCALATION_ACTIONS = ['raised', 'escalated', 'commented', 'resolved', 'rejected', 'reopened'];
 
 // What the organisation trail records. Translated in the browser as
 // org.action.* -- the server writes the word, never a sentence.
@@ -174,74 +164,6 @@ const statements = [
   `DROP TRIGGER IF EXISTS team_members_role ON team_members`,
   `CREATE TRIGGER team_members_role BEFORE INSERT OR UPDATE ON team_members
      FOR EACH ROW EXECUTE FUNCTION enforce_team_member_role()`,
-
-  // ---- escalations ------------------------------------------------------------
-  //
-  // An issue raised by somebody, held by one named person at a time
-  // (holder_id), and settled by being resolved or rejected. holder_role says
-  // which desk that is: 'director' means the Director's office, so any active
-  // Director may answer it -- the same widening approval_required_role makes.
-  `CREATE TABLE IF NOT EXISTS escalations (
-     id SERIAL PRIMARY KEY,
-     kind VARCHAR(20) NOT NULL DEFAULT 'issue',
-     title VARCHAR(200) NOT NULL,
-     body TEXT NOT NULL DEFAULT '',
-     priority VARCHAR(20) NOT NULL DEFAULT 'Medium',
-     sector VARCHAR(50) REFERENCES sectors(id),
-     project_id VARCHAR(50) REFERENCES projects(id) ON DELETE SET NULL,
-     activity_id VARCHAR(50) REFERENCES activities(id) ON DELETE SET NULL,
-     team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
-     raised_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-     raised_by_name VARCHAR(150) NOT NULL DEFAULT '',
-     holder_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-     holder_role VARCHAR(30) NOT NULL,
-     status VARCHAR(20) NOT NULL DEFAULT 'open',
-     resolution TEXT NOT NULL DEFAULT '',
-     settled_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-     settled_at TIMESTAMPTZ,
-     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-     CONSTRAINT escalations_title_check CHECK (char_length(btrim(title)) BETWEEN 1 AND 200)
-   )`,
-  `ALTER TABLE escalations DROP CONSTRAINT IF EXISTS escalations_kind_check`,
-  `ALTER TABLE escalations ADD CONSTRAINT escalations_kind_check CHECK (kind IN (${inList(ESCALATION_KINDS)}))`,
-  `ALTER TABLE escalations DROP CONSTRAINT IF EXISTS escalations_status_check`,
-  `ALTER TABLE escalations ADD CONSTRAINT escalations_status_check CHECK (status IN (${inList(ESCALATION_STATUSES)}))`,
-  `ALTER TABLE escalations DROP CONSTRAINT IF EXISTS escalations_priority_check`,
-  `ALTER TABLE escalations ADD CONSTRAINT escalations_priority_check CHECK (priority IN (${inList(ESCALATION_PRIORITIES)}))`,
-  `ALTER TABLE escalations DROP CONSTRAINT IF EXISTS escalations_holder_role_check`,
-  `ALTER TABLE escalations ADD CONSTRAINT escalations_holder_role_check
-     CHECK (holder_role IN ('manager', 'general-manager', 'director'))`,
-  // A refusal always says why; the raiser gets the reason back.
-  `ALTER TABLE escalations DROP CONSTRAINT IF EXISTS escalations_rejection_reason`,
-  `ALTER TABLE escalations ADD CONSTRAINT escalations_rejection_reason
-     CHECK (status <> 'rejected' OR char_length(btrim(resolution)) > 0)`,
-  // Settled means somebody settled it, at a time.
-  `ALTER TABLE escalations DROP CONSTRAINT IF EXISTS escalations_settled_check`,
-  `ALTER TABLE escalations ADD CONSTRAINT escalations_settled_check
-     CHECK ((status = 'open') = (settled_at IS NULL))`,
-  `CREATE INDEX IF NOT EXISTS escalations_holder_idx ON escalations(holder_id) WHERE status = 'open'`,
-  `CREATE INDEX IF NOT EXISTS escalations_director_idx ON escalations(holder_role) WHERE status = 'open'`,
-  `CREATE INDEX IF NOT EXISTS escalations_raised_idx ON escalations(raised_by, created_at DESC)`,
-
-  // Every step, append-only. Escalations are only ever settled, never deleted,
-  // so the trail of who passed what to whom outlives the decision.
-  `CREATE TABLE IF NOT EXISTS escalation_events (
-     id SERIAL PRIMARY KEY,
-     escalation_id INTEGER NOT NULL REFERENCES escalations(id) ON DELETE CASCADE,
-     action VARCHAR(20) NOT NULL,
-     actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-     actor_name VARCHAR(150) NOT NULL DEFAULT '',
-     from_holder_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-     to_holder_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-     to_holder_name VARCHAR(150) NOT NULL DEFAULT '',
-     note TEXT NOT NULL DEFAULT '',
-     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-   )`,
-  `ALTER TABLE escalation_events DROP CONSTRAINT IF EXISTS escalation_events_action_check`,
-  `ALTER TABLE escalation_events ADD CONSTRAINT escalation_events_action_check
-     CHECK (action IN (${inList(ESCALATION_ACTIONS)}))`,
-  `CREATE INDEX IF NOT EXISTS escalation_events_idx ON escalation_events(escalation_id, created_at)`,
 
   // ---- the organisation's own trail ----------------------------------------
   //
