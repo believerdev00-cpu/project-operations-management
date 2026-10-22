@@ -463,7 +463,7 @@ router.post('/teams/:id/members', asyncRoute(async (req, res) => {
       userId: member.id,
       kind: 'team_added',
       params: { team: team.name, project: team.project_name, name: req.user.name },
-      link: '#/organization',
+      link: '#/dashboard',
       actor: req.user
     });
     await client.query('COMMIT');

@@ -4,17 +4,24 @@ import { fill, useI18n } from './i18n.js';
 import { useBusy, useDialog } from './ui.jsx';
 import { EscalationList } from './Escalations.jsx';
 
-// The organisation: who reports to whom, the teams under each project manager,
-// and -- for senior management -- the external partners as a branch of their
-// own.
+// The organisation is not a page of its own: it is how the rest of the system
+// works, so its pieces sit where the work is done.
 //
-// Everything on this page comes from GET /api/organization, which already cut
-// it down to what the reader may see: the Director and the General Manager get
-// the whole chart, a project manager their own teams and the line above them,
-// a team member their own team and the line above them. Each button is drawn
-// from the `can` flags and per-team `canManage` the API worked out with the
-// same rules its routes enforce, so a button the browser draws is never the
-// thing that decides.
+//   TeamsSection         the teams of the projects the reader is responsible
+//                        for, with their members and leaders -- on the
+//                        Director's Projects page, the General Manager's and a
+//                        project manager's Home, and a team member's My work.
+//   OrganizationSection  who reports to whom, internal line and external
+//                        partners, and the trail of changes -- on the
+//                        Director's People page and the General Manager's Home.
+//
+// Both read GET /api/organization, which already cut the organisation down to
+// what the reader may see: the Director and the General Manager the whole of
+// it, a project manager their own teams and the line above them, a team member
+// their own team and the line above them. Each button is drawn from the `can`
+// flags and per-team `canManage` the API worked out with the same rules its
+// routes enforce, so a button the browser draws is never the thing that
+// decides.
 //
 // The chart reads top to bottom and never sideways: on a phone every level is
 // a full-width stack, so nothing scrolls horizontally however many managers,
@@ -34,24 +41,22 @@ function generalManagerOf(person, byId) {
   return null;
 }
 
-export default function OrganizationPage({ user, fetchJson, onMessage, onError, onChanged }) {
-  const { language, t } = useI18n();
-  const dialog = useDialog();
+// The organisation as the reader may see it, and one way to change it: every
+// change is one request, then a reload, so the screen never shows a team the
+// server did not agree to. `reloadKey` follows the workspace's own refreshes.
+function useOrganization({ fetchJson, onMessage, onError, onChanged, reloadKey, archived = false, withHistory = false }) {
   const [data, setData] = useState(null);
-  const [failed, setFailed] = useState(false);
   const [history, setHistory] = useState(null);
-  const [showArchived, setShowArchived] = useState(false);
-  const [openTeam, setOpenTeam] = useState(null);
+  const [failed, setFailed] = useState(false);
   const [busy, run] = useBusy();
   const latest = useRef(0);
-  const senior = user.role === 'super-admin' || user.role === 'general-manager';
 
   const load = useCallback(async () => {
     const request = ++latest.current;
     try {
       const [chart, trail] = await Promise.all([
-        fetchJson(`/api/organization${showArchived ? '?archived=1' : ''}`),
-        senior ? fetchJson('/api/organization/history?limit=40') : Promise.resolve(null)
+        fetchJson(`/api/organization${archived ? '?archived=1' : ''}`),
+        withHistory ? fetchJson('/api/organization/history?limit=40') : Promise.resolve(null)
       ]);
       if (request !== latest.current) return;
       setData(chart);
@@ -62,12 +67,10 @@ export default function OrganizationPage({ user, fetchJson, onMessage, onError, 
       setFailed(true);
       onError(loadError.message);
     }
-  }, [fetchJson, senior, showArchived, onError]);
+  }, [fetchJson, archived, withHistory, onError]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, reloadKey]);
 
-  // Every change is one request, then a reload of the chart, so the page never
-  // shows a team the server did not agree to.
   const act = useCallback((task, success) => run(async () => {
     try {
       await task();
@@ -81,35 +84,46 @@ export default function OrganizationPage({ user, fetchJson, onMessage, onError, 
     }
   }), [run, load, onMessage, onError, onChanged]);
 
-  if (failed && !data) {
-    return <div className="empty-state load-issue">
+  return { data, history, failed, busy, load, act };
+}
+
+function SectionLoading({ failed, onRetry, t }) {
+  return failed
+    ? <div className="empty-state load-issue">
       <strong>{t('app.loadFailed')}</strong>
-      <button className="primary-btn" type="button" onClick={load}>{t('action.retry')}</button>
-    </div>;
-  }
-  if (!data) return <div className="loading-state"><span className="spinner" />{t('app.loading')}</div>;
+      <button className="primary-btn" type="button" onClick={onRetry}>{t('action.retry')}</button>
+    </div>
+    : <div className="compact-loading"><span className="spinner" /></div>;
+}
 
-  return <div className="organization">
-    <section className="welcome-strip">
-      <div>
-        <span className="eyebrow">{t('org.eyebrow')}</span>
-        <h2>{senior ? t('org.title') : t('org.myTitle')}</h2>
-        <p>{senior ? t('org.blurb') : user.role === 'manager' ? t('org.managerBlurb') : t('org.staffBlurb')}</p>
-      </div>
-    </section>
+// The teams, where they are worked with. A project manager and the senior
+// managers see each team's members and change them in place; a team member
+// sees their own team, who leads it and who they report to.
+export function TeamsSection({ user, fetchJson, onMessage, onError, onChanged, reloadKey }) {
+  const { language, t } = useI18n();
+  const dialog = useDialog();
+  const senior = user.role === 'super-admin' || user.role === 'general-manager';
+  const [showArchived, setShowArchived] = useState(false);
+  const [openTeam, setOpenTeam] = useState(null);
+  const { data, failed, busy, load, act } = useOrganization({
+    fetchJson, onMessage, onError, onChanged, reloadKey, archived: senior && showArchived
+  });
 
-    <OrgChart data={data} user={user} t={t} language={language} busy={busy}
-      onOpenTeam={(id) => setOpenTeam(id)}
-      onChangeLine={(person, managerId) => act(
-        () => fetchJson(`/api/users/${person.id}/assignment`, { method: 'PATCH', body: JSON.stringify({ managerId: managerId || null }) }),
-        t('org.lineSaved')
-      )} />
+  if (!data) return <section className="panel" id="teams"><SectionLoading failed={failed} onRetry={load} t={t} /></section>;
 
+  // Who a team member reports to, said in a sentence above their team.
+  const me = data.people.find((person) => person.id === user.id);
+  const boss = me?.reportsToId ? data.people.find((person) => person.id === me.reportsToId) : null;
+  const isStaff = user.role === 'staff';
+
+  return <>
     <section className="panel" id="teams">
       <div className="panel-header">
         <div>
-          <h2>{user.role === 'staff' ? t('org.myTeams') : t('org.teams')}</h2>
-          <span>{fill(t('org.teamCount'), { count: data.teams.filter((team) => team.status === 'active').length })}</span>
+          <h2>{isStaff ? t('org.myTeams') : t('org.teams')}</h2>
+          <span>{isStaff
+            ? (boss ? fill(t('org.youReportTo'), { name: boss.name }) : t('org.staffBlurb'))
+            : fill(t('org.teamCount'), { count: data.teams.filter((team) => team.status === 'active').length })}</span>
         </div>
         {senior && <label className="check-field">
           <input type="checkbox" checked={showArchived} onChange={(event) => setShowArchived(event.target.checked)} />
@@ -132,7 +146,7 @@ export default function OrganizationPage({ user, fetchJson, onMessage, onError, 
           onAct={act}
           dialog={dialog}
         />)}</div>
-        : <div className="empty-state"><strong>{t('org.noTeams')}</strong><span>{user.role === 'staff' ? t('org.noTeamsStaff') : t('org.noTeamsHint')}</span></div>}
+        : <div className="empty-state"><strong>{t('org.noTeams')}</strong><span>{isStaff ? t('org.noTeamsStaff') : t('org.noTeamsHint')}</span></div>}
     </section>
 
     {data.can.createTeams && data.projects.length > 0 && <CreateTeamForm
@@ -142,8 +156,35 @@ export default function OrganizationPage({ user, fetchJson, onMessage, onError, 
         () => fetchJson('/api/organization/teams', { method: 'POST', body: JSON.stringify(payload) }),
         fill(t('org.teamCreated'), { name: payload.name })
       )} />}
+  </>;
+}
 
-    {senior && <section className="panel">
+// Who reports to whom, for senior management: the chart with its two
+// branches, and the trail of every change to it. The Director sets a project
+// manager's line from the chart itself.
+export function OrganizationSection({ user, fetchJson, onMessage, onError, onChanged, reloadKey }) {
+  const { language, t } = useI18n();
+  const { data, history, failed, busy, load, act } = useOrganization({
+    fetchJson, onMessage, onError, onChanged, reloadKey, withHistory: true
+  });
+
+  if (!data) return <section className="panel"><SectionLoading failed={failed} onRetry={load} t={t} /></section>;
+
+  return <>
+    <section className="panel">
+      <div className="panel-header"><div>
+        <h2>{t('org.title')}</h2>
+        <span>{t('org.blurb')}</span>
+      </div></div>
+      <OrgChart data={data} user={user} t={t} language={language} busy={busy}
+        onOpenTeam={() => document.getElementById('teams')?.scrollIntoView({ behavior: 'smooth' })}
+        onChangeLine={(person, managerId) => act(
+          () => fetchJson(`/api/users/${person.id}/assignment`, { method: 'PATCH', body: JSON.stringify({ managerId: managerId || null }) }),
+          t('org.lineSaved')
+        )} />
+    </section>
+
+    <section className="panel">
       <div className="panel-header"><div><h2>{t('org.history')}</h2></div></div>
       {history && history.length
         ? <ul className="history-list">{history.map((row) => <li key={row.id}>
@@ -152,8 +193,8 @@ export default function OrganizationPage({ user, fetchJson, onMessage, onError, 
           <small>{row.actorName} · {new Date(row.createdAt).toLocaleString(language)}</small>
         </li>)}</ul>
         : <div className="empty-state"><strong>{t('org.historyEmpty')}</strong></div>}
-    </section>}
-  </div>;
+    </section>
+  </>;
 }
 
 // ---- the chart ------------------------------------------------------------------
@@ -437,23 +478,18 @@ function CreateTeamForm({ projects, people, canChooseSupervisor, t, language, bu
 // What the General Manager opens on: the internal side of the organisation at
 // a glance. The month's figures for every operation (from /api/summary, the
 // same counts the Director's tiles read), the issues waiting on them, and each
-// project manager with their projects and teams. Every number links to the
-// page that lists it; nothing here can decide an approval, which is the
-// Director's.
-export function GeneralManagerHome({ user, summary, sectorRows, fetchJson, reloadKey, onGo, onOpenEscalation }) {
+// project manager with their projects and teams -- which they run from here,
+// because the organisation is part of the job rather than a page of its own.
+// Every number links to the page that lists it; nothing here can decide an
+// approval, which is the Director's.
+export function GeneralManagerHome({ user, summary, sectorRows, fetchJson, reloadKey, onGo, onOpenEscalation, onMessage, onError, onChanged }) {
   const { language, t } = useI18n();
-  const [chart, setChart] = useState(null);
   const [issues, setIssues] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([
-      fetchJson('/api/organization').catch(() => null),
-      fetchJson('/api/escalations?box=waiting&state=open&limit=5').catch(() => [])
-    ]).then(([organization, waiting]) => {
-      if (cancelled) return;
-      setChart(organization);
-      setIssues(waiting);
+    fetchJson('/api/escalations?box=waiting&state=open&limit=5').catch(() => []).then((waiting) => {
+      if (!cancelled) setIssues(waiting);
     });
     return () => { cancelled = true; };
   }, [fetchJson, reloadKey]);
@@ -467,8 +503,6 @@ export function GeneralManagerHome({ user, summary, sectorRows, fetchJson, reloa
     { id: 'done', count: counts.objectivesCompleted || 0, tone: 'calm', title: t('home.tileCompleted'), go: () => onGo('monthly') },
     { id: 'reports', count: counts.monthEndReportsWaiting || 0, tone: counts.monthEndReportsWaiting ? 'active' : 'calm', title: t('gm.tileReportsWithDirector'), go: () => onGo('reports') }
   ];
-  const managers = (chart?.people || []).filter((person) => person.role === 'manager');
-  const teamsOf = (id) => (chart?.teams || []).filter((team) => team.leadId === id && team.status === 'active');
 
   return <div className="home">
     <section className="home-hello">
@@ -478,7 +512,6 @@ export function GeneralManagerHome({ user, summary, sectorRows, fetchJson, reloa
       </div>
       <div className="home-quick">
         <button className="primary-btn" type="button" onClick={() => onGo('escalations')}>{t('gm.openIssues')}</button>
-        <button className="secondary-btn" type="button" onClick={() => onGo('organization')}>{t('gm.openChart')}</button>
         <button className="secondary-btn" type="button" onClick={() => onGo('reports')}>{t('home.viewReports')}</button>
       </div>
     </section>
@@ -513,19 +546,7 @@ export function GeneralManagerHome({ user, summary, sectorRows, fetchJson, reloa
       </tr>)}</tbody>
     </table></div>
 
-    <h3 className="home-heading">{t('gm.managersHeading')}</h3>
-    {chart === null
-      ? <div className="compact-loading"><span className="spinner" /></div>
-      : managers.length
-        ? <div className="team-grid">{managers.map((manager) => <article className="org-card org-card-manager" key={manager.id}>
-          <span className="org-role">{manager.coversAllSectors ? t('user.allOperations') : operationsOf(manager).map((id) => operationName(id, language)).join(' · ')}</span>
-          <strong>{manager.name}</strong>
-          <small>{manager.projects.length ? `${t('field.projects')}: ${manager.projects.map((project) => project.name).join(', ')}` : t('org.noProjects')}</small>
-          <small>{teamsOf(manager.id).length
-            ? `${t('org.teams')}: ${teamsOf(manager.id).map((team) => `${team.name} (${team.members.length})`).join(', ')}`
-            : t('org.noTeams')}</small>
-          {manager.status !== 'active' && <span className="status-badge tone-waiting">{t('org.suspended')}</span>}
-        </article>)}</div>
-        : <div className="empty-state"><strong>{t('org.noManagers')}</strong></div>}
+    <TeamsSection user={user} fetchJson={fetchJson} onMessage={onMessage} onError={onError} onChanged={onChanged} reloadKey={reloadKey} />
+    <OrganizationSection user={user} fetchJson={fetchJson} onMessage={onMessage} onError={onError} onChanged={onChanged} reloadKey={reloadKey} />
   </div>;
 }

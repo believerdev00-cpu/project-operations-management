@@ -17,7 +17,10 @@ const MovementModule = lazy(() => import('./MovementModule.jsx'));
 const PartnerPortal = lazy(() => import('./PartnerPortal.jsx'));
 const ExternalPartners = lazy(() => import('./ExternalPartners.jsx'));
 const MonthlyPlans = lazy(() => import('./MonthlyPlans.jsx'));
-const OrganizationPage = lazy(() => import('./Organization.jsx'));
+// The organisation is not a page: its two pieces sit where the work is (the
+// teams on Projects and on Home, the chart on People and the GM's Home).
+const TeamsSection = lazy(() => import('./Organization.jsx').then((module) => ({ default: module.TeamsSection })));
+const OrganizationSection = lazy(() => import('./Organization.jsx').then((module) => ({ default: module.OrganizationSection })));
 const GeneralManagerHome = lazy(() => import('./Organization.jsx').then((module) => ({ default: module.GeneralManagerHome })));
 const EscalationsPage = lazy(() => import('./Escalations.jsx'));
 import { LANGUAGES, LanguageContext, displayLanguage, fill, setDisplayLanguage, useI18n, useLanguage, useT } from './i18n.js';
@@ -512,8 +515,6 @@ const NAV_ICON_PATHS = {
   more: 'M5 12h.01M12 12h.01M19 12h.01',
   users: 'M16 19v-1a4 4 0 0 0-8 0v1M12 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7 8v-1a3 3 0 0 0-2-2.8M17 5.2a3 3 0 0 1 0 5.6',
   partners: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm-9 9h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9Z',
-  // A box at the top, a line down, and three below it: the chart itself.
-  organization: 'M9 3h6v4H9V3ZM3 17h6v4H3v-4Zm6 0h6v4H9v-4Zm6 0h6v4h-6v-4ZM12 7v5M6 17v-5h12v5',
   // An arrow going up: something passed up the line.
   escalations: 'M12 20V5M6 11l6-6 6 6M5 20h14'
 };
@@ -955,19 +956,17 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       ['approvals', t('nav.approvals'), 0, 'review'],
       ['escalations', t('nav.escalations'), escalationCount, 'review'],
       ['projects', t('nav.projects'), 0, 'manage'],
-      ['organization', t('nav.organization'), 0, 'manage'],
       ['users', t('nav.users'), 0, 'manage'],
       ['partners', t('nav.partners'), partnerInbox.unread, 'manage']
     ];
   } else if (isGeneral) {
     // The General Manager: second in the line. Their job is the internal
-    // organisation -- the issues coming up it, the chart, the months and the
-    // reports -- so those are their pages. Approvals, Other requests, Projects,
+    // organisation -- the issues coming up it, the months and the reports --
+    // so those are their pages; the chart and the teams are on their Home. Approvals, Other requests, Projects,
     // People and Partners are the Director's and are not offered.
     navItems = [
       ['dashboard', t('nav.home'), 0, 'main', t('nav.home')],
       ['escalations', t('nav.escalations'), escalationCount, 'main', t('nav.shortIssues')],
-      ['organization', t('nav.organization'), 0, 'main', t('nav.shortOrganization')],
       ['monthly', t('nav.monthlyPlans'), 0, 'main', t('nav.shortBudget')],
       ['activities', t('nav.activities'), 0, 'review'],
       ['reports', t('nav.reports'), 0, 'review']
@@ -990,25 +989,23 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     // the Director's pages. A manager following an old link to one of them
     // lands on Home (see `view` below).
     //
-    // The organisation added two pages that are also the manager's job: their
-    // teams (who works on their projects) and the issues their teams raise to
-    // them, which they settle or pass up to the General Manager.
+    // The organisation added one page that is also the manager's job: the
+    // issues their teams raise to them, which they settle or pass up to the
+    // General Manager. Their teams are on Home, beside the month they run.
     navItems = [
       ['dashboard', t('nav.home'), 0, 'main', t('nav.home')],
       ['monthly', t('nav.myPlan'), 0, 'main', t('nav.shortMyPlan')],
-      ['organization', t('nav.myTeams'), 0, 'main', t('nav.shortTeams')],
       ['escalations', t('nav.escalations'), escalationCount, 'main', t('nav.shortIssues')]
     ];
   } else {
     // A team member has one job: the work they were given. Two pages, and the
     // first one is the list of it.
     //
-    // Plus the team they are on, and somewhere to raise a problem -- which
-    // goes to their project manager, not into a void.
+    // Plus somewhere to raise a problem -- which goes to their project
+    // manager, not into a void. Their team is on My work.
     navItems = [
       ['dashboard', t('nav.myWork'), 0, 'main', t('nav.myWork')],
       ['activities', t('nav.myActivities'), 0, 'main', t('nav.myActivities')],
-      ['organization', t('nav.myTeam'), 0, 'main', t('nav.shortTeams')],
       ['escalations', t('nav.reportIssue'), escalationCount, 'main', t('nav.shortIssues')]
     ];
   }
@@ -1018,10 +1015,10 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const bottomNav = isDirector
     ? ['dashboard', 'approval-queue', 'monthly', 'activities']
     : isGeneral
-      ? ['dashboard', 'escalations', 'organization', 'monthly']
+      ? ['dashboard', 'escalations', 'monthly', 'activities']
       : isManager
-        ? ['dashboard', 'monthly', 'organization', 'escalations']
-        : ['dashboard', 'activities', 'organization', 'escalations'];
+        ? ['dashboard', 'monthly', 'escalations']
+        : ['dashboard', 'activities', 'escalations'];
   // An address naming a page this account does not have -- a manager following
   // a Director's link to #/users -- lands on the home page instead of a blank page.
   const view = navItems.some(([id]) => id === route.view) ? route.view : 'dashboard';
@@ -2144,11 +2141,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       reloadKey={summary}
       onGo={go}
       onOpenEscalation={openEscalationRoute}
-    />;
-  } else if (view === 'organization') {
-    content = <OrganizationPage
-      user={user}
-      fetchJson={fetchJson}
       onMessage={notify}
       onError={fail}
       onChanged={onModuleChanged}
@@ -2166,7 +2158,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       onError={fail}
     />;
   } else if (view === 'dashboard') {
-    content = <Home
+    content = <><Home
       user={user}
       summary={summary.summary}
       sectorRows={summary.sectorBreakdown}
@@ -2188,7 +2180,13 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       onOpenPlan={openPlanRoute}
       notices={notices}
       onOpenNotice={openNotice}
-    />;
+    />
+    {/* A project manager runs their teams from Home, beside the month they
+        work; a team member sees their team, who leads it and who they report
+        to. The Director's teams are on Projects. */}
+    {!isDirector && <TeamsSection user={user} fetchJson={fetchJson} onMessage={notify} onError={fail}
+      onChanged={onModuleChanged} reloadKey={summary} />}
+    </>;
   } else if (view === 'approval-queue') {
     content = <>
       <section className="welcome-strip">
@@ -2234,6 +2232,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         onSubmit={editingProject
           ? saveProjectEdit
           : (event) => submit(event, '/api/projects', projectForm, t('msg.projectAdded'), () => setProjectForm(emptyProject))} />}
+      {/* The teams that work each project, run beside the projects themselves. */}
+      {isDirector && <TeamsSection user={user} fetchJson={fetchJson} onMessage={notify} onError={fail}
+        onChanged={onModuleChanged} reloadKey={summary} />}
     </>;
   } else if (view === 'activities') {
     content = <>
@@ -2415,6 +2416,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       </Panel>
       <AccountForm form={accountForm} setForm={setAccountForm} managers={managers}
         generalManagers={register.users.filter((account) => account.role === 'general-manager' && account.status === 'active')} busy={actionBusy} language={language} onSubmit={(event) => submit(event, '/api/users', accountPayload(accountForm), t('msg.accountCreated'), () => setAccountForm(emptyAccount))} />
+      {/* Who reports to whom is a fact about the people, so it is set here. */}
+      <OrganizationSection user={user} fetchJson={fetchJson} onMessage={notify} onError={fail}
+        onChanged={onModuleChanged} reloadKey={summary} />
     </>;
   } else if (view === 'monthly') {
     content = <MonthlyPlans
