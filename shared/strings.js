@@ -51,7 +51,6 @@ export function knownLanguage(value) {
 const STRINGS = {
   // ---- shell ---------------------------------------------------------------
   'app.name': { en: 'Project Management System', rw: 'Sisitemu y’Imicungire y’Imishinga', fr: 'Système de gestion de projets', sw: 'Mfumo wa Usimamizi wa Miradi' },
-  'app.subtitle': { en: 'Mining · Agriculture · Farming', rw: 'Ubucukuzi · Ubuhinzi · Ubworozi', fr: 'Mines · Agronomie · Élevage', sw: 'Madini · Kilimo · Ufugaji' },
   'app.workspace': { en: 'Workspace', rw: 'Ahakorerwa', fr: 'Espace de travail', sw: 'Eneo la kazi' },
   'app.signedInAs': { en: 'Signed in as', rw: 'Winjiye nka', fr: 'Connecté en tant que', sw: 'Umeingia kama' },
   'app.signOut': { en: 'Sign out', rw: 'Sohoka', fr: 'Se déconnecter', sw: 'Toka' },

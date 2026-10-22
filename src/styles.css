@@ -92,6 +92,12 @@ input[type="checkbox"] { width: 18px; height: 18px; min-height: 0; }
 .brand-lockup strong, .brand-lockup span { display: block; }
 .brand-lockup strong { color: white; font-size: .95rem; }
 .brand-lockup span { margin-top: 3px; color: #9db0c2; font-size: .72rem; }
+/* The operation names under the logo, each a link into that operation's work. */
+.brand-links { display: grid; gap: 3px; margin-top: 4px; }
+.brand-links > span { display: block; margin: 0; }
+.brand-links span[aria-hidden] { display: none; }
+.brand-link { display: inline; padding: 0; color: #cfe0f1; font: inherit; font-size: .74rem; text-decoration: underline; text-underline-offset: 2px; background: none; border: 0; cursor: pointer; }
+.brand-link:hover, .brand-link:focus-visible { color: white; }
 .sidebar-label { margin: 0 10px 10px; color: #7f99b1; font-size: .65rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
 .sidebar nav { display: grid; gap: 4px; }
 .nav-item { display: flex; align-items: center; gap: 11px; width: 100%; padding: 12px 10px; color: #b7c8d8; background: transparent; border: 0; border-radius: 5px; text-align: left; font-size: .86rem; }

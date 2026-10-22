@@ -581,7 +581,7 @@ function NotificationBell({ notices, onOpen, onMarkAll, compact = false }) {
 }
 
 function AppShell({
-  user, subtitle, navLabel, nav = [], bottomNav = null, activeId, onNavigate, sidebarContent, eyebrow, title,
+  user, subtitle, brandLinks = null, navLabel, nav = [], bottomNav = null, activeId, onNavigate, sidebarContent, eyebrow, title,
   badge = 0, onBadge, online, refreshing, onRefresh, onLogout, onChangePassword, accountLines = [], children,
   notices = null, onOpenNotice, onMarkAllNotices
 }) {
@@ -644,7 +644,15 @@ function AppShell({
       onKeyDown={drawerActive ? (event) => trapFocus(event, sidebar.current, closeDrawer) : undefined}
     >
       <div className="sidebar-top">
-        <div className="brand-lockup"><img className="brand-logo" src="/logo-mark.png" alt="" /><div><strong>{t('app.operationsControl')}</strong><span>{subtitle}</span></div></div>
+        <div className="brand-lockup"><img className="brand-logo" src="/logo-mark.png" alt="" /><div><strong>{t('app.operationsControl')}</strong>
+          {/* The operations under the logo are a way in, not a caption: each
+              opens that operation's work. */}
+          {brandLinks
+            ? <span className="brand-links">{brandLinks.map((link, index) => <span key={link.id}>
+              {index > 0 && <span aria-hidden="true"> · </span>}
+              <button type="button" className="brand-link" onClick={link.onClick}>{link.label}</button>
+            </span>)}</span>
+            : <span>{subtitle}</span>}</div></div>
         <button className="icon-btn drawer-close" type="button" onClick={closeDrawer} aria-label={t('app.closeMenu')}>&times;</button>
       </div>
       {nav.length > 0 && <nav aria-label={navLabel}>
@@ -882,6 +890,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
 
   // ---- page state ------------------------------------------------------------
   const [selectedProjectId, setSelectedProjectId] = useState('');
+  // One operation, or '' for all of them -- set by the operation links under
+  // the logo (#/activities?operation=mining) or by the register's own select.
+  const [activityOperation, setActivityOperation] = useState('');
   const [sectorFilter, setSectorFilter] = useState('All');
   const [projectSearch, setProjectSearch] = useState('');
   const [projectForm, setProjectForm] = useState(emptyProject);
@@ -1114,9 +1125,10 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     else if (activityStatusFilter === 'Assigned to me') params.set('assignedTo', 'me');
     else if (activityStatusFilter !== 'All') params.set('status', activityStatusFilter);
     if (selectedProjectId) params.set('projectId', selectedProjectId);
+    if (activityOperation) params.set('sector', activityOperation);
     if (activitySearch.trim()) params.set('search', activitySearch.trim());
     return params.toString();
-  }, [activityStatusFilter, selectedProjectId, activitySearch]);
+  }, [activityStatusFilter, selectedProjectId, activityOperation, activitySearch]);
 
   // mode 'reset' starts again from the first page (filters changed); 'more'
   // appends the next page; 'refresh' re-reads everything already shown, so a
@@ -1235,6 +1247,15 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // A home tile opens the register already filtered to what it counted:
   // #/activities?filter=work or ?filter=final-check.
   const filterFromAddress = view === 'activities' ? route.query.get('filter') : null;
+  const operationFromAddress = view === 'activities' ? route.query.get('operation') : null;
+  useEffect(() => {
+    if (!operationFromAddress) return;
+    // A fresh look at one operation's work: every status, every project in it.
+    setActivityOperation(BUSINESS_OPERATIONS.some((operation) => operation.id === operationFromAddress) ? operationFromAddress : '');
+    setActivityStatusFilter(user.role === 'staff' ? 'Assigned to me' : 'All');
+    setSelectedProjectId('');
+    navigate(buildHash('activities'), { replace: true });
+  }, [operationFromAddress, navigate, user.role]);
   useEffect(() => {
     if (!filterFromAddress) return;
     const fromAddress = { work: 'My work', 'final-check': 'Final check', 'to-check': 'To check', 'manager-check': 'Manager check' };
@@ -2083,6 +2104,17 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   ];
 
   const pageTitle = navItems.find(([id]) => id === view)?.[1];
+  // The operations under the logo: all four for anybody who oversees them all,
+  // otherwise the ones this account works in. Each opens that operation's
+  // activities; a manager, who has no activity register, opens their month.
+  const brandOperations = isDirector || isGeneral || user.coversAllSectors ? null : operationsOf(user);
+  const brandLinks = BUSINESS_OPERATIONS
+    .filter((operation) => !brandOperations || brandOperations.includes(operation.id))
+    .map((operation) => ({
+      id: operation.id,
+      label: operationName(operation.id, language),
+      onClick: () => navigate(isManager ? buildHash('monthly') : `${buildHash('activities')}?operation=${operation.id}`)
+    }));
   const go = (id, filter) => navigate(filter ? `${buildHash(id)}?filter=${encodeURIComponent(filter)}` : buildHash(id));
   const addActivity = () => navigate(buildHash('activities', 'new'));
   const coversMovements = runsTrips(user);
@@ -2294,8 +2326,14 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
           {!isDirector && !isGeneral && <option value="Assigned to me">{t('activities.assignedToMe')}</option>}
           {ACTIVITY_STATUSES.map((status) => <option key={status} value={status}>{t(`status.${status}`)}</option>)}
         </select>
+        <label className="sr-only" htmlFor="activity-operation-filter">{t('app.businessOperation')}</label>
+        <select id="activity-operation-filter" value={activityOperation} onChange={(event) => { setActivityOperation(event.target.value); setSelectedProjectId(''); }}>
+          <option value="">{t('app.allOperations')}</option>
+          {BUSINESS_OPERATIONS.filter((operation) => !brandOperations || brandOperations.includes(operation.id))
+            .map((operation) => <option key={operation.id} value={operation.id}>{operationName(operation.id, language)}</option>)}
+        </select>
         <label className="sr-only" htmlFor="activity-project-filter">{t('field.project')}</label>
-        <select id="activity-project-filter" value={selectedProjectId} onChange={(event) => setSelectedProjectId(event.target.value)}><option value="">{t('form.allProjects')}</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
+        <select id="activity-project-filter" value={selectedProjectId} onChange={(event) => setSelectedProjectId(event.target.value)}><option value="">{t('form.allProjects')}</option>{projects.filter((project) => !activityOperation || project.sector === activityOperation).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
         <label className="sr-only" htmlFor="activity-search">{t('form.searchActivities')}</label>
         <input id="activity-search" type="search" placeholder={t('form.searchActivities')} value={activitySearch} onChange={(event) => setActivitySearch(event.target.value)} />
       </div></section>
@@ -2445,7 +2483,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
 
   return <AppShell
     user={user}
-    subtitle={t('app.subtitle')}
+    brandLinks={brandLinks}
     navLabel={t('app.mainNavigation')}
     nav={navItems}
     bottomNav={bottomNav}
