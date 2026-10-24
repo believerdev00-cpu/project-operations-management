@@ -172,7 +172,7 @@ router.get('/', adminOnly('Only the Director can view the account register.'), a
   // controls; listed here they were offered a manager and a working area that
   // mean nothing for an outside, view-only account.
   const result = await pool.query(
-    `${ACCOUNT_SELECT} WHERE u.role <> 'partner'
+    `${ACCOUNT_SELECT} WHERE u.role <> 'partner' AND u.status <> 'deleted'
      ORDER BY CASE u.role WHEN 'super-admin' THEN 0 WHEN 'general-manager' THEN 1 WHEN 'manager' THEN 2 ELSE 3 END, u.name`
   );
   const users = result.rows.map(mapAccount);
@@ -301,12 +301,18 @@ router.patch('/:id/status', adminOnly('Only the Director can suspend or reactiva
     return res.status(400).json({ message: 'You cannot suspend your own account.' });
   }
   const result = await pool.query(
-    "UPDATE users SET status = $2 WHERE id = $1 AND role IN ('general-manager', 'manager', 'staff') RETURNING id",
+    // A deleted account is never brought back by a reactivation: that would
+    // hand a closed account's name a working login again.
+    "UPDATE users SET status = $2 WHERE id = $1 AND role IN ('general-manager', 'manager', 'staff') AND status <> 'deleted' RETURNING id",
     [req.params.id, status]
   );
   if (!result.rowCount) return res.status(404).json({ message: 'Account not found.' });
 
   const account = await loadAccount(req.params.id);
+  // Who suspended or reactivated whom, and when, on the organisation's trail.
+  await recordOrganization(pool, req.user, status === 'active' ? 'account_reactivated' : 'account_suspended', {
+    subjectUserId: account.id, subjectName: account.name, detail: { role: account.role }
+  });
   if (status === 'active') return res.json({ ...account, message: `${account.name} can sign in again.` });
 
   const held = await pool.query(
@@ -326,6 +332,152 @@ router.patch('/:id/status', adminOnly('Only the Director can suspend or reactiva
     heldWork: { approvals, activities, plans },
     message: `${account.name} is suspended and signed out everywhere.`
   });
+}));
+
+// ---- deleting an account ------------------------------------------------------
+//
+// Different from a suspension, which is the reversible "not now". A delete is
+// for good, and it is answered truthfully in one of two ways:
+//
+//  * REMOVED: an account nothing points at -- created by mistake, never used.
+//    The row is deleted; its own notifications and grants go with it.
+//  * CLOSED: an account with history -- it recorded expenses, approved budgets,
+//    sold at the till, moved stock. Deleting that row would SET NULL its name
+//    off every one of those records (61 foreign keys say ON DELETE SET NULL),
+//    which is rewriting the books to say nobody did the work, and RESTRICT
+//    keys refuse it outright. So it is closed instead: it can never sign in
+//    again (status 'deleted', a username nobody can type, no password, contact
+//    details cleared), it leaves every list and every operation it held, and
+//    its name stays on the records it made. The answer says which happened, so
+//    the screen never claims a removal that was a closure.
+//
+// What is refused, on the server whatever the screen shows: your own account;
+// the last active Director; and anyone who still holds live work -- an open
+// month, unfinished work, a decision waiting on them, people reporting to
+// them, a team or project they lead, an open till. Handing those over first is
+// the Director's decision, not something a delete should do silently.
+
+// Every foreign key in the database that points at users(id), read from the
+// catalogue so a table added later is counted without anyone remembering to.
+// CASCADE keys are the account's own belongings (its notifications, its
+// grants), which go with a removed account and are not history.
+async function historyReferences(db, userId) {
+  const keys = await db.query(
+    `SELECT c.conrelid::regclass::text AS table_name, a.attname AS column_name
+       FROM pg_constraint c
+       JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+      WHERE c.contype = 'f' AND c.confrelid = 'users'::regclass AND c.confdeltype <> 'c'`
+  );
+  let total = 0;
+  for (const key of keys.rows) {
+    // Identifiers come from the catalogue, never from the request.
+    const found = await db.query(
+      `SELECT COUNT(*)::int AS n FROM ${key.table_name} WHERE "${key.column_name}" = $1${key.table_name === 'users' ? ' AND id <> $1' : ''}`,
+      [userId]
+    );
+    total += found.rows[0].n;
+  }
+  return total;
+}
+
+// What the account still holds that somebody has to take over first.
+async function heldWorkOf(db, userId) {
+  const result = await db.query(
+    `SELECT
+       (SELECT COUNT(*) FROM monthly_plans WHERE manager_id = $1 AND status <> 'Closed')::int AS plans,
+       (SELECT COUNT(*) FROM activities WHERE assigned_to = $1 AND status NOT IN ('Completed', 'Rejected', 'Cancelled'))::int AS activities,
+       ((SELECT COUNT(*) FROM activities WHERE approval_required_from = $1 AND approval_status = 'pending' AND status NOT IN ('Draft', 'Cancelled', 'On Hold'))
+        + (SELECT COUNT(*) FROM movements WHERE approval_required_from = $1 AND approval_status = 'pending' AND status NOT IN ('Draft', 'Cancelled', 'On Hold')))::int AS approvals,
+       (SELECT COUNT(*) FROM users WHERE manager_id = $1 AND status <> 'deleted')::int AS reports,
+       ((SELECT COUNT(*) FROM teams WHERE supervisor_id = $1 AND status = 'active')
+        + (SELECT COUNT(*) FROM projects WHERE manager_id = $1))::int AS leads,
+       (SELECT COUNT(*) FROM boutique_cash_sessions WHERE opened_by = $1 AND status = 'open')::int AS tills`,
+    [userId]
+  );
+  return result.rows[0];
+}
+
+router.delete('/:id', adminOnly('Only the Director can delete an account.'), asyncRoute(async (req, res) => {
+  const userId = parseId(req.params.id);
+  if (!userId) return res.status(404).json({ message: 'Account not found.' });
+  if (userId === Number(req.user.id)) {
+    return res.status(400).json({ code: 'SELF_DELETE', message: 'You cannot delete the account you are signed in with.' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const found = await client.query("SELECT id, username, name, role, status FROM users WHERE id = $1 AND status <> 'deleted' FOR UPDATE", [userId]);
+    if (!found.rowCount || found.rows[0].role === 'partner') {
+      await safeRollback(client);
+      // Partners are closed from their own register (Revoke), with their own rules.
+      return res.status(404).json({ message: 'Account not found.' });
+    }
+    const target = found.rows[0];
+    // The confirmation the screen asks for, checked here too: the username,
+    // typed. One stray click cannot delete anybody.
+    if (String(req.body?.confirmUsername || '').trim().toLowerCase() !== target.username.toLowerCase()) {
+      await safeRollback(client);
+      return res.status(400).json({ code: 'CONFIRM_REQUIRED', message: `To delete this account, type its username (${target.username}) exactly.` });
+    }
+    if (target.role === 'super-admin') {
+      // Locked, so two Directors deleting each other at once cannot both land.
+      const others = await client.query("SELECT id FROM users WHERE role = 'super-admin' AND status = 'active' AND id <> $1 FOR UPDATE", [userId]);
+      if (!others.rowCount) {
+        await safeRollback(client);
+        return res.status(409).json({ code: 'LAST_DIRECTOR', message: 'This is the last active Director. Create or reactivate another Director before deleting this one, or nobody could run the system.' });
+      }
+    }
+    const held = await heldWorkOf(client, userId);
+    if (Object.values(held).some((n) => n > 0)) {
+      await safeRollback(client);
+      return res.status(409).json({
+        code: 'HOLDS_WORK', heldWork: held,
+        message: `${target.name} still holds work that somebody must take over first: ${[
+          held.plans && `${held.plans} open monthly plan(s)`,
+          held.activities && `${held.activities} unfinished activity(ies)`,
+          held.approvals && `${held.approvals} decision(s) waiting on them`,
+          held.reports && `${held.reports} person(s) reporting to them`,
+          held.leads && `${held.leads} team(s) or project(s) they lead`,
+          held.tills && `${held.tills} open till(s)`
+        ].filter(Boolean).join(', ')}. Hand these over, then delete the account.`
+      });
+    }
+
+    const references = await historyReferences(client, userId);
+    let outcome;
+    if (references === 0) {
+      await recordOrganization(client, req.user, 'account_deleted', { subjectName: target.name, detail: { role: target.role, outcome: 'removed' } });
+      await client.query('DELETE FROM users WHERE id = $1', [userId]);
+      outcome = 'removed';
+    } else {
+      // Sign-in made impossible three ways over: the status, a username that
+      // cannot be typed into the login form's rules, and a hash no password
+      // matches. password_changed_at ends every session already open.
+      await client.query(
+        `UPDATE users SET status = 'deleted', deleted_at = NOW(), deleted_by = $2,
+                username = $3, password_hash = '!deleted', email = NULL, password_changed_at = NOW(),
+                must_change_password = FALSE, covers_all_sectors = FALSE, manager_id = NULL
+          WHERE id = $1`,
+        [userId, req.user.id, `deleted-${userId}-${Date.now().toString(36)}`]
+      );
+      await client.query('DELETE FROM manager_operations WHERE manager_id = $1', [userId]);
+      await client.query('DELETE FROM team_members WHERE user_id = $1', [userId]);
+      await recordOrganization(client, req.user, 'account_deleted', { subjectUserId: userId, subjectName: target.name, detail: { role: target.role, outcome: 'closed', records: references } });
+      outcome = 'closed';
+    }
+    await client.query('COMMIT');
+    res.json({
+      id: userId, outcome, records: references,
+      message: outcome === 'removed'
+        ? `${target.name}'s account has been permanently deleted.`
+        : `${target.name}'s account is deleted: they can never sign in again and are gone from every list. Their name stays on the ${references} record(s) they made, so those still show who did the work.`
+    });
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
 }));
 
 // Requirements 6 and 7: the Director moves a user between managers and between

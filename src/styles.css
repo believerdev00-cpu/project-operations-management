@@ -1337,3 +1337,50 @@ td .operation-checks { display: grid; gap: 0; }
 .btq-attention-list span { flex: 1 1 220px; }
 .btq-more { margin-top: 16px; }
 .btq-report > .record-section:first-child { margin-top: 0; }
+
+/* A field's own problem, under it, in words (never colour alone): the box
+   gets a red edge and the sentence says what to do. */
+.field-error { display: block; margin-top: 4px; color: var(--red); font-size: .85rem; font-weight: 700; }
+.field-error::before { content: '! '; }
+[aria-invalid="true"] { border-color: var(--red) !important; box-shadow: 0 0 0 1px var(--red); }
+
+/* Update stock: one big choice per kind of change, the picked product, and
+   the before / change / after line. */
+.btq-picked { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 8px 0; padding: 12px 14px; background: var(--blue-soft); border-radius: 6px; }
+.btq-kind-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; margin: 8px 0; }
+.btq-kind-choice { display: flex; align-items: flex-start; gap: 10px; min-height: 56px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; background: var(--surface); }
+.btq-kind-choice input { margin-top: 3px; width: 20px; height: 20px; flex: none; }
+.btq-kind-choice span { display: grid; gap: 2px; }
+.btq-kind-choice small { color: var(--muted); font-size: .82rem; }
+.btq-kind-choice.is-chosen { border: 2px solid var(--blue); background: var(--blue-soft); }
+.btq-kind-choice:focus-within { outline: 3px solid var(--blue); outline-offset: 2px; }
+.btq-stock-preview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 14px 0 6px; padding: 12px 14px; border: 1px dashed var(--line); border-radius: 6px; }
+.btq-stock-preview strong { font-size: 1.25rem; }
+.card-actions .secondary-btn { white-space: nowrap; }
+
+/* The month's money: exactly three cards, the remainder marked in words and
+   a border when spending has gone past the approved budget. */
+.budget-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+.budget-card { display: grid; gap: 4px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; }
+.budget-card span { color: var(--muted); font-size: .8rem; font-weight: 800; text-transform: uppercase; letter-spacing: .02em; }
+.budget-card strong { color: var(--navy); font-size: 1.4rem; overflow-wrap: anywhere; }
+.budget-card small { color: var(--muted); font-size: .82rem; }
+.budget-card-over { border: 2px solid var(--red); background: #fdf4f4; }
+.budget-card-over strong, .budget-card-over small { color: var(--red); }
+.budget-cards-note { grid-column: 1 / -1; margin: 0; }
+@media (max-width: 640px) { .budget-cards { grid-template-columns: 1fr; } }
+
+/* Project progress and the month-by-month table: plain bars with the figure
+   written beside them, so nothing depends on the bar alone. */
+.home-progress, .report-progress { display: grid; gap: 16px; margin-top: 18px; }
+.progress-list { display: grid; gap: 14px; margin: 0; padding: 0; list-style: none; }
+.progress-row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
+.progress-figure { margin-left: auto; color: var(--navy); font-size: 1.15rem; font-weight: 800; }
+.progress-bar { height: 10px; margin: 6px 0 4px; overflow: hidden; background: #e7edf4; border-radius: 999px; }
+.progress-bar span { display: block; height: 100%; background: var(--green); border-radius: inherit; }
+.progress-missing { display: block; color: var(--muted); font-style: italic; }
+.progress-items summary { cursor: pointer; color: var(--blue); font-size: .88rem; font-weight: 700; margin-top: 4px; }
+.progress-items ul { display: grid; gap: 4px; margin: 6px 0 0; padding: 0; list-style: none; font-size: .88rem; }
+.progress-items li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.trend-cell { display: inline-flex; align-items: center; gap: 8px; min-width: 140px; }
+.trend-cell .progress-bar { flex: 1; margin: 0; }

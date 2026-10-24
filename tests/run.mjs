@@ -38,7 +38,9 @@ const SUITES = [
   ['manager operations', 'manager-operations.test.mjs', { needsApi: true }],
   ['day correction', 'day-correction.test.mjs', { needsApi: true }],
   ['organization', 'organization.test.mjs', { needsApi: true }],
-  ['boutique', 'boutique.test.mjs', { needsApi: true }]
+  ['boutique', 'boutique.test.mjs', { needsApi: true }],
+  ['user delete', 'user-delete.test.mjs', { needsApi: true }],
+  ['plan money', 'plan-money.test.mjs', { needsApi: true }]
 ];
 
 const only = process.argv[2];

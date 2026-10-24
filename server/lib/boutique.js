@@ -81,21 +81,25 @@ export function requireNotCashier(req) {
 
 export function text(value, limit, { required = false, label = 'This field' } = {}) {
   const trimmed = typeof value === 'string' ? value.trim().slice(0, limit) : '';
-  if (required && !trimmed) throw new BoutiqueError(400, `${label} is required.`);
+  if (required && !trimmed) throw new BoutiqueError(400, `${label} is required. Please fill it in and try again.`);
   return trimmed;
 }
 
-// An amount in RWF, non-negative, within what NUMERIC(18,2) holds.
+// An amount in RWF, non-negative, within what NUMERIC(18,2) holds. The
+// messages say what is wrong and what to do, because they are read by a
+// shopkeeper at the counter, not by a developer.
 export function amount(value, { label = 'Amount', minimum = 0 } = {}) {
   const number = value === '' || value === null || value === undefined ? 0 : Number(value);
-  if (!validNumber(number, { minimum })) throw new BoutiqueError(400, `${label} must be a valid amount${minimum > 0 ? ' above zero' : ''}.`);
+  if (!validNumber(number, { minimum })) {
+    throw new BoutiqueError(400, `${label} must be a number${minimum > 0 ? ' above zero' : ', zero or more'}. Please check it and try again.`);
+  }
   return fromMinor(toMinor(number));
 }
 
 export function wholeNumber(value, { label = 'Quantity', minimum = 1 } = {}) {
   const number = Number(value);
   if (!Number.isInteger(number) || number < minimum || number > 1e9) {
-    throw new BoutiqueError(400, `${label} must be a whole number${minimum > 0 ? ' of at least ' + minimum : ''}.`);
+    throw new BoutiqueError(400, `${label} must be a whole number${minimum > 0 ? ` of at least ${minimum}` : ', zero or more'}. Please check the number and try again.`);
   }
   return number;
 }

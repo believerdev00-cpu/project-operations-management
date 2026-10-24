@@ -4,6 +4,7 @@ import { fill, useI18n } from './i18n.js';
 import { MoneyBar, activityJourney, journeyLabel, journeyTone, nextAction } from './journey.jsx';
 import { DATE_STYLE, dateLocale, todayLocal } from './format.js';
 import { ActionIcon, STEP_ICONS } from './ui.jsx';
+import { BudgetCards, MonthTrend, ProjectProgress } from './Progress.jsx';
 
 // How many of the newest manager-raised activities the Director's Home lists.
 const LATEST_FROM_MANAGERS = 5;
@@ -98,6 +99,8 @@ export default function Home({
   const isWorker = !isDirector && !isManager;
   const month = thisMonth();
   const [plans, setPlans] = useState(null);
+  // This month's money across every operation, from the same review payload.
+  const [planTotals, setPlanTotals] = useState(null);
   const [myWork, setMyWork] = useState(null);
   const [recent, setRecent] = useState([]);
   const [finalChecks, setFinalChecks] = useState(null);
@@ -139,6 +142,7 @@ export default function Home({
       setUpdates(updateResult.status === 'fulfilled' ? updateResult.value.updates || [] : []);
       setRecent(doneResult.status === 'fulfilled' ? doneResult.value : []);
       setPlans(planResult.status === 'fulfilled' ? planResult.value.operations || [] : []);
+      setPlanTotals(planResult.status === 'fulfilled' ? planResult.value.totals || null : null);
       setMyWork(workResult.status === 'fulfilled'
         ? [...workResult.value].sort((left, right) => (left.deadline || '9999-12-31').localeCompare(right.deadline || '9999-12-31'))
         : []);
@@ -510,13 +514,21 @@ export default function Home({
     {/* The money, across the open months (section 1: "budget overview"): the
         ceilings the Director approved and what has been recorded against them.
         Summed from the plans, not the legacy project figures. */}
-    {isDirector && (counts.plansBudget > 0 || counts.plansSpent > 0) && <>
-      <h3 className="home-heading">{t('home.budgetOverview')}</h3>
-      <div className="budget-overview">
-        <MoneyBar approved={counts.plansBudget || 0} spent={counts.plansSpent || 0} format={formatUsdShort} rates={rate} />
-        <small className="muted-cell">{t('home.budgetApprovedOpen')} · {t('home.budgetSpentOpen')}</small>
-      </div>
+    {/* This month's money across every operation: the same three cards as
+        the monthly plan page, from the same review payload, so the two pages
+        cannot show different figures for the same month. */}
+    {isDirector && planTotals && <>
+      <h3 className="home-heading">{`${t('home.budgetOverview')} · ${monthLabel(month, language)}`}</h3>
+      <BudgetCards approved={planTotals.approvedBudget} spent={planTotals.totalSpent}
+        remaining={planTotals.remainingBalance} unbudgeted={planTotals.spentWithoutBudget} t={t} />
     </>}
+
+    {/* How far each project has got, and the last six months -- work done,
+        kept apart from money spent. Both are calculated by the API. */}
+    {isDirector && <div className="home-progress">
+      <ProjectProgress fetchJson={fetchJson} reloadKey={reloadKey} compact />
+      <MonthTrend fetchJson={fetchJson} reloadKey={reloadKey} />
+    </div>}
 
     {/* The operations at a glance are the Director's. A manager's Home is their
         own month and their latest day, and nothing else: their plan above is

@@ -236,7 +236,13 @@ export async function initDatabase() {
     // anything other than 'active' into a refusal on the very next request.
     await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active'");
     await pool.query('ALTER TABLE users DROP CONSTRAINT IF EXISTS users_status_check');
-    await pool.query("ALTER TABLE users ADD CONSTRAINT users_status_check CHECK (status IN ('active', 'suspended', 'revoked'))");
+    await pool.query("ALTER TABLE users ADD CONSTRAINT users_status_check CHECK (status IN ('active', 'suspended', 'revoked', 'deleted'))");
+    // A DELETED account (DELETE /api/users/:id) that still has history behind it:
+    // it can never sign in again, it is gone from every list, and its name stays
+    // on the records it made so they still say who did the work. When and by
+    // whom it was deleted is kept on the row itself.
+    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ');
+    await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_by INTEGER REFERENCES users(id) ON DELETE SET NULL');
     await pool.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)');
     // View-only is the only level an external partner is ever given; the
     // partner routes set it explicitly. The default is 'internal' because every
@@ -286,7 +292,7 @@ export async function initDatabase() {
       RETURNS trigger AS $$
       BEGIN
         IF NEW.role = 'manager' AND NEW.sector IS NOT NULL AND
-          (SELECT COUNT(*) FROM users WHERE role = 'manager' AND sector = NEW.sector AND id <> COALESCE(NEW.id, 0)) >= 3 THEN
+          (SELECT COUNT(*) FROM users WHERE role = 'manager' AND status <> 'deleted' AND sector = NEW.sector AND id <> COALESCE(NEW.id, 0)) >= 3 THEN
           RAISE EXCEPTION 'A sector cannot have more than three managers';
         END IF;
         RETURN NEW;
@@ -378,7 +384,7 @@ export async function initDatabase() {
     // database passed. Nothing earlier in this file touches the function below.
     const countHolders = (idExpr, sectorExpr) => `
       (SELECT COUNT(*) FROM users u
-        WHERE u.role = 'manager' AND u.id <> ${idExpr}
+        WHERE u.role = 'manager' AND u.status <> 'deleted' AND u.id <> ${idExpr}
           AND (u.sector = ${sectorExpr}
                OR EXISTS (SELECT 1 FROM manager_operations mo
                            WHERE mo.manager_id = u.id AND mo.sector = ${sectorExpr}))) >= 3`;

@@ -212,7 +212,7 @@ app.get('/api/managers', authMiddleware, asyncRoute(async (req, res) => {
   const result = await pool.query(
     `SELECT id, username, name, role, sector, covers_all_sectors AS "coversAllSectors",
             ${operationsSql('users')} AS operations
-     FROM users WHERE role = 'manager'${scope} ORDER BY name`,
+     FROM users WHERE role = 'manager' AND status <> 'deleted'${scope} ORDER BY name`,
     values
   );
   res.json(result.rows);
@@ -378,7 +378,7 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
   // The headcount is the Director's figure: a sector manager sees the records of
   // their own area, not the size of the organisation.
   const registeredUsers = isAdmin(req.user)
-    ? (await pool.query('SELECT COUNT(*)::int AS total FROM users')).rows[0].total
+    ? (await pool.query("SELECT COUNT(*)::int AS total FROM users WHERE status <> 'deleted'")).rows[0].total
     : null;
 
   // What is waiting on a decision. A manager sees the same two counts for their

@@ -39,6 +39,7 @@ import {
 } from './ui.jsx';
 import { activityJourney, formatLocal, journeyLabel, journeyTone } from './journey.jsx';
 import Home, { DecisionList, ReviewQueue, noticeSentence } from './Home.jsx';
+import { MonthTrend, ProjectProgress } from './Progress.jsx';
 
 // The category presets offered per business operation. Keep in step with
 // The operations with their categories, and the categories themselves, come from
@@ -1318,6 +1319,34 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     } catch (statusError) { fail(statusError.message); }
   });
 
+  // Deleting is for good, so it is asked as the account's username typed out
+  // -- one stray click on the button cannot do it -- with what will happen
+  // said in plain words first. The server checks the same username, refuses
+  // your own account, the last Director and anyone still holding work, and
+  // answers whether the account was removed or closed; the message repeats
+  // exactly that, never more.
+  const deleteAccount = act(async (account) => {
+    const typed = await dialog.prompt({
+      title: fill(t('msg.deleteTitle'), { name: account.name }),
+      message: t('msg.deleteBody'),
+      label: fill(t('msg.deleteTypeUsername'), { username: account.username }),
+      required: true,
+      confirmLabel: t('action.deleteAccount'),
+      danger: true
+    });
+    if (typed === null) return;
+    if (typed.trim().toLowerCase() !== String(account.username).toLowerCase()) {
+      fail(fill(t('msg.deleteWrongUsername'), { username: account.username }));
+      return;
+    }
+    setError('');
+    try {
+      const result = await fetchJson(`/api/users/${account.id}`, { method: 'DELETE', body: JSON.stringify({ confirmUsername: typed.trim() }) });
+      notify(fill(t(result.outcome === 'removed' ? 'msg.deletedRemoved' : 'msg.deletedClosed'), { name: account.name, count: result.records }));
+      await loadData();
+    } catch (deleteError) { fail(deleteError.message); }
+  });
+
   const resetPassword = act(async (account) => {
     const next = await dialog.password({
       title: t('action.changePassword'),
@@ -1912,7 +1941,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   const changePartnerStatus = act(async (partner, status) => {
     if (status !== 'active') {
       const confirmed = await dialog.confirm({
-        title: status === 'suspended' ? t('msg.suspendTitle') : t('msg.revokeTitle'),
+        title: status === 'suspended' ? t('msg.partnerSuspendTitle') : t('msg.revokeTitle'),
         message: fill(t('msg.partnerStatusBody'), { name: partner.name }),
         confirmLabel: status === 'suspended' ? t('partners.suspend') : t('partners.revoke'),
         danger: true
@@ -2410,6 +2439,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   } else if (view === 'reports') {
     content = <>
       <ReportsSection
+        fetchJson={fetchJson}
         mode={reportMode}
         range={reportRange}
         report={report}
@@ -2468,7 +2498,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       <Panel title={t('panel.userManagement')} subtitle={`${filteredUsers.length} / ${register.total}`}>
         {issues.users
           ? <LoadIssue onRetry={loadData} />
-          : <UserTable users={filteredUsers} managers={managers} currentUserId={user.id} busy={actionBusy} language={language} onChangeSector={changeUserSector} onResetPassword={resetPassword} onSetStatus={setAccountStatus} empty={t('empty.noAccountsMatch')} />}
+          : <UserTable users={filteredUsers} managers={managers} currentUserId={user.id} busy={actionBusy} language={language} onChangeSector={changeUserSector} onResetPassword={resetPassword} onSetStatus={setAccountStatus} onDelete={deleteAccount} empty={t('empty.noAccountsMatch')} />}
       </Panel>
       <AccountForm form={accountForm} setForm={setAccountForm} managers={managers}
         generalManagers={register.users.filter((account) => account.role === 'general-manager' && account.status === 'active')} busy={actionBusy} language={language} onSubmit={(event) => submit(event, '/api/users', accountPayload(accountForm), t('msg.accountCreated'), () => setAccountForm(emptyAccount))} />
@@ -2637,7 +2667,7 @@ function rowActivation(onActivate) {
   };
 }
 
-function UserTable({ users, currentUserId, busy, language, onChangeSector, onResetPassword, onSetStatus, empty }) {
+function UserTable({ users, currentUserId, busy, language, onChangeSector, onResetPassword, onSetStatus, onDelete, empty }) {
   const t = useT();
   return users.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('field.name')}</th><th>{t('field.username')}</th><th>{t('field.role')}</th><th>{t('user.access')}</th><th>{t('field.workingArea')}</th><th className="card-optional">{t('field.projects')}</th><th className="card-optional">{t('field.team')}</th><th className="card-optional">{t('field.added')}</th><th className="card-optional">{t('field.password')}</th><th>{t('field.action')}</th></tr></thead><tbody>
     {users.map((account) => {
@@ -2686,6 +2716,9 @@ function UserTable({ users, currentUserId, busy, language, onChangeSector, onRes
             {!isDirector && (account.status === 'suspended'
               ? <button className="text-btn" disabled={busy} onClick={() => onSetStatus(account, 'active')} type="button">{t('action.reactivate')}</button>
               : <button className="danger-btn outlined" disabled={busy} onClick={() => onSetStatus(account, 'suspended')} type="button">{t('action.suspend')}</button>)}
+            {/* Apart from Suspend on purpose: the reversible step comes first,
+                and deleting asks for the username typed out. */}
+            <button className="danger-btn outlined" disabled={busy} onClick={() => onDelete(account)} type="button">{t('action.deleteAccount')}</button>
           </>}</td>
       </tr>;
     })}
@@ -3015,7 +3048,7 @@ function ActivityForm({ form, setForm, projects, selectedProject, managers, isDi
 }
 
 function ReportsSection({
-  mode, range, report, busy, sectorLabel, operation, project, operationOptions, projectOptions,
+  fetchJson, mode, range, report, busy, sectorLabel, operation, project, operationOptions, projectOptions,
   onOperationChange, onProjectChange, onModeChange, onRangeChange, onGenerate, onExport, onPrint, onClose
 }) {
   const t = useT();
@@ -3075,6 +3108,8 @@ function ReportsSection({
         {busy ? t('report.working') : t('action.generateReport')}
       </button>
       {mode === 'custom' && !ready && <span className="report-hint">{t('report.chooseValidRange')}</span>}
+      {/* One press back to everything, so a narrowed report is never a trap. */}
+      {(operation !== 'All' || project !== 'All') && <button className="text-btn" type="button" onClick={() => onOperationChange('All')}>{t('report.resetFilters')}</button>}
     </div>
 
     {report && <ReportBody
@@ -3085,7 +3120,23 @@ function ReportsSection({
       onPrint={onPrint}
       onClose={onClose}
     />}
+
+    {/* Work done by project and month by month, under the same operation and
+        project filters (the API checks them as it checks the report). Shown
+        whether or not a report has been generated: it needs no dates. */}
+    {fetchJson && <div className="report-progress">
+      <ProjectProgress fetchJson={fetchJson} query={progressQuery(operation, project)} />
+      <MonthTrend fetchJson={fetchJson} query={progressQuery(operation, project)} />
+    </div>}
   </section>;
+}
+
+// The operation and project filters as a query string, leaving out 'All'.
+function progressQuery(operation, project) {
+  const parts = [];
+  if (operation && operation !== 'All') parts.push(`operation=${encodeURIComponent(operation)}`);
+  if (project && project !== 'All') parts.push(`project=${encodeURIComponent(project)}`);
+  return parts.join('&');
 }
 
 // THE REPORT ON SCREEN, in the order a report is read: what was done, then the
@@ -3236,6 +3287,13 @@ function ReportBody({ report, busy, sectorLabel, onExport, onPrint, onClose }) {
             <span>{work.money.remaining < 0 ? t('report.overBudgetBy') : t('report.moneyLeft')}</span>
             <strong>{formatUsd(Math.abs(work.money.remaining))}</strong>
             <small className="money-equivalent">{localPair(Math.abs(work.money.remaining), report.rate)}</small>
+          </div>}
+          {/* Spending in months with no budget set is not taken from any
+              budget, which is why Budget − Spent can differ from Left. */}
+          {work.money.budget > 0 && work.money.spentWithoutBudget > 0 && <div className="budget-block">
+            <span>{t('report.spentWithoutBudget')}</span>
+            <strong>{formatUsd(work.money.spentWithoutBudget)}</strong>
+            <small className="money-equivalent">{localPair(work.money.spentWithoutBudget, report.rate)}</small>
           </div>}
           {/* Only when the dates are narrower than the month: on a monthly
               report this is the figure beside it, printed twice. */}

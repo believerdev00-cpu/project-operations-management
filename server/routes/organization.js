@@ -133,7 +133,7 @@ async function loadPeople(user, teams) {
             COALESCE((SELECT json_agg(json_build_object('id', p.id, 'name', p.name, 'sector', p.sector) ORDER BY p.name)
                         FROM projects p WHERE p.manager_id = u.id), '[]'::json) AS projects
        FROM users u
-      WHERE u.role IN ('super-admin', 'general-manager', 'manager', 'staff')
+      WHERE u.role IN ('super-admin', 'general-manager', 'manager', 'staff') AND u.status <> 'deleted'
       ORDER BY CASE u.role WHEN 'super-admin' THEN 0 WHEN 'general-manager' THEN 1 WHEN 'manager' THEN 2 ELSE 3 END, u.name`
   );
   const everybody = result.rows.map((row) => ({

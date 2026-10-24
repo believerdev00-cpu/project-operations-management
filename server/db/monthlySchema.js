@@ -437,6 +437,17 @@ const statements = [
   // objective is optional: NULL means "by the end of the month", which is what
   // every objective written before this column meant.
   `ALTER TABLE plan_objectives ADD COLUMN IF NOT EXISTS deadline DATE`,
+  // What the objective is expected to cost, in USD, when it needs money at all.
+  // Optional and NULL by default: "train 20 young people" may need $200, "visit
+  // every site" may need nothing. It is the manager's planning figure, never a
+  // budget: it is not approved by being typed, it is never added to the
+  // approved budget and it moves no ceiling. Stored in USD as entered, so a
+  // later change of exchange rate cannot rewrite it; RWF and CDF are only ever
+  // shown beside it at the rate the Director has set (exchange_rates).
+  `ALTER TABLE plan_objectives ADD COLUMN IF NOT EXISTS planned_amount NUMERIC(18,2)`,
+  `ALTER TABLE plan_objectives DROP CONSTRAINT IF EXISTS plan_objectives_planned_amount_check`,
+  `ALTER TABLE plan_objectives ADD CONSTRAINT plan_objectives_planned_amount_check
+     CHECK (planned_amount IS NULL OR planned_amount >= 0)`,
 
   // ---- who handed the month to its manager, and when -------------------------
   //

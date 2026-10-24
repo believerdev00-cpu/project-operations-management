@@ -488,6 +488,68 @@ try {
   check('  not the General Manager', (await lowNotices(general.token)).length === 0);
   await sellOne();
   check('2 → 1: no second alert', (await lowNotices(admin)).length === 1);
+
+  section('13. A local shop: the simple product, its price and its stock');
+  // The everyday form: a name, a category, how many and the price of one.
+  // No product code is typed; the shop gives one.
+  const key = `zz-key-${Date.now()}`;
+  const sugarBody = { name: 'ZZTEST Sugar 1 kg', productType: 'groceries', requestKey: key, variants: [{ sellingPrice: 1500, costPrice: 1200, reorderLevel: 5, openingStock: 20 }] };
+  const sugar = await post(manager.token, '/api/boutique/products', sugarBody);
+  const sugarVariant = sugar.body.variants?.[0];
+  check('a product is added with just a name, category, quantity and price', sugar.status === 201 && sugar.body.productType === 'groceries'
+    && sugarVariant?.stockQuantity === 20 && near(sugarVariant?.sellingPrice, 1500), sugar.body);
+  check('  and is given its own product code', /^ITEM-\d{5}$/.test(sugarVariant?.sku || ''), sugarVariant?.sku);
+  const again = await post(manager.token, '/api/boutique/products', sugarBody);
+  const sugarRows = await pool.query(`SELECT COUNT(*)::int AS n FROM boutique_products WHERE name = 'ZZTEST Sugar 1 kg'`);
+  check('pressing Save twice adds it once', again.status === 200 && again.body.id === sugar.body.id && sugarRows.rows[0].n === 1, again.body);
+  const twin = await post(manager.token, '/api/boutique/products', { ...sugarBody, name: 'zztest sugar 1 KG', requestKey: `${key}-b` });
+  check('a second product with the same name is refused, not merged', twin.status === 409 && twin.body.code === 'PRODUCT_EXISTS', twin.body);
+  const badPrice = await post(manager.token, '/api/boutique/products', { name: 'ZZTEST Bad price', variants: [{ sellingPrice: -5 }] });
+  check('a negative price is refused', badPrice.status === 400, badPrice.body);
+  const badQty = await post(manager.token, '/api/boutique/products', { name: 'ZZTEST Bad qty', variants: [{ sellingPrice: 100, openingStock: 2.5 }] });
+  check('a quantity that is not a whole number is refused', badQty.status === 400, badQty.body);
+  const badType = await post(manager.token, '/api/boutique/products', { name: 'ZZTEST Bad type', productType: 'spaceships', variants: [{ sellingPrice: 100 }] });
+  check('an unknown category is refused', badType.status === 400, badType.body);
+  check('a cashier cannot change a price', (await put(cashier.token, `/api/boutique/variants/${sugarVariant.id}`, { sellingPrice: 1 })).status === 403);
+  check('a cashier cannot change stock', (await post(cashier.token, '/api/boutique/stock/adjustments', { variantId: sugarVariant.id, kind: 'received', quantity: 5 })).status === 403);
+
+  // A price change does not rewrite a sale already made.
+  const sold = await post(cashier.token, '/api/boutique/sales', { items: [{ variantId: sugarVariant.id, quantity: 1 }], payments: [{ method: 'Mobile Money', amount: 1500 }] });
+  check('one bag of sugar is sold at 1,500', sold.status === 201, sold.body);
+  const repriced = await put(manager.token, `/api/boutique/variants/${sugarVariant.id}`, { sellingPrice: 1800 });
+  const repricedVariant = repriced.body.variants?.find((v) => v.id === sugarVariant.id);
+  check('the manager changes the price to 1,800', repriced.status === 200 && near(repricedVariant?.sellingPrice, 1800)
+    && repricedVariant?.sku === sugarVariant.sku && repricedVariant?.stockQuantity === 19, repricedVariant);
+  const soldAfter = await get(admin, `/api/boutique/sales/${sold.body.id}`);
+  check('  the earlier sale keeps the price it was sold at', near(soldAfter.body.items?.[0]?.unitPrice, 1500), soldAfter.body.items);
+  const priceTrail = await pool.query(`SELECT details FROM boutique_audit WHERE entity_type = 'variant' AND entity_id = $1 AND action = 'Variant updated' ORDER BY id DESC LIMIT 1`, [sugarVariant.id]);
+  check('  the trail has the old and the new price', near(priceTrail.rows[0]?.details?.before?.sellingPrice, 1500) && near(priceTrail.rows[0]?.details?.after?.sellingPrice, 1800), priceTrail.rows[0]);
+
+  // Stock that arrived ADDS; asked by the manager, it waits for the Director.
+  const stockOf = async () => (await pool.query('SELECT stock_quantity FROM boutique_variants WHERE id = $1', [sugarVariant.id])).rows[0].stock_quantity;
+  const arrived = await post(admin, '/api/boutique/stock/adjustments', { variantId: sugarVariant.id, kind: 'received', quantity: 10 });
+  check('new stock arriving adds to the shelf (19 + 10 = 29)', arrived.status === 201 && arrived.body.status === 'approved' && arrived.body.delta === 10 && await stockOf() === 29, arrived.body);
+  check('  and needs no reason', arrived.body.reason === 'New stock received', arrived.body.reason);
+  const askKey = `zz-ask-${Date.now()}`;
+  const deliveryAsked = await post(manager.token, '/api/boutique/stock/adjustments', { variantId: sugarVariant.id, kind: 'received', quantity: 5, requestKey: askKey });
+  const deliveryAgain = await post(manager.token, '/api/boutique/stock/adjustments', { variantId: sugarVariant.id, kind: 'received', quantity: 5, requestKey: askKey });
+  const askedRows = await pool.query('SELECT COUNT(*)::int AS n FROM boutique_stock_adjustments WHERE request_key = $1', [askKey]);
+  check('the manager’s delivery waits for the Director', deliveryAsked.status === 201 && deliveryAsked.body.status === 'pending' && await stockOf() === 29, deliveryAsked.body);
+  check('  sent twice, it is recorded once', deliveryAgain.status === 200 && deliveryAgain.body.id === deliveryAsked.body.id && askedRows.rows[0].n === 1, deliveryAgain.body);
+  await post(admin, `/api/boutique/stock/adjustments/${deliveryAsked.body.id}/decision`, { approve: true });
+  check('  approved, the stock becomes 34', await stockOf() === 34);
+  const tooMuch = await post(admin, '/api/boutique/stock/adjustments', { variantId: sugarVariant.id, kind: 'damaged', quantity: 35, reason: 'ZZTEST more than there is' });
+  check('taking out more than is on the shelf is refused', tooMuch.status === 409 && tooMuch.body.code === 'INSUFFICIENT_STOCK' && await stockOf() === 34, tooMuch.body);
+  const noReason = await post(admin, '/api/boutique/stock/adjustments', { variantId: sugarVariant.id, kind: 'damaged', quantity: 1 });
+  check('a write-off without a reason is refused', noReason.status === 400, noReason.body);
+  // Two write-offs of 20 at once against 34: one lands, one is refused, and
+  // nothing is lost between them.
+  const both = await Promise.all([1, 2].map((n) => post(admin, '/api/boutique/stock/adjustments', { variantId: sugarVariant.id, kind: 'damaged', quantity: 20, reason: `ZZTEST spoiled batch ${n}` })));
+  const landed = both.filter((r) => r.status === 201).length;
+  const refusedOne = both.filter((r) => r.status === 409).length;
+  const ledgerSum = await pool.query('SELECT COALESCE(SUM(quantity), 0)::int AS total FROM boutique_stock_movements WHERE variant_id = $1', [sugarVariant.id]);
+  check('two write-offs at once: one lands, one is refused', landed === 1 && refusedOne === 1, both.map((r) => r.status));
+  check('  the shelf is 14 and the ledger agrees', await stockOf() === 14 && ledgerSum.rows[0].total === 14, { shelf: await stockOf(), ledger: ledgerSum.rows[0].total });
 } catch (error) {
   failed += 1;
   console.log(`  FAIL  unexpected error -- ${error.stack || error.message}`);

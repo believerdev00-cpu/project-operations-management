@@ -59,7 +59,10 @@ export const TEAM_STATUSES = ['active', 'archived'];
 export const ORGANIZATION_ACTIONS = [
   'team_created', 'team_updated', 'team_archived', 'team_restored',
   'member_added', 'member_removed', 'leader_changed',
-  'reporting_changed', 'partner_profile_changed', 'partner_projects_changed'
+  'reporting_changed', 'partner_profile_changed', 'partner_projects_changed',
+  // The Director's account decisions (routes/users.js): a suspension, its
+  // reversal, and a delete (removed or closed -- detail.outcome says which).
+  'account_suspended', 'account_reactivated', 'account_deleted'
 ];
 
 import { RETAIL_OPERATION } from '../../shared/businessOperations.js';

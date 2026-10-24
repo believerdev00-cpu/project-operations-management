@@ -19,7 +19,7 @@ import { DetailView, Fact, useBusy, useDialog } from './ui.jsx';
 import { Section } from './journey.jsx';
 import { formatDate, formatRwf, todayLocal } from './format.js';
 import {
-  ADJUSTMENT_KINDS, BOUTIQUE_PAYMENT_METHODS, EXPENSE_CATEGORIES, PRODUCT_TYPES, REPORT_PERIODS,
+  ADDING_ADJUSTMENTS, ADJUSTMENT_KINDS, BOUTIQUE_PAYMENT_METHODS, EXPENSE_CATEGORIES, PRODUCT_CATEGORIES, REPORT_PERIODS,
   fromMinor, lineTotals, saleTotals, toMinor
 } from '../shared/boutique.js';
 
@@ -557,10 +557,52 @@ function ReturnForm({ sale, fetchJson, can, busy, run, onMessage, onError, onDon
 // ---- products ------------------------------------------------------------------------
 
 const emptyVariant = () => ({ sku: '', barcode: '', size: '', color: '', costPrice: '', sellingPrice: '', reorderLevel: '0', openingStock: '0' });
-const emptyProduct = () => ({ name: '', productType: 'clothing', category: '', brand: '', description: '', variants: [emptyVariant()] });
+
+// A key per opened form, sent with the save so a second press of the same
+// button is recognised by the API instead of adding the product (or the
+// stock) twice. randomUUID needs a secure page; the fallback is for an old
+// browser on plain http, where uniqueness only has to hold for one form.
+export function newRequestKey() {
+  try { if (window.crypto?.randomUUID) return window.crypto.randomUUID(); } catch { /* fall through */ }
+  return `k-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+// The simple product form: what a shopkeeper knows about a product when it
+// arrives -- its name, what kind of thing it is, how many there are and what
+// one sells for. Everything else is folded under "More details" and optional.
+const emptyProduct = () => ({
+  name: '', productType: 'groceries', quantity: '', price: '', costPrice: '', reorderLevel: '',
+  barcode: '', sku: '', brand: '', description: '', requestKey: newRequestKey()
+});
+
+// The checks the API makes, made first here so the message sits beside the
+// field it is about and nothing typed is lost. The API still decides.
+function productProblems(form, t) {
+  const problems = {};
+  const whole = (value) => value === '' || (Number.isInteger(Number(value)) && Number(value) >= 0);
+  if (!form.name.trim()) problems.name = t('btq.err.name');
+  if (form.price === '' || !(Number(form.price) >= 0)) problems.price = t('btq.err.price');
+  if (form.quantity === '' || !whole(form.quantity)) problems.quantity = t('btq.err.quantity');
+  if (form.costPrice !== '' && !(Number(form.costPrice) >= 0)) problems.costPrice = t('btq.err.price');
+  if (!whole(form.reorderLevel)) problems.reorderLevel = t('btq.err.quantity');
+  return problems;
+}
+
+// Stock status in words as well as colour, so it reads the same on a
+// black-and-white printout and to somebody who cannot tell red from green.
+export function stockStatus(quantity, reorderLevel) {
+  if (Number(quantity) <= 0) return { key: 'out', tone: 'stopped' };
+  if (Number(quantity) <= Number(reorderLevel || 0)) return { key: 'low', tone: 'waiting' };
+  return { key: 'ok', tone: 'done' };
+}
+
+function FieldError({ children }) {
+  return children ? <small className="field-error" role="alert">{children}</small> : null;
+}
 
 function ProductsTab({ fetchJson, upload, onMessage, onError, changed, can, go, query }) {
   const { t } = useI18n();
+  const dialog = useDialog();
   const [busy, run] = useBusy();
   const [search, setSearch] = useState('');
   const [type, setType] = useState('');
@@ -568,76 +610,140 @@ function ProductsTab({ fetchJson, upload, onMessage, onError, changed, can, go, 
   const [tick, setTick] = useState(0);
   const [products] = useLoad(fetchJson, `/api/boutique/products?status=${status}${type ? `&type=${type}` : ''}${search ? `&search=${encodeURIComponent(search)}` : ''}`, tick, onError);
   const [form, setForm] = useState(emptyProduct);
+  const [problems, setProblems] = useState({});
   const openId = query.get('product');
   const adding = query.get('add') === '1';
   const refresh = () => { setTick((n) => n + 1); changed(); };
+  const set = (patch) => { setForm({ ...form, ...patch }); setProblems({}); };
 
   const submit = (e) => {
     e.preventDefault();
+    const found = productProblems(form, t);
+    setProblems(found);
+    if (Object.keys(found).length) return;
     run(async () => {
       try {
-        const created = await fetchJson('/api/boutique/products', { method: 'POST', body: JSON.stringify(form) });
+        const created = await fetchJson('/api/boutique/products', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: form.name, productType: form.productType, brand: form.brand, description: form.description, requestKey: form.requestKey,
+            variants: [{ sku: form.sku, barcode: form.barcode, sellingPrice: form.price, costPrice: form.costPrice || 0, reorderLevel: form.reorderLevel || 0, openingStock: form.quantity }]
+          })
+        });
         onMessage(fill(t('btq.productAdded'), { name: created.name }));
+        // Only a save that worked clears the form; a refusal keeps every field.
         setForm(emptyProduct());
         refresh();
-        go('products', { product: created.id });
+        go('products');
       } catch (error) { onError(error.message); }
     });
   };
-  const setVariant = (index, patch) => setForm({ ...form, variants: form.variants.map((v, i) => (i === index ? { ...v, ...patch } : v)) });
+
+  // Changing the price of a one-version product straight from the list. A
+  // product with several versions opens, because "which one?" needs the list.
+  const changePrice = (product) => run(async () => {
+    const variant = product.variants[0];
+    const typed = await dialog.prompt({
+      title: fill(t('btq.changePriceFor'), { name: product.name }),
+      label: fill(t('btq.newPriceLabel'), { current: money(variant.sellingPrice) }),
+      initialValue: String(variant.sellingPrice), required: true
+    });
+    if (typed === null) return;
+    if (!(Number(typed) >= 0) || typed.trim() === '') { onError(t('btq.err.price')); return; }
+    try {
+      await fetchJson(`/api/boutique/variants/${variant.id}`, { method: 'PUT', body: JSON.stringify({ sellingPrice: typed }) });
+      onMessage(fill(t('btq.priceChanged'), { name: product.name, price: money(typed) }));
+      refresh();
+    } catch (error) { onError(error.message); }
+  });
 
   return <>
-    {openId && <ProductDetail productId={openId} fetchJson={fetchJson} upload={upload} onMessage={onMessage} onError={onError} can={can} onClose={() => go('products')} onChanged={refresh} />}
+    {openId && <ProductDetail productId={openId} fetchJson={fetchJson} upload={upload} onMessage={onMessage} onError={onError} can={can} onClose={() => go('products')} onChanged={refresh} go={go} />}
     <section className="toolbar-row">
       <div className="filter-group">
         <input type="search" value={search} placeholder={t('btq.searchProducts')} aria-label={t('btq.searchProducts')} onChange={(e) => setSearch(e.target.value)} />
-        <select value={type} aria-label={t('btq.productType')} onChange={(e) => setType(e.target.value)}><option value="">{t('btq.allTypes')}</option>{PRODUCT_TYPES.map((p) => <option key={p} value={p}>{t(`btq.type.${p}`)}</option>)}</select>
+        <select value={type} aria-label={t('btq.productType')} onChange={(e) => setType(e.target.value)}><option value="">{t('btq.allTypes')}</option>{PRODUCT_CATEGORIES.map((p) => <option key={p} value={p}>{t(`btq.type.${p}`)}</option>)}</select>
         <select value={status} aria-label={t('field.status')} onChange={(e) => setStatus(e.target.value)}><option value="active">{t('btq.activeOnly')}</option><option value="all">{t('btq.all')}</option></select>
       </div>
-      {can.manage && <button className="primary-btn" type="button" onClick={() => go('products', { add: adding ? undefined : '1' })}>{t('btq.addProduct')}</button>}
+      {can.manage && <button className="primary-btn big-action" type="button" onClick={() => go('products', { add: adding ? undefined : '1' })}>{t('btq.addProduct')}</button>}
     </section>
-    {can.manage && adding && <form className="form-panel" onSubmit={submit}>
+    {can.manage && adding && <form className="form-panel" onSubmit={submit} noValidate>
       <div className="panel-header"><div><h2>{t('btq.addProduct')}</h2><span>{t('btq.addProductBlurb')}</span></div></div>
       <div className="form-grid">
-        <Field label={t('field.name')}><input required maxLength="200" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-        <Field label={t('btq.productType')}><select value={form.productType} onChange={(e) => setForm({ ...form, productType: e.target.value })}>{PRODUCT_TYPES.map((p) => <option key={p} value={p}>{t(`btq.type.${p}`)}</option>)}</select></Field>
-        <Field label={t('field.category')}><input maxLength="100" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} /></Field>
-        <Field label={t('btq.brand')}><input maxLength="100" value={form.brand} onChange={(e) => setForm({ ...form, brand: e.target.value })} /></Field>
-        <Field label={t('field.description')} wide><textarea rows="2" maxLength="2000" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field>
+        <Field label={`${t('btq.productName')} *`}>
+          <input maxLength="200" value={form.name} placeholder={t('btq.productNameExample')} aria-invalid={Boolean(problems.name)} onChange={(e) => set({ name: e.target.value })} />
+          <FieldError>{problems.name}</FieldError>
+        </Field>
+        <Field label={`${t('btq.productType')} *`}>
+          <select value={form.productType} onChange={(e) => set({ productType: e.target.value })}>{PRODUCT_CATEGORIES.map((p) => <option key={p} value={p}>{t(`btq.type.${p}`)}</option>)}</select>
+        </Field>
+        <Field label={`${t('btq.quantityInStock')} *`}>
+          <input type="number" inputMode="numeric" min="0" step="1" value={form.quantity} placeholder="20" aria-invalid={Boolean(problems.quantity)} onChange={(e) => set({ quantity: e.target.value })} />
+          <small className="field-hint">{t('btq.quantityInStockHint')}</small>
+          <FieldError>{problems.quantity}</FieldError>
+        </Field>
+        <Field label={`${t('btq.pricePerUnit')} (RWF) *`}>
+          <input type="number" inputMode="decimal" min="0" step="1" value={form.price} placeholder="1500" aria-invalid={Boolean(problems.price)} onChange={(e) => set({ price: e.target.value })} />
+          <small className="field-hint">{t('btq.pricePerUnitHint')}</small>
+          <FieldError>{problems.price}</FieldError>
+        </Field>
       </div>
-      <h3 className="form-section-title">{t('btq.variants')}</h3>
-      <p className="field-hint">{t('btq.variantsHint')}</p>
-      {form.variants.map((v, index) => <div className="form-grid btq-variant-row" key={index}>
-        <Field label={t('btq.sku')}><input required maxLength="60" value={v.sku} onChange={(e) => setVariant(index, { sku: e.target.value })} /></Field>
-        <Field label={t('btq.barcode')}><input maxLength="60" value={v.barcode} onChange={(e) => setVariant(index, { barcode: e.target.value })} /></Field>
-        <Field label={t('btq.size')}><input maxLength="40" value={v.size} onChange={(e) => setVariant(index, { size: e.target.value })} /></Field>
-        <Field label={t('btq.color')}><input maxLength="40" value={v.color} onChange={(e) => setVariant(index, { color: e.target.value })} /></Field>
-        <Field label={t('btq.costPrice')}><input type="number" min="0" step="1" required value={v.costPrice} onChange={(e) => setVariant(index, { costPrice: e.target.value })} /></Field>
-        <Field label={t('btq.sellingPrice')}><input type="number" min="0" step="1" required value={v.sellingPrice} onChange={(e) => setVariant(index, { sellingPrice: e.target.value })} /></Field>
-        <Field label={t('btq.reorderLevel')}><input type="number" min="0" step="1" value={v.reorderLevel} onChange={(e) => setVariant(index, { reorderLevel: e.target.value })} /></Field>
-        <Field label={t('btq.openingStock')}><input type="number" min="0" step="1" value={v.openingStock} onChange={(e) => setVariant(index, { openingStock: e.target.value })} /></Field>
-        {form.variants.length > 1 && <button type="button" className="text-btn" onClick={() => setForm({ ...form, variants: form.variants.filter((_, i) => i !== index) })}>{t('action.remove')}</button>}
-      </div>)}
-      <div className="button-row"><button type="button" className="secondary-btn" onClick={() => setForm({ ...form, variants: [...form.variants, emptyVariant()] })}>{t('btq.addVariant')}</button></div>
-      <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('btq.addProduct')}</button></div>
+      <details className="form-more">
+        <summary>{t('btq.moreDetails')}</summary>
+        <div className="form-grid">
+          <Field label={`${t('btq.buyingPrice')} (RWF) ${t('btq.optional')}`}>
+            <input type="number" inputMode="decimal" min="0" step="1" value={form.costPrice} onChange={(e) => set({ costPrice: e.target.value })} />
+            <small className="field-hint">{t('btq.buyingPriceHint')}</small>
+            <FieldError>{problems.costPrice}</FieldError>
+          </Field>
+          <Field label={`${t('btq.lowStockAt')} ${t('btq.optional')}`}>
+            <input type="number" inputMode="numeric" min="0" step="1" value={form.reorderLevel} placeholder="5" onChange={(e) => set({ reorderLevel: e.target.value })} />
+            <small className="field-hint">{t('btq.lowStockAtHint')}</small>
+            <FieldError>{problems.reorderLevel}</FieldError>
+          </Field>
+          <Field label={`${t('btq.barcode')} ${t('btq.optional')}`}><input maxLength="60" value={form.barcode} onChange={(e) => set({ barcode: e.target.value })} /></Field>
+          <Field label={`${t('btq.sku')} ${t('btq.optional')}`}><input maxLength="60" value={form.sku} onChange={(e) => set({ sku: e.target.value })} /><small className="field-hint">{t('btq.skuHint')}</small></Field>
+          <Field label={`${t('btq.brand')} ${t('btq.optional')}`}><input maxLength="100" value={form.brand} onChange={(e) => set({ brand: e.target.value })} /></Field>
+          <Field label={`${t('field.description')} ${t('btq.optional')}`} wide><textarea rows="2" maxLength="2000" value={form.description} onChange={(e) => set({ description: e.target.value })} /></Field>
+        </div>
+      </details>
+      <p className="field-hint">{t('btq.requiredHint')}</p>
+      <div className="form-submit-bar">
+        <button type="button" className="text-btn" onClick={() => go('products')}>{t('action.cancel')}</button>
+        <button className="primary-btn big-action" type="submit" disabled={busy}>{t('btq.saveProduct')}</button>
+      </div>
     </form>}
     <Panel title={t('btq.catalogue')} subtitle={products ? String(products.length) : ''}>
-      {products?.length ? <div className="table-wrap"><table className="card-table">
-        <thead><tr><th>{t('btq.product')}</th><th>{t('btq.productType')}</th><th>{t('btq.brand')}</th><th>{t('btq.variants')}</th><th>{t('btq.stock')}</th><th>{t('field.status')}</th></tr></thead>
-        <tbody>{products.map((p) => <tr key={p.id} className="clickable-row" onClick={() => go('products', { product: p.id })}>
-          <td className="card-title-cell"><strong>{p.name}</strong><small>{p.category}</small></td>
-          <td data-label={t('btq.productType')}>{t(`btq.type.${p.productType}`)}</td>
-          <td data-label={t('btq.brand')}>{p.brand || '—'}</td>
-          <td data-label={t('btq.variants')}>{p.variants.length}</td>
-          <td data-label={t('btq.stock')}>{p.stockQuantity}</td>
-          <td data-label={t('field.status')}><Badge tone={p.status === 'active' ? 'done' : 'stopped'}>{t(`btq.itemStatus.${p.status}`)}</Badge></td>
-        </tr>)}</tbody>
-      </table></div> : <Empty>{t('btq.noProducts')}</Empty>}
+      {!products ? <div className="compact-loading"><span className="spinner" /></div> : products.length ? <div className="table-wrap"><table className="card-table">
+        <thead><tr><th>{t('btq.product')}</th><th>{t('btq.productType')}</th><th>{t('btq.inStock')}</th><th>{t('btq.pricePerUnit')}</th><th>{t('btq.stockStatus')}</th>{can.manage && <th>{t('table.actions')}</th>}</tr></thead>
+        <tbody>{products.map((p) => {
+          const prices = p.variants.map((v) => Number(v.sellingPrice));
+          const lowest = prices.length ? Math.min(...prices) : 0;
+          const level = Math.max(0, ...p.variants.map((v) => Number(v.reorderLevel || 0)));
+          const state = p.status === 'active' ? stockStatus(p.stockQuantity, p.variants.length === 1 ? p.variants[0].reorderLevel : level) : null;
+          return <tr key={p.id}>
+            <td className="card-title-cell"><button type="button" className="text-btn" onClick={() => go('products', { product: p.id })}><strong>{p.name}</strong></button>
+              {p.variants.length > 1 && <small>{fill(t('btq.versionsCount'), { count: p.variants.length })}</small>}</td>
+            <td data-label={t('btq.productType')}>{t(`btq.type.${p.productType}`)}</td>
+            <td data-label={t('btq.inStock')}>{p.stockQuantity}</td>
+            <td data-label={t('btq.pricePerUnit')}>{p.variants.length > 1 && new Set(prices).size > 1 ? fill(t('btq.priceFrom'), { price: money(lowest) }) : money(lowest)}</td>
+            <td data-label={t('btq.stockStatus')}>{state
+              ? <Badge tone={state.tone}>{t(`btq.stockState.${state.key}`)}</Badge>
+              : <Badge tone="stopped">{t(`btq.itemStatus.${p.status}`)}</Badge>}</td>
+            {can.manage && <td className="card-actions">
+              {p.variants.length === 1
+                ? <button type="button" className="secondary-btn" disabled={busy} onClick={() => changePrice(p)}>{t('btq.changePrice')}</button>
+                : <button type="button" className="secondary-btn" onClick={() => go('products', { product: p.id })}>{t('btq.changePrice')}</button>}
+              <button type="button" className="secondary-btn" onClick={() => go('stock', p.variants.length === 1 ? { variant: p.variants[0].id } : {})}>{t('btq.updateStock')}</button>
+            </td>}
+          </tr>;
+        })}</tbody>
+      </table></div> : <div className="empty-state"><strong>{t('btq.noProducts')}</strong>{can.manage && <span>{t('btq.noProductsHint')}</span>}</div>}
     </Panel>
   </>;
 }
 
-function ProductDetail({ productId, fetchJson, upload, onMessage, onError, can, onClose, onChanged }) {
+function ProductDetail({ productId, fetchJson, upload, onMessage, onError, can, onClose, onChanged, go }) {
   const { t } = useI18n();
   const [busy, run] = useBusy();
   const [tick, setTick] = useState(0);
@@ -660,7 +766,25 @@ function ProductDetail({ productId, fetchJson, upload, onMessage, onError, can, 
     return () => { cancelled = true; if (url) URL.revokeObjectURL(url); };
   }, [product]);
 
+  const dialog = useDialog();
   const save = (e) => { e.preventDefault(); run(async () => { try { await fetchJson(`/api/boutique/products/${product.id}`, { method: 'PUT', body: JSON.stringify(form) }); onMessage(t('btq.saved')); refresh(); } catch (error) { onError(error.message); } }); };
+  // The price alone, shown beside the one it replaces. Only the selling
+  // price is sent, so nothing else on the version can be changed by accident,
+  // and sales already made keep the price they were rung up at.
+  const changePrice = (v) => run(async () => {
+    const typed = await dialog.prompt({
+      title: fill(t('btq.changePriceFor'), { name: `${product.name}${variantLabel(v) ? ` (${variantLabel(v)})` : ''}` }),
+      label: fill(t('btq.newPriceLabel'), { current: money(v.sellingPrice) }),
+      initialValue: String(v.sellingPrice), required: true
+    });
+    if (typed === null) return;
+    if (typed.trim() === '' || !(Number(typed) >= 0)) { onError(t('btq.err.price')); return; }
+    try {
+      await fetchJson(`/api/boutique/variants/${v.id}`, { method: 'PUT', body: JSON.stringify({ sellingPrice: typed }) });
+      onMessage(fill(t('btq.priceChanged'), { name: product.name, price: money(typed) }));
+      refresh();
+    } catch (error) { onError(error.message); }
+  });
   const saveVariant = (e) => { e.preventDefault(); run(async () => { try { await fetchJson(`/api/boutique/variants/${editingVariant.id}`, { method: 'PUT', body: JSON.stringify(editingVariant) }); setEditingVariant(null); onMessage(t('btq.saved')); refresh(); } catch (error) { onError(error.message); } }); };
   const addVariant = (e) => { e.preventDefault(); run(async () => { try { await fetchJson(`/api/boutique/products/${product.id}/variants`, { method: 'POST', body: JSON.stringify(newVariant) }); setNewVariant(null); onMessage(t('btq.saved')); refresh(); } catch (error) { onError(error.message); } }); };
   const pickImage = (e) => {
@@ -688,7 +812,7 @@ function ProductDetail({ productId, fetchJson, upload, onMessage, onError, can, 
         </div>
         {can.manage ? <form className="form-grid" onSubmit={save}>
           <Field label={t('field.name')}><input required maxLength="200" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-          <Field label={t('btq.productType')}><select value={form.productType} onChange={(e) => setForm({ ...form, productType: e.target.value })}>{PRODUCT_TYPES.map((p) => <option key={p} value={p}>{t(`btq.type.${p}`)}</option>)}</select></Field>
+          <Field label={t('btq.productType')}><select value={form.productType} onChange={(e) => setForm({ ...form, productType: e.target.value })}>{(PRODUCT_CATEGORIES.includes(form.productType) ? PRODUCT_CATEGORIES : [...PRODUCT_CATEGORIES, form.productType]).map((p) => <option key={p} value={p}>{t(`btq.type.${p}`)}</option>)}</select></Field>
           <Field label={t('field.category')}><input maxLength="100" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} /></Field>
           <Field label={t('btq.brand')}><input maxLength="100" value={form.brand} onChange={(e) => setForm({ ...form, brand: e.target.value })} /></Field>
           <Field label={t('field.status')}><select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}><option value="active">{t('btq.itemStatus.active')}</option><option value="archived">{t('btq.itemStatus.archived')}</option></select></Field>
@@ -709,7 +833,10 @@ function ProductDetail({ productId, fetchJson, upload, onMessage, onError, can, 
           <td data-label={t('btq.costPrice')}>{v.costPrice === undefined ? '—' : money(v.costPrice)}</td><td data-label={t('btq.sellingPrice')}>{money(v.sellingPrice)}</td>
           <td data-label={t('btq.stock')}>{v.stockQuantity}</td><td data-label={t('btq.reorderLevel')}>{v.reorderLevel}</td>
           <td data-label={t('field.status')}>{t(`btq.itemStatus.${v.status}`)}</td>
-          {can.manage && <td className="card-actions"><button type="button" className="text-btn" onClick={() => setEditingVariant({ id: v.id, sku: v.sku, barcode: v.barcode, size: v.size, color: v.color, costPrice: v.costPrice, sellingPrice: v.sellingPrice, reorderLevel: v.reorderLevel, status: v.status })}>{t('action.edit')}</button></td>}
+          {can.manage && <td className="card-actions">
+            <button type="button" className="secondary-btn" disabled={busy} onClick={() => changePrice(v)}>{t('btq.changePrice')}</button>
+            <button type="button" className="secondary-btn" onClick={() => go('stock', { variant: v.id })}>{t('btq.updateStock')}</button>
+            <button type="button" className="text-btn" onClick={() => setEditingVariant({ id: v.id, sku: v.sku, barcode: v.barcode, size: v.size, color: v.color, costPrice: v.costPrice, sellingPrice: v.sellingPrice, reorderLevel: v.reorderLevel, status: v.status })}>{t('action.edit')}</button></td>}
         </tr>)}</tbody>
       </table></div>
       {can.manage && (editingVariant || newVariant) && <form className="decision-form" onSubmit={editingVariant ? saveVariant : addVariant}>
@@ -743,7 +870,19 @@ function VariantFields({ value, onChange, withOpening, withStatus }) {
 
 // ---- stock --------------------------------------------------------------------------
 
-function StockTab({ fetchJson, onMessage, onError, changed, can }) {
+const emptyStockForm = () => ({ variant: null, kind: 'received', quantity: '', reason: '', requestKey: newRequestKey() });
+
+// What the shelf will hold once this change is made, worked out the same way
+// the API works it out (ADDING_ADJUSTMENTS, a count replaces). Null when the
+// quantity is not a usable whole number yet.
+function stockAfter(kind, quantity, onShelf) {
+  if (quantity === '' || !Number.isInteger(Number(quantity)) || Number(quantity) < 0) return null;
+  const n = Number(quantity);
+  if (kind === 'count') return n;
+  return ADDING_ADJUSTMENTS.includes(kind) ? onShelf + n : onShelf - n;
+}
+
+function StockTab({ fetchJson, onMessage, onError, changed, can, query }) {
   const { t, language } = useI18n();
   const [busy, run] = useBusy();
   const [search, setSearch] = useState('');
@@ -754,15 +893,37 @@ function StockTab({ fetchJson, onMessage, onError, changed, can }) {
   // The adjustments queue is the manager's and the Director's; a cashier is
   // refused it, so the screen does not ask.
   const [adjustments] = useLoad(fetchJson, can.role === 'cashier' ? null : '/api/boutique/stock/adjustments', tick, onError);
-  const [form, setForm] = useState({ variant: null, kind: 'damaged', quantity: '', reason: '' });
+  const [form, setForm] = useState(emptyStockForm);
+  const [problem, setProblem] = useState('');
   const refresh = () => { setTick((n) => n + 1); changed(); };
+  // "Update stock" on a product opens this tab with ?variant=<id>: the item
+  // is chosen already, so the only question left is what happened to it.
+  const wanted = query?.get('variant');
+  useEffect(() => {
+    if (!wanted || !stock?.items) return;
+    const found = stock.items.find((v) => String(v.id) === String(wanted));
+    if (found) {
+      setForm((current) => (current.variant?.id === found.id ? current : { ...current, variant: found }));
+      document.getElementById('stock-update')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [wanted, stock]);
+  const onShelf = form.variant ? Number(form.variant.stockQuantity) : 0;
+  const after = form.variant ? stockAfter(form.kind, form.quantity, onShelf) : null;
+  const needsReason = form.kind !== 'received';
   const submit = (e) => {
     e.preventDefault();
+    if (!form.variant) { setProblem(t('btq.err.pickItem')); return; }
+    if (after === null || (form.kind !== 'count' && Number(form.quantity) < 1)) { setProblem(t('btq.err.quantity')); return; }
+    if (after < 0) { setProblem(fill(t('btq.err.notEnough'), { count: onShelf })); return; }
+    if (needsReason && form.reason.trim().length < 5) { setProblem(t('btq.err.reason')); return; }
+    setProblem('');
     run(async () => {
       try {
-        const result = await fetchJson('/api/boutique/stock/adjustments', { method: 'POST', body: JSON.stringify({ variantId: form.variant.id, kind: form.kind, quantity: form.quantity, reason: form.reason }) });
-        onMessage(result.status === 'approved' ? t('btq.adjusted') : t('btq.adjustmentAsked'));
-        setForm({ variant: null, kind: 'damaged', quantity: '', reason: '' });
+        const result = await fetchJson('/api/boutique/stock/adjustments', { method: 'POST', body: JSON.stringify({ variantId: form.variant.id, kind: form.kind, quantity: form.quantity, reason: form.reason, requestKey: form.requestKey }) });
+        onMessage(result.status === 'approved'
+          ? fill(t('btq.stockUpdated'), { name: fullName(form.variant), count: after })
+          : t('btq.adjustmentAsked'));
+        setForm(emptyStockForm());
         refresh();
       } catch (error) { onError(error.message); }
     });
@@ -774,26 +935,58 @@ function StockTab({ fetchJson, onMessage, onError, changed, can }) {
         <label className="check-field"><input type="checkbox" checked={low} onChange={(e) => setLow(e.target.checked)} /><span>{t('btq.lowStockOnly')}</span></label>
       </div>
       {stock?.items?.length ? <div className="table-wrap"><table className="card-table">
-        <thead><tr><th>{t('btq.product')}</th><th>{t('btq.sku')}</th><th>{t('btq.size')}</th><th>{t('btq.color')}</th><th>{t('btq.stock')}</th><th>{t('btq.reorderLevel')}</th><th>{t('btq.costPrice')}</th><th>{t('btq.value')}</th></tr></thead>
-        <tbody>{stock.items.map((v) => <tr key={v.id} className={v.lowStock ? 'btq-low' : undefined}>
-          <td className="card-title-cell"><strong>{v.productName}</strong><small>{t(`btq.type.${v.productType}`)}</small></td>
-          <td data-label={t('btq.sku')}>{v.sku}</td><td data-label={t('btq.size')}>{v.size || '—'}</td><td data-label={t('btq.color')}>{v.color || '—'}</td>
-          <td data-label={t('btq.stock')}>{v.stockQuantity}{v.lowStock && <Badge tone="waiting">{t('btq.low')}</Badge>}</td>
-          <td data-label={t('btq.reorderLevel')}>{v.reorderLevel}</td><td data-label={t('btq.costPrice')}>{v.costPrice === undefined ? '—' : money(v.costPrice)}</td>
-          <td data-label={t('btq.value')}>{v.costPrice === undefined ? '—' : money(v.stockQuantity * v.costPrice)}</td>
-        </tr>)}</tbody>
+        <thead><tr><th>{t('btq.product')}</th><th>{t('btq.inStock')}</th><th>{t('btq.stockStatus')}</th><th>{t('btq.pricePerUnit')}</th><th>{t('btq.lowStockAt')}</th><th>{t('btq.value')}</th>{can.manage && <th>{t('table.actions')}</th>}</tr></thead>
+        <tbody>{stock.items.map((v) => {
+          const state = stockStatus(v.stockQuantity, v.reorderLevel);
+          return <tr key={v.id} className={state.key !== 'ok' ? 'btq-low' : undefined}>
+            <td className="card-title-cell"><strong>{fullName(v)}</strong><small>{t(`btq.type.${v.productType}`)} · {v.sku}</small></td>
+            <td data-label={t('btq.inStock')}>{v.stockQuantity}</td>
+            <td data-label={t('btq.stockStatus')}><Badge tone={state.tone}>{t(`btq.stockState.${state.key}`)}</Badge></td>
+            <td data-label={t('btq.pricePerUnit')}>{money(v.sellingPrice)}</td>
+            <td data-label={t('btq.lowStockAt')}>{v.reorderLevel}</td>
+            <td data-label={t('btq.value')}>{v.costPrice === undefined ? '—' : money(v.stockQuantity * v.costPrice)}</td>
+            {can.manage && <td className="card-actions"><button type="button" className="secondary-btn" onClick={() => {
+              setForm({ ...emptyStockForm(), variant: v });
+              setProblem('');
+              document.getElementById('stock-update')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }}>{t('btq.updateStock')}</button></td>}
+          </tr>;
+        })}</tbody>
       </table></div> : <Empty>{t('btq.noStock')}</Empty>}
     </Panel>
-    {can.manage && <form className="form-panel" onSubmit={submit}>
-      <div className="panel-header"><div><h2>{t('btq.adjustStock')}</h2><span>{can.decide ? t('btq.adjustDirectorHint') : t('btq.adjustManagerHint')}</span></div></div>
-      <VariantSearch fetchJson={fetchJson} onPick={(v) => setForm({ ...form, variant: v })} placeholder={t('btq.pickVariant')} />
-      {form.variant && <p className="field-hint">{fullName(form.variant)} · {form.variant.sku} · {fill(t('btq.inStockCount'), { count: form.variant.stockQuantity })}</p>}
-      <div className="form-grid">
-        <Field label={t('btq.adjustmentKind')}><select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>{ADJUSTMENT_KINDS.map((k) => <option key={k} value={k}>{t(`btq.kind.${k}`)}</option>)}</select></Field>
-        <Field label={form.kind === 'count' ? t('btq.countedQty') : t('btq.qty')}><input type="number" min="0" step="1" required value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} /></Field>
-        <Field label={t('btq.reason')} wide><input required minLength="5" maxLength="1000" value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} /></Field>
+    {can.manage && <form className="form-panel" id="stock-update" onSubmit={submit} noValidate>
+      <div className="panel-header"><div><h2>{t('btq.updateStock')}</h2><span>{can.decide ? t('btq.adjustDirectorHint') : t('btq.adjustManagerHint')}</span></div></div>
+      <h3 className="form-section-title">1. {t('btq.step.which')}</h3>
+      {form.variant
+        ? <p className="btq-picked"><strong>{fullName(form.variant)}</strong> · {fill(t('btq.inStockCount'), { count: onShelf })}
+          <button type="button" className="text-btn" onClick={() => setForm({ ...form, variant: null })}>{t('btq.pickAnother')}</button></p>
+        : <VariantSearch fetchJson={fetchJson} onPick={(v) => { setForm({ ...form, variant: v }); setProblem(''); }} placeholder={t('btq.pickVariant')} />}
+      <h3 className="form-section-title">2. {t('btq.step.what')}</h3>
+      <div className="btq-kind-choices" role="radiogroup" aria-label={t('btq.step.what')}>
+        {ADJUSTMENT_KINDS.map((k) => <label key={k} className={`btq-kind-choice${form.kind === k ? ' is-chosen' : ''}`}>
+          <input type="radio" name="stock-kind" value={k} checked={form.kind === k} onChange={() => { setForm({ ...form, kind: k }); setProblem(''); }} />
+          <span><strong>{t(`btq.kind.${k}`)}</strong><small>{t(`btq.kindHint.${k}`)}</small></span>
+        </label>)}
       </div>
-      <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy || !form.variant}>{can.decide ? t('btq.applyAdjustment') : t('btq.askAdjustment')}</button></div>
+      <h3 className="form-section-title">3. {t('btq.step.howMany')}</h3>
+      <div className="form-grid">
+        <Field label={`${form.kind === 'count' ? t('btq.countedQty') : t('btq.qty')} *`}>
+          <input type="number" inputMode="numeric" min="0" step="1" value={form.quantity} placeholder="10" onChange={(e) => { setForm({ ...form, quantity: e.target.value }); setProblem(''); }} />
+        </Field>
+        <Field label={needsReason ? `${t('btq.reason')} *` : `${t('btq.reason')} ${t('btq.optional')}`} wide>
+          <input maxLength="1000" value={form.reason} placeholder={t(`btq.reasonExample.${form.kind}`)} onChange={(e) => { setForm({ ...form, reason: e.target.value }); setProblem(''); }} />
+        </Field>
+      </div>
+      {/* Before and after, side by side: the difference between "add 10" and
+          "there are now 10" is exactly the mistake this form exists to stop. */}
+      {form.variant && <div className="btq-stock-preview" aria-live="polite">
+        <Fact label={t('btq.stockNow')} value={onShelf} />
+        <Fact label={t('btq.change')} value={after === null ? '—' : (after - onShelf > 0 ? `+${after - onShelf}` : String(after - onShelf))} />
+        <Fact label={t('btq.stockAfterUpdate')} value={after === null ? '—' : <strong className={after < 0 ? 'over-budget' : undefined}>{after}</strong>} />
+      </div>}
+      {!can.decide && <p className="field-hint">{t('btq.waitsForDirector')}</p>}
+      {problem && <p className="field-error" role="alert">{problem}</p>}
+      <div className="form-submit-bar"><button className="primary-btn big-action" type="submit" disabled={busy}>{can.decide ? t('btq.saveStock') : t('btq.askAdjustment')}</button></div>
     </form>}
     {adjustments?.length > 0 && <Panel title={t('btq.adjustments')}>
       <div className="table-wrap"><table className="card-table">

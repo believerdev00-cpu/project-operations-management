@@ -483,7 +483,21 @@ const statements = [
     WHERE u.role = 'manager' AND u.covers_all_sectors = FALSE
       AND (u.sector = '${RETAIL_OPERATION}' OR EXISTS (SELECT 1 FROM manager_operations mo WHERE mo.manager_id = u.id AND mo.sector = '${RETAIL_OPERATION}'))
       AND NOT EXISTS (SELECT 1 FROM users boss WHERE boss.id = u.manager_id AND boss.role = 'super-admin')
-      AND EXISTS (SELECT 1 FROM users WHERE role = 'super-admin' AND status = 'active')`
+      AND EXISTS (SELECT 1 FROM users WHERE role = 'super-admin' AND status = 'active')`,
+
+  // ---- a local shop, and one press is one change ------------------------------
+  //
+  // The shop sells everyday goods, so a new product with no category given is
+  // 'other', not 'clothing'. Existing rows keep whatever they were saved as.
+  `ALTER TABLE boutique_products ALTER COLUMN product_type SET DEFAULT 'other'`,
+  // The form sends a key it made when it was opened. A second press of
+  // "Save" -- a double tap, a slow network, a retried request -- arrives with
+  // the same key and is answered with the row the first press made, instead
+  // of adding the stock (or the product) twice.
+  `ALTER TABLE boutique_products ADD COLUMN IF NOT EXISTS request_key VARCHAR(64)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS boutique_products_request_key_idx ON boutique_products(request_key) WHERE request_key IS NOT NULL`,
+  `ALTER TABLE boutique_stock_adjustments ADD COLUMN IF NOT EXISTS request_key VARCHAR(64)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS boutique_stock_adjustments_request_key_idx ON boutique_stock_adjustments(request_key) WHERE request_key IS NOT NULL`
 ];
 
 export async function migrateBoutiqueModule(pool) {

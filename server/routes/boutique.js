@@ -23,6 +23,7 @@
 
 import express from 'express';
 import multer from 'multer';
+import { randomUUID } from 'node:crypto';
 import { pool, safeRollback } from '../db/database.js';
 import { asyncRoute, isValidDate, parseId } from '../lib/http.js';
 import { notify, notifyDirectors, notifyMany } from '../lib/notifications.js';
@@ -33,7 +34,7 @@ import {
   sessionFigures, text, wholeNumber
 } from '../lib/boutique.js';
 import {
-  ADJUSTMENT_KINDS, BOUTIQUE_PAYMENT_METHODS, CASH_MOVEMENT_KINDS, EXCHANGE_CREDIT, EXPENSE_CATEGORIES, PRODUCT_TYPES,
+  ADDING_ADJUSTMENTS, ADJUSTMENT_KINDS, BOUTIQUE_PAYMENT_METHODS, CASH_MOVEMENT_KINDS, EXCHANGE_CREDIT, EXPENSE_CATEGORIES, PRODUCT_TYPES,
   PURCHASE_STATUSES, REPORT_PERIODS, SALE_STATUSES, fromMinor, lineTotals, saleTotals, toMinor
 } from '../../shared/boutique.js';
 import { RETAIL_OPERATION } from '../../shared/businessOperations.js';
@@ -364,6 +365,16 @@ function plainDates(value) {
 }
 const send = (res, payload, status = 200) => res.status(status).json(plainDates(payload));
 
+// The key a form made when it was opened, so a second press of the same Save
+// is recognised (see request_key in boutiqueSchema.js). Optional: a caller
+// that sends none gets exactly the old behaviour.
+function requestKeyOf(body) {
+  const key = typeof body?.requestKey === 'string' ? body.requestKey.trim() : '';
+  if (!key) return null;
+  if (!/^[A-Za-z0-9-]{8,64}$/.test(key)) throw new BoutiqueError(400, 'The form sent an invalid request key. Please reload the page and try again.');
+  return key;
+}
+
 // The caller's open till, if they have one; sales and refunds hang off it.
 async function openSessionOf(db, userId) {
   const result = await db.query("SELECT id FROM boutique_cash_sessions WHERE opened_by = $1 AND status = 'open'", [userId]);
@@ -481,7 +492,9 @@ function readProduct(body, current = null) {
   const pick = (field, fallback) => (body[field] === undefined ? fallback : body[field]);
   return {
     name: text(pick('name', current?.name), 200, { required: true, label: 'Product name' }),
-    productType: oneOf(pick('productType', current?.product_type || 'clothing'), PRODUCT_TYPES, 'Product type'),
+    // Any saved value stays valid (an old 'clothing' product can still be
+    // edited); a new product with no category is 'other'.
+    productType: oneOf(pick('productType', current?.product_type || 'other'), PRODUCT_TYPES, 'Category'),
     category: text(pick('category', current?.category), 100),
     brand: text(pick('brand', current?.brand), 100),
     description: text(pick('description', current?.description), 2000),
@@ -491,7 +504,11 @@ function readProduct(body, current = null) {
 
 function readVariant(body, current = null) {
   const pick = (field, fallback) => (body[field] === undefined ? fallback : body[field]);
-  const sku = text(pick('sku', current?.sku), 60, { required: true, label: 'SKU' });
+  // A product code is optional: a corner shop rarely has one, and asking for
+  // it was the first thing that stopped somebody adding "Sugar 1kg". Left
+  // blank, insertVariant gives the item its own (ITEM-00012). On an edit the
+  // existing code is kept unless a new one is typed.
+  const sku = text(pick('sku', current?.sku), 60) || current?.sku || '';
   const barcode = text(pick('barcode', current?.barcode || ''), 60);
   const costPrice = amount(pick('costPrice', current?.cost_price ?? 0), { label: 'Purchase cost' });
   const sellingPrice = amount(pick('sellingPrice', current?.selling_price ?? 0), { label: 'Selling price' });
@@ -511,9 +528,16 @@ async function insertVariant(client, productId, body, actor) {
   const inserted = await client.query(
     `INSERT INTO boutique_variants (product_id, sku, barcode, size, color, cost_price, selling_price, reorder_level, status)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-    [productId, variant.sku, variant.barcode, variant.size, variant.color, variant.costPrice, variant.sellingPrice, variant.reorderLevel, variant.status]
+    [productId, variant.sku || `TMP-${randomUUID()}`, variant.barcode, variant.size, variant.color, variant.costPrice, variant.sellingPrice, variant.reorderLevel, variant.status]
   );
   const row = inserted.rows[0];
+  // No code typed: the item is named after its own id, which nothing else
+  // can hold, so two products added at once can never collide.
+  if (!variant.sku) {
+    row.sku = `ITEM-${String(row.id).padStart(5, '0')}`;
+    await client.query('UPDATE boutique_variants SET sku = $2 WHERE id = $1', [row.id, row.sku]);
+    variant.sku = row.sku;
+  }
   if (opening > 0) {
     await moveStock(client, { variantId: row.id, quantity: opening, kind: 'opening', referenceType: 'variant', referenceId: row.id, note: 'Opening stock', actor });
     row.stock_quantity = opening;
@@ -527,12 +551,25 @@ router.post('/products', asyncRoute(async (req, res) => {
   const body = req.body || {};
   const product = readProduct(body);
   const variants = Array.isArray(body.variants) ? body.variants : [];
-  if (!variants.length) throw new BoutiqueError(400, 'A product needs at least one variant (a size and colour with its price).');
+  if (!variants.length) throw new BoutiqueError(400, 'A product needs a price per unit. Please fill it in and try again.');
+  const requestKey = requestKeyOf(body);
+  // The same press arriving twice is answered with the product it made.
+  if (requestKey) {
+    const earlier = await pool.query('SELECT id FROM boutique_products WHERE request_key = $1', [requestKey]);
+    if (earlier.rowCount) return send(res, mapProduct(await loadProduct(pool, earlier.rows[0].id)), 200);
+  }
+  // A second "Sugar" next to the first splits one shelf's stock and sales
+  // across two records nobody can tell apart. It is refused rather than
+  // merged: merging would move stock and history between products on a guess.
+  const twin = await pool.query("SELECT id, name FROM boutique_products WHERE lower(name) = lower($1) AND status = 'active' LIMIT 1", [product.name]);
+  if (twin.rowCount) {
+    throw new BoutiqueError(409, `A product called "${twin.rows[0].name}" is already in the shop. To add more of it, use Update stock on that product, or give this one a different name.`, 'PRODUCT_EXISTS');
+  }
   const created = await transaction(async (client) => {
     const inserted = await client.query(
-      `INSERT INTO boutique_products (name, product_type, category, brand, description, status, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-      [product.name, product.productType, product.category, product.brand, product.description, product.status, req.user.id]
+      `INSERT INTO boutique_products (name, product_type, category, brand, description, status, created_by, request_key)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+      [product.name, product.productType, product.category, product.brand, product.description, product.status, req.user.id, requestKey]
     );
     const productId = inserted.rows[0].id;
     await audit(client, { entityType: 'product', entityId: productId, action: 'Product created', details: { name: product.name, type: product.productType }, actor: req.user });
@@ -1116,7 +1153,7 @@ router.get('/stock/adjustments', asyncRoute(async (req, res) => {
 // the figure on the shelf at the moment it is worked out.
 function adjustmentDelta(kind, quantity, onShelf) {
   if (kind === 'count') return quantity - onShelf;
-  if (kind === 'transfer_in') return quantity;
+  if (ADDING_ADJUSTMENTS.includes(kind)) return quantity;
   return -quantity;
 }
 
@@ -1139,18 +1176,26 @@ router.post('/stock/adjustments', asyncRoute(async (req, res) => {
   const variantId = parseRecordId(body.variantId, 'Variant');
   const kind = oneOf(body.kind, ADJUSTMENT_KINDS, 'Adjustment kind');
   const quantity = wholeNumber(body.quantity, { label: 'Quantity', minimum: kind === 'count' ? 0 : 1 });
-  const reason = text(body.reason, 1000, { required: true, label: 'The reason' });
-  if (reason.length < 5) throw new BoutiqueError(400, 'Say why, in at least 5 characters.');
+  // Stock that simply arrived explains itself; every change that takes goods
+  // away or overwrites the count has to say why, because that is the line
+  // somebody reads when the shelf and the books disagree.
+  const reason = text(body.reason, 1000, { required: kind !== 'received', label: 'The reason' }) || 'New stock received';
+  if (reason.length < 5) throw new BoutiqueError(400, 'Please say why, in at least 5 characters.');
+  const requestKey = requestKeyOf(body);
+  if (requestKey) {
+    const earlier = await pool.query(`${ADJUSTMENT_SQL} WHERE a.request_key = $1`, [requestKey]);
+    if (earlier.rowCount) return send(res, mapAdjustment(earlier.rows[0]), 200);
+  }
   const adjustment = await transaction(async (client) => {
     const variant = await client.query('SELECT v.stock_quantity, v.sku, p.name AS product_name FROM boutique_variants v JOIN boutique_products p ON p.id = v.product_id WHERE v.id = $1', [variantId]);
     if (!variant.rowCount) throw new BoutiqueError(404, 'Variant not found.');
     const delta = adjustmentDelta(kind, quantity, variant.rows[0].stock_quantity);
     if (delta < 0 && variant.rows[0].stock_quantity + delta < 0) {
-      throw new BoutiqueError(409, `Only ${variant.rows[0].stock_quantity} in stock; ${quantity} cannot be taken out.`, 'INSUFFICIENT_STOCK');
+      throw new BoutiqueError(409, `Only ${variant.rows[0].stock_quantity} in stock, so ${quantity} cannot be taken out. Please check the number.`, 'INSUFFICIENT_STOCK');
     }
     const inserted = await client.query(
-      `INSERT INTO boutique_stock_adjustments (variant_id, kind, quantity, delta, reason, status, requested_by) VALUES ($1, $2, $3, $4, $5, 'pending', $6) RETURNING *`,
-      [variantId, kind, quantity, delta, reason, req.user.id]
+      `INSERT INTO boutique_stock_adjustments (variant_id, kind, quantity, delta, reason, status, requested_by, request_key) VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7) RETURNING *`,
+      [variantId, kind, quantity, delta, reason, req.user.id, requestKey]
     );
     const row = inserted.rows[0];
     if (req.boutique === 'director') {

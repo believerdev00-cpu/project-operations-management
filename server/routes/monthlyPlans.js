@@ -136,6 +136,9 @@ function mapObjective(row) {
     targetQuantity: progress.target,
     targetUnit: row.target_unit || '',
     weight: row.weight === null || row.weight === undefined ? null : Number(row.weight),
+    // The manager's planning figure in USD, or null when the objective needs
+    // no money. Never part of the approved budget.
+    plannedAmount: row.planned_amount === null || row.planned_amount === undefined ? null : round2(Number(row.planned_amount)),
     sortOrder: Number(row.sort_order || 0),
     // When this commitment is due. Null means by the end of the month, which is
     // what every objective meant before a deadline could be stated.
@@ -304,8 +307,19 @@ function readObjectives(payload, operation) {
       deadline = entry.deadline;
     }
 
+    // What it is expected to cost in USD, when it costs anything. Blank means
+    // no money is needed; a negative or unreadable figure is refused.
+    let plannedAmount = null;
+    if (entry?.plannedAmount !== '' && entry?.plannedAmount !== null && entry?.plannedAmount !== undefined) {
+      if (!validNumber(entry.plannedAmount) || Number(entry.plannedAmount) < 0) {
+        return { error: `"${title}": the planned amount must be a number of US dollars, zero or more, or left empty if no money is needed.` };
+      }
+      plannedAmount = round2(entry.plannedAmount);
+    }
+
     objectives.push({
       title,
+      plannedAmount,
       targetQuantity: hasQuantity ? round2(entry.targetQuantity) : null,
       targetUnit: hasQuantity ? unit : unit || '',
       weight,
@@ -369,8 +383,8 @@ async function insertObjectives(client, planId, objectives, startOrder = 0) {
     const inserted = await client.query(
       `INSERT INTO plan_objectives
          (plan_id, title, target_quantity, target_unit, weight, sort_order, supports_operation,
-          form_spec, form_source, form_generated_at, deadline)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'derived', NOW(), $9::date)
+          form_spec, form_source, form_generated_at, deadline, planned_amount)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'derived', NOW(), $9::date, $10)
        RETURNING id, title, supports_operation`,
       [
         planId, objective.title, objective.targetQuantity, objective.targetUnit, objective.weight,
@@ -383,7 +397,8 @@ async function insertObjectives(client, planId, objectives, startOrder = 0) {
           targetQuantity: objective.targetQuantity,
           targetUnit: objective.targetUnit
         })),
-        objective.deadline ?? null
+        objective.deadline ?? null,
+        objective.plannedAmount ?? null
       ]
     );
     created.push(inserted.rows[0]);
@@ -779,7 +794,14 @@ router.get('/review', asyncRoute(async (req, res) => {
       committedBudget: round2(rows.reduce((sum, plan) => sum + plan.committedBudget, 0)),
       uncommittedBudget: round2(rows.reduce((sum, plan) => sum + plan.uncommittedBudget, 0)),
       totalSpent: round2(rows.reduce((sum, plan) => sum + plan.totalSpent, 0)),
-      remainingBalance: round2(rows.reduce((sum, plan) => sum + plan.remainingBalance, 0)),
+      // Remaining is Approved − Spent over the months that HAVE a budget. A
+      // month with none (approved 0, "no ceiling") has nothing to take its
+      // spending from; adding its negative "remaining" in made the four
+      // operations together look overspent by money no budget ever covered.
+      // That spending is still in totalSpent, and named separately below.
+      remainingBalance: round2(rows.filter((plan) => plan.approvedBudget > 0).reduce((sum, plan) => sum + plan.remainingBalance, 0)),
+      spentWithoutBudget: round2(rows.filter((plan) => !(plan.approvedBudget > 0)).reduce((sum, plan) => sum + plan.totalSpent, 0)),
+      monthsWithoutBudget: rows.filter((plan) => !(plan.approvedBudget > 0)).length,
       activities: rows.reduce((sum, plan) => sum + plan.activityCount, 0),
       completed: rows.reduce((sum, plan) => sum + plan.completedCount, 0),
       work: rows.reduce((sum, plan) => sum + plan.workCount, 0),
@@ -1761,6 +1783,7 @@ router.patch('/:id/objectives/:objectiveId', asyncRoute(async (req, res) => {
       weight: current.weight === null ? '' : Number(current.weight),
       supportsOperation: current.supports_operation || '',
       deadline: current.deadline ? toDateOnly(current.deadline) : '',
+      plannedAmount: current.planned_amount === null ? '' : Number(current.planned_amount),
       ...(req.body || {})
     }]
   }, plan.sector);
@@ -1782,10 +1805,10 @@ router.patch('/:id/objectives/:objectiveId', asyncRoute(async (req, res) => {
     await client.query('BEGIN');
     await client.query(
       `UPDATE plan_objectives SET title = $2, target_quantity = $3, target_unit = $4, weight = $5,
-              supports_operation = $6, deadline = $7::date, updated_at = NOW()
+              supports_operation = $6, deadline = $7::date, planned_amount = $8, updated_at = NOW()
        WHERE id = $1`,
       [objectiveId, next.title, next.targetQuantity, next.targetUnit, next.weight, next.supportsOperation ?? null,
-        next.deadline ?? null]
+        next.deadline ?? null, next.plannedAmount ?? null]
     );
     await logPlanHistory(client, plan.id, req.user, [
       {

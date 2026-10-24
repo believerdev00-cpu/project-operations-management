@@ -29,7 +29,7 @@ const check = (label, ok, detail = '') => {
 
 // ui.jsx holds the shared error boundary and dialogs; left off this list, every
 // key only they use was reported as unused, and their JSX went unchecked.
-const FILES = ['App.jsx', 'ui.jsx', 'journey.jsx', 'Home.jsx', 'MovementModule.jsx', 'ActivityReview.jsx', 'PartnerPortal.jsx', 'ExternalPartners.jsx', 'MonthlyPlans.jsx', 'ExpensePanel.jsx', 'Organization.jsx', 'Boutique.jsx']
+const FILES = ['App.jsx', 'ui.jsx', 'journey.jsx', 'Home.jsx', 'MovementModule.jsx', 'ActivityReview.jsx', 'PartnerPortal.jsx', 'ExternalPartners.jsx', 'MonthlyPlans.jsx', 'ExpensePanel.jsx', 'Organization.jsx', 'Boutique.jsx', 'Progress.jsx']
   .map((name) => path.join(root, 'src', name));
 
 const sources = Object.fromEntries(FILES.map((file) => [path.basename(file), fs.readFileSync(file, 'utf8')]));
@@ -112,11 +112,16 @@ const FAMILIES = {
   'btq.cashKind.': boutique.CASH_MOVEMENT_KINDS,
   'btq.expenseStatus.': boutique.EXPENSE_STATUSES,
   'btq.itemStatus.': ['active', 'archived'],
+  'btq.kindHint.': boutique.ADJUSTMENT_KINDS,
+  'btq.reasonExample.': boutique.ADJUSTMENT_KINDS,
+  'btq.stockState.': ['ok', 'low', 'out'],
   'btq.period.': boutique.REPORT_PERIODS,
   'btq.outcome.': ['approved', 'refused', 'accepted', 'returned'],
   // The organisation (server/db/organizationSchema.js): every trail action.
   'org.action.': ['team_created', 'team_updated', 'team_archived', 'team_restored', 'member_added', 'member_removed',
-    'leader_changed', 'reporting_changed', 'partner_profile_changed', 'partner_projects_changed'],
+    'leader_changed', 'reporting_changed', 'partner_profile_changed', 'partner_projects_changed',
+    'account_suspended', 'account_reactivated', 'account_deleted'],
+  'progress.missing.': ['no_plans', 'no_objectives', 'no_countable'],
   'plan.objectiveState.': ['notStarted', 'inProgress', 'done', 'overdue']
 };
 for (const [prefix, values] of Object.entries(FAMILIES)) {

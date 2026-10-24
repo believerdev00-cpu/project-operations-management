@@ -721,7 +721,12 @@ async function buildMonthlyWork(user, period, choice = null) {
     money: {
       budget,
       spent,
-      remaining: budget > 0 ? round2(budget - spent) : null,
+      // Approved − Spent over the months that HAVE a budget, the way the plan
+      // screen's Remaining Budget card reads it. It used to subtract the
+      // spending of every month, so a month with no ceiling made a budgeted
+      // one look overspent; that spending is named in spentWithoutBudget.
+      remaining: budget > 0 ? round2(budget - sum(withCeiling, (month) => month.spent)) : null,
+      spentWithoutBudget: sum(months.filter((month) => month.budget === null), (month) => month.spent),
       costInPeriod: sum(months, (month) => month.costInPeriod),
       monthsWithoutCeiling: months.length - withCeiling.length
     },
@@ -758,7 +763,7 @@ function emptyMonthlyWork() {
       months: 0, operations: 0, objectives: 0, objectivesWorked: 0, objectivesDone: 0,
       percent: null, records: 0, evidence: 0, cost: 0
     },
-    money: { budget: 0, spent: 0, remaining: null, costInPeriod: 0, monthsWithoutCeiling: 0 },
+    money: { budget: 0, spent: 0, remaining: null, spentWithoutBudget: 0, costInPeriod: 0, monthsWithoutCeiling: 0 },
     months: [],
     objectives: [],
     days: []
@@ -793,6 +798,109 @@ router.get('/activities', asyncRoute(async (req, res) => {
   const period = resolvePeriod(req.query);
   const choice = await resolveFilters(req.user, req.query);
   res.json(await buildReport(req.user, period, choice));
+}));
+
+// ---- how far each project has got --------------------------------------------
+//
+// A project's completion is read from the objectives of the monthly plans
+// filed under it (monthly_plans.project_id), through planProgress -- the same
+// rule a month uses: weighted when any objective carries a weight, otherwise
+// the plain average, and objectives with no countable target left out rather
+// than counted as 0. Each objective's own figure is objectiveProgress, capped
+// at 100 for display while the actual done figure is kept beside it.
+//
+// It is NOT money. Budget used and work done are different questions, and the
+// payload carries no money at all so the two can never be read as one.
+//
+// When there is nothing to calculate from, the percent is null and `missing`
+// says what is missing -- no plan filed under the project, or plans whose
+// objectives have no number to count -- instead of inventing a figure. The
+// projects.progress column is a number somebody typed, and is not used.
+router.get('/projects', asyncRoute(async (req, res) => {
+  const choice = await resolveFilters(req.user, req.query);
+  const values = [];
+  const filters = [];
+  managerScope(req.user, 'p.sector', values, filters);
+  projectScope(req.user, 'p.id', values, filters);
+  if (choice.operation) { values.push(choice.operation); filters.push(`p.sector = $${values.length}`); }
+  if (choice.projectId) { values.push(choice.projectId); filters.push(`p.id = $${values.length}`); }
+  const projects = (await pool.query(
+    `SELECT p.id, p.name, p.sector FROM projects p ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''} ORDER BY p.sector, p.name`,
+    values
+  )).rows;
+  if (!projects.length) return res.json({ projects: [] });
+  const objectiveRows = (await pool.query(
+    `SELECT mp.project_id, mp.id AS plan_id, to_char(mp.month, 'YYYY-MM') AS plan_month,
+            o.id, o.title, o.target_quantity, o.target_unit, o.weight,
+            COALESCE((SELECT SUM(d.quantity_done) FROM plan_daily_reports d WHERE d.objective_id = o.id), 0) AS done,
+            (SELECT COUNT(*) FROM plan_daily_reports d WHERE d.objective_id = o.id)::int AS records
+       FROM monthly_plans mp JOIN plan_objectives o ON o.plan_id = mp.id
+      WHERE mp.project_id = ANY($1::varchar[])
+      ORDER BY mp.month, o.sort_order, o.id`,
+    [projects.map((p) => p.id)]
+  )).rows;
+  const planCounts = (await pool.query(
+    'SELECT project_id, COUNT(*)::int AS plans FROM monthly_plans WHERE project_id = ANY($1::varchar[]) GROUP BY project_id',
+    [projects.map((p) => p.id)]
+  )).rows;
+  res.json({
+    projects: projects.map((project) => {
+      const own = objectiveRows.filter((row) => row.project_id === project.id).map((row) => {
+        const progress = objectiveProgress(row.target_quantity, row.done);
+        return {
+          objectiveId: row.id, planMonth: row.plan_month, title: row.title, unit: row.target_unit || '',
+          target: progress.target, done: progress.done, percent: progress.percent, complete: progress.complete,
+          weight: row.weight === null ? null : round2(row.weight), records: row.records
+        };
+      });
+      const plans = planCounts.find((row) => row.project_id === project.id)?.plans || 0;
+      const countable = own.filter((objective) => objective.percent !== null);
+      const percent = planProgress(own);
+      return {
+        id: project.id, name: project.name, operation: project.sector,
+        plans, objectives: own.length, countable: countable.length,
+        done: own.filter((objective) => objective.complete).length,
+        recorded: own.filter((objective) => objective.records > 0).length,
+        weighted: countable.some((objective) => Number(objective.weight) > 0),
+        percent,
+        missing: percent !== null ? null : plans === 0 ? 'no_plans' : own.length === 0 ? 'no_objectives' : 'no_countable',
+        items: own
+      };
+    })
+  });
+}));
+
+// ---- month by month ------------------------------------------------------------
+//
+// The last few months, each read by buildMonthlyWork -- the very function the
+// period report uses -- so a trend point and the report for that month can
+// never disagree. Months with no plan are returned as such (plans: 0) rather
+// than left out, so a gap reads as a gap and not as a straight line.
+router.get('/trends', asyncRoute(async (req, res) => {
+  const choice = await resolveFilters(req.user, req.query);
+  const count = Math.min(12, Math.max(2, Number.parseInt(req.query.months, 10) || 6));
+  const now = new Date();
+  const keys = [];
+  for (let back = count - 1; back >= 0; back -= 1) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back, 1));
+    keys.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+  }
+  const months = [];
+  for (const key of keys) {
+    const work = await buildMonthlyWork(req.user, resolvePeriod({ period: 'monthly', month: key }), choice);
+    months.push({
+      month: key,
+      plans: work.months.length,
+      percent: work.summary.percent,
+      objectives: work.summary.objectives,
+      objectivesDone: work.summary.objectivesDone,
+      approved: work.money.budget,
+      spent: work.money.spent,
+      remaining: work.money.remaining,
+      spentWithoutBudget: work.money.spentWithoutBudget
+    });
+  }
+  res.json({ operation: choice.operation, projectId: choice.projectId, months });
 }));
 
 // The same report, same scope, same query -- only the container differs. The
@@ -1041,6 +1149,8 @@ async function buildWorkbook(report, language = 'en') {
     moneyRow(t('report.spentSoFar'), work.money.spent);
     moneyRow(work.money.remaining < 0 ? t('report.overBudgetBy') : t('report.moneyLeft'),
       Math.abs(work.money.remaining));
+    // Why Budget − Spent is not the remainder when some months had no budget.
+    if (work.money.spentWithoutBudget > 0) moneyRow(t('report.spentWithoutBudget'), work.money.spentWithoutBudget);
   } else if (work.months.length) {
     summary.addRow([t('report.monthBudget'), t('report.noCeiling')]);
     moneyRow(t('report.spentSoFar'), work.money.spent);
@@ -1452,6 +1562,9 @@ function writePdf(report, stream, language = 'en') {
       fact(t('report.spentSoFar'), usd(work.money.spent), localPair(work.money.spent, report.rate));
       fact(work.money.remaining < 0 ? t('report.overBudgetBy') : t('report.moneyLeft'),
         usd(Math.abs(work.money.remaining)), localPair(Math.abs(work.money.remaining), report.rate));
+      if (work.money.spentWithoutBudget > 0) {
+        fact(t('report.spentWithoutBudget'), usd(work.money.spentWithoutBudget), localPair(work.money.spentWithoutBudget, report.rate));
+      }
     } else {
       // approved_budget = 0 means no ceiling was set, which is not a budget of
       // nothing. Printing "$0.00 left" on such a month said the opposite of

@@ -9,6 +9,7 @@ import { DATE_STYLE, dateLocale, formatDate, formatUsd, todayLocal } from './for
 import { ExpensePanel } from './ExpensePanel.jsx';
 import { FilePicker, activityJourney, formatLocal, journeyLabel, journeyTone, nextAction } from './journey.jsx';
 import { objectiveState, objectiveStateTone } from './Home.jsx';
+import { BudgetCards } from './Progress.jsx';
 
 // Monthly planning, allocation and month-end review.
 //
@@ -31,7 +32,7 @@ const UNIT_SUGGESTIONS = [
 // A month starts empty: the Director names the operation and the manager, states
 // the budget they are approving, and says what the month is for.
 // A blank commitment line in the Director's plan form.
-const emptyObjective = { title: '', targetQuantity: '', targetUnit: '', supportsOperation: '', deadline: '' };
+const emptyObjective = { title: '', targetQuantity: '', targetUnit: '', supportsOperation: '', deadline: '', plannedAmount: '' };
 
 // The month as the Director types it.
 //
@@ -290,7 +291,10 @@ export default function MonthlyPlans({
                 targetUnit: String(row.targetUnit ?? '').trim(),
                 supportsOperation: row.supportsOperation || null,
                 // When it is due. Blank means the end of the month.
-                deadline: row.deadline || null
+                deadline: row.deadline || null,
+                // What it is expected to cost in USD; blank when it needs no money.
+                plannedAmount: row.plannedAmount === '' || row.plannedAmount === null
+                  || row.plannedAmount === undefined ? null : Number(row.plannedAmount)
               })),
             // The budget the Director approves for the month. Everything the
             // manager does afterwards has to fit inside it.
@@ -607,14 +611,14 @@ export default function MonthlyPlans({
     <p className="partner-notice">{t('monthly.noMoneyNotice')}</p>
 
     {isDirector && <>
-      <div className="metric-grid metric-grid-6">
-        <Metric label={t('monthly.approvedAllocation')} value={formatUsd(review.totals.approvedBudget)} />
-        <Metric label={t('monthly.committed')} value={formatUsd(review.totals.committedBudget)} />
-        <Metric label={t('monthly.totalSpent')} value={formatUsd(review.totals.totalSpent)} />
-        <Metric label={t('monthly.remainingBalance')} value={formatUsd(review.totals.remainingBalance)} />
-        <Metric label={t('review.completedActivities')} value={`${review.totals.completed}/${review.totals.activities}`} />
-        <Metric label={t('monthly.workDone')} value={review.totals.work ? `${review.totals.workCompleted}/${review.totals.work}` : '—'} />
-      </div>
+      {/* The month's money across every operation: the same three cards as
+          one plan, and nothing else beside them. */}
+      <BudgetCards approved={review.totals.approvedBudget} spent={review.totals.totalSpent}
+        remaining={review.totals.remainingBalance} unbudgeted={review.totals.spentWithoutBudget} t={t} />
+      <p className="field-hint">
+        {t('review.completedActivities')}: <strong>{review.totals.completed}/{review.totals.activities}</strong>
+        {review.totals.work ? <>{' · '}{t('monthly.workDone')}: <strong>{review.totals.workCompleted}/{review.totals.work}</strong></> : null}
+      </p>
 
       {/* Section 9: every business operation for the month, side by side. */}
       <section className="panel">
@@ -639,7 +643,9 @@ export default function MonthlyPlans({
             <td data-label={t('monthly.approvedAllocation')}>{formatUsd(plan.approvedBudget)}</td>
             <td className="card-optional" data-label={t('monthly.committed')}>{formatUsd(plan.committedBudget)}</td>
             <td data-label={t('monthly.totalSpent')}>{formatUsd(plan.totalSpent)}</td>
-            <td data-label={t('monthly.remainingBalance')} className={plan.remainingBalance < 0 ? 'over-budget' : undefined}>{formatUsd(plan.remainingBalance)}</td>
+            {/* No budget set means no limit, not an overspend (BudgetCards). */}
+            <td data-label={t('monthly.remainingBalance')} className={plan.approvedBudget > 0 && plan.remainingBalance < 0 ? 'over-budget' : undefined}>
+              {plan.approvedBudget > 0 ? formatUsd(plan.remainingBalance) : <span className="muted-cell">{t('budget.noLimit')}</span>}</td>
             <td data-label={t('review.completedActivities')}>{plan.completedCount}/{plan.activityCount}</td>
             <td className="card-optional" data-label={t('monthly.workDone')}>{plan.workCount ? `${plan.workCompletedCount}/${plan.workCount}` : '—'}</td>
             <td data-label={t('review.expensesWithoutEvidence')} className={plan.expensesWithoutEvidence ? 'card-optional over-budget' : 'card-optional'}>
@@ -705,6 +711,7 @@ export default function MonthlyPlans({
           objectives={newPlan.objectives}
           onChange={(objectives) => setNewPlan({ ...newPlan, objectives })}
           t={t}
+          rate={rate}
         />
 
         {/* Everything below is optional, and folded away so it cannot make the
@@ -826,7 +833,7 @@ export default function MonthlyPlans({
 // monthly page down behind the error boundary rather than degrading. That is
 // exactly what happened when the operation picker replaced the form state and
 // dropped `objectives`.
-function ObjectiveEditor({ objectives, onChange, t, operation, language, month }) {
+function ObjectiveEditor({ objectives, onChange, t, operation, language, month, rate = null }) {
   const rows = Array.isArray(objectives) && objectives.length ? objectives : [{ ...emptyObjective }];
   // Whether a line carries anything yet. Written once so the "is it filled?"
   // test cannot drift between the numbering and the grow-a-new-line rule.
@@ -860,16 +867,39 @@ function ObjectiveEditor({ objectives, onChange, t, operation, language, month }
           value={row.title ?? ''}
           onChange={(event) => update(index, { title: event.target.value })} />
       </label>
+      {/* Target and "Counted in" keep their meaning -- how much, and what it is
+          counted in -- and now say so under the box, with an example. */}
       <label className="form-field objective-target"><span>{t('plan.target')}</span>
         <input type="number" inputMode="decimal" min="0" step="0.01" placeholder={t('plan.targetPlaceholder')}
           value={row.targetQuantity ?? ''}
           onChange={(event) => update(index, { targetQuantity: event.target.value })} />
+        <small className="field-hint">{t('plan.targetHint')}</small>
       </label>
       <label className="form-field objective-unit"><span>{t('plan.targetUnit')}</span>
         <input list="plan-units" maxLength="40" placeholder={t('plan.targetUnitPlaceholder')}
           value={row.targetUnit ?? ''}
           onChange={(event) => update(index, { targetUnit: event.target.value })} />
         <datalist id="plan-units">{UNIT_SUGGESTIONS.map((unit) => <option key={unit} value={unit} />)}</datalist>
+        <small className="field-hint">{t('plan.targetUnitHint')}</small>
+      </label>
+      {/* The money this objective is expected to need, in USD -- optional,
+          because many objectives need none. It is a planning figure: it is not
+          approved by being typed and never changes the approved budget. The
+          local currencies are shown at the rate the Director set, and only
+          when one is set; nothing is converted at a guessed rate. */}
+      <label className="form-field objective-amount"><span>{t('plan.plannedAmount')} (USD) {t('btq.optional')}</span>
+        <input type="number" inputMode="decimal" min="0" step="0.01" placeholder="200"
+          value={row.plannedAmount ?? ''}
+          onChange={(event) => update(index, { plannedAmount: event.target.value })} />
+        <small className="field-hint">{t('plan.plannedAmountHint')}</small>
+        {row.plannedAmount !== '' && row.plannedAmount !== undefined && Number(row.plannedAmount) > 0 && <small className="field-hint">
+          {/* rate.id is null when nobody has set a rate and the API is
+              answering its built-in fallback: that is not a rate anybody
+              chose, so it is not used to convert a plan. */}
+          {rate?.id && rate.rwfPerUsd > 0
+            ? `${formatLocal(Number(row.plannedAmount) * rate.rwfPerUsd, 'RWF')}${rate.cdfPerUsd > 0 ? ` · ${formatLocal(Number(row.plannedAmount) * rate.cdfPerUsd, 'CDF')}` : ''} · ${fill(t('plan.atRate'), { rate: formatLocal(rate.rwfPerUsd, 'RWF') })}`
+            : t('plan.noRate')}
+        </small>}
       </label>
       {/* When it is due. Optional: blank means the end of the month, which is
           what every objective meant before this field existed. Held inside the
@@ -1090,9 +1120,13 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
       {objectives.map((objective) => <div className="objective-card" key={objective.id}>
         <div className="objective-card-head">
           <strong>{objective.title}</strong>
+          {/* Nothing recorded yet is said in words, not as a 0% that reads
+              like a measured result. */}
           {objective.percent === null
             ? <span className="objective-percent muted-cell">{t('plan.notCounted')}</span>
-            : <span className={`objective-percent${objective.complete ? ' is-done' : ''}`}>{objective.percent}%</span>}
+            : !objective.updateCount
+              ? <span className="objective-percent muted-cell">{t('plan.noProgressYet')}</span>
+              : <span className={`objective-percent${objective.complete ? ' is-done' : ''}`}>{objective.percent}%</span>}
         </div>
         {/* Where it stands and when it is due, in the manager's words. The
             state is derived from the figures, never typed (objectiveState). */}
@@ -1101,6 +1135,8 @@ function MonthWorkspace({ plan, objectives = [], reports: allReports, t, languag
             {t(`plan.objectiveState.${objectiveState(objective)}`)}
           </span>
           <small className="muted-cell">{t('plan.deadline')}: {objective.deadline ? formatDate(objective.deadline, language) : t('plan.deadlineMonthEnd')}</small>
+          {objective.plannedAmount !== null && objective.plannedAmount !== undefined
+            && <small className="muted-cell">{t('plan.plannedAmount')}: {formatUsd(objective.plannedAmount)}</small>}
         </div>
         {/* Support work always says who it is for, so a coordination month never
             reads as a set of unattached numbers. */}
@@ -1888,20 +1924,16 @@ function PlanDetail({
       <Fact label={t('monthly.month')} value={fill(t('plan.period'), {
         start: formatDate(`${plan.month}-01`, language), end: formatDate(monthEnd(plan.month), language)
       })} />
-      <Fact label={t('monthly.approvedAllocation')}
-        value={plan.approvedBudget > 0 ? formatUsd(plan.approvedBudget) : <span className="muted-cell">{t('plan.budgetNoCeiling')}</span>} />
-      <Fact label={t('monthly.totalSpent')} value={formatUsd(plan.totalSpent)} />
-      {plan.approvedBudget > 0 && <Fact label={t('monthly.remainingBalance')}
-        value={<span className={plan.remainingBalance < 0 ? 'over-budget' : undefined}>{formatUsd(plan.remainingBalance)}</span>} />}
       {plan.overallProgress !== null && plan.overallProgress !== undefined
         && <Fact label={t('plan.overallProgress')} value={`${plan.overallProgress}%`} />}
     </div>}
 
-    {/* The four figures the month is read by. Approved is the Director's ceiling;
-        committed is what has been given out to activities; spent is what has
-        actually gone; and what is left of each is the number somebody is about to
-        act on. Showing only three of them was why nobody could tell whether there
-        was room for more work. */}
+    {/* The month's money, the same three cards for every reader. */}
+    <BudgetCards approved={plan.approvedBudget} spent={plan.totalSpent} t={t} />
+
+    {/* The month's work at a glance, for the Director. The money is the three
+        cards above and only those; what has been given out to planned
+        activities is said once, in words, where activities are added. */}
     {isDirector && <div className="detail-facts">
       <Fact label={t('table.status')} value={<span className={`status-badge ${planTone(plan.status)}`}>{t(`monthly.planStatus.${plan.status}`)}</span>} />
       {plan.targetQuantity !== null && <>
@@ -1911,14 +1943,6 @@ function PlanDetail({
         <Fact label={t('plan.progress')} value={`${plan.progressPercent}%`} />
       </>}
       <Fact label={t('plan.daysWorked')} value={plan.daysWorked || 0} />
-      <Fact label={t('monthly.approvedAllocation')} value={formatUsd(plan.approvedBudget)} />
-      <Fact label={t('monthly.committed')}
-        value={<>{formatUsd(plan.committedBudget)}
-          <small className="fact-note">{fill(t('monthly.freeToPlan'), { amount: formatUsd(plan.uncommittedBudget) })}</small>
-        </>} />
-      <Fact label={t('monthly.totalSpent')} value={formatUsd(plan.totalSpent)} />
-      <Fact label={t('monthly.remainingBalance')}
-        value={<span className={plan.remainingBalance < 0 ? 'over-budget' : undefined}>{formatUsd(plan.remainingBalance)}</span>} />
       <Fact label={t('review.completedActivities')} value={`${plan.completedCount}/${plan.activityCount}`} />
       <Fact label={t('monthly.workDone')}
         value={plan.workCount ? `${plan.workCompletedCount}/${plan.workCount}` : '—'} />
@@ -2026,21 +2050,21 @@ function PlanDetail({
     </div>}
     </details>}
 
-    {activities.length > 0 && <>
-      <div className="totals-line">
-        <span>{t('monthly.totalApprovedBudget')}: <strong>{formatUsd(plan.approvedBudget)}</strong></span>
-        <span>{t('monthly.committed')}: <strong>{formatUsd(plan.committedBudget)}</strong></span>
-        <span>{t('monthly.totalSpent')}: <strong>{formatUsd(plan.totalSpent)}</strong></span>
-        <span>{t('monthly.remainingBalance')}: <strong className={plan.remainingBalance < 0 ? 'over-budget' : undefined}>{formatUsd(plan.remainingBalance)}</strong></span>
-      </div>
-      {/* The month adds up records agreed at different times, so the local
-          currencies here are at today's rate rather than any one record's. */}
-      {rate?.rwfPerUsd > 0 && <p className="field-hint">
-        {t('money.todayRate')}: {formatLocal(plan.approvedBudget * rate.rwfPerUsd, 'RWF')}
-        {' · '}{formatLocal(plan.approvedBudget * rate.cdfPerUsd, 'CDF')}
-        {' · '}{t('monthly.remainingBalance')}: {formatLocal(plan.remainingBalance * rate.rwfPerUsd, 'RWF')} · {formatLocal(plan.remainingBalance * rate.cdfPerUsd, 'CDF')}
-      </p>}
-    </>}
+    {/* Not a fourth card: one sentence for the Director adding activities,
+        saying how much of the approved budget is already given out, because
+        the ceiling refuses anything past it. */}
+    {activities.length > 0 && isDirector && plan.approvedBudget > 0 && <p className="field-hint">
+      {fill(t('budget.givenOut'), { given: formatUsd(plan.committedBudget), free: formatUsd(plan.uncommittedBudget) })}
+    </p>}
+    {/* The month adds up records agreed at different times, so the local
+        currencies are at the rate set today rather than any one record's --
+        and only when a rate has actually been set (rate.id). */}
+    {activities.length > 0 && plan.approvedBudget > 0 && rate?.id && rate.rwfPerUsd > 0 && <p className="field-hint">
+      {t('money.todayRate')}: {t('budget.approved')} {formatLocal(plan.approvedBudget * rate.rwfPerUsd, 'RWF')}
+      {rate.cdfPerUsd > 0 && <>{' · '}{formatLocal(plan.approvedBudget * rate.cdfPerUsd, 'CDF')}</>}
+      {' · '}{t('budget.remaining')} {formatLocal(plan.remainingBalance * rate.rwfPerUsd, 'RWF')}
+      {rate.cdfPerUsd > 0 && <>{' · '}{formatLocal(plan.remainingBalance * rate.cdfPerUsd, 'CDF')}</>}
+    </p>}
 
     {/* Section 2: the Director confirms the plan, which records the allocation
         and nothing else. The wording on the button says so. */}
@@ -2271,6 +2295,3 @@ function PlanDetail({
   </section>;
 }
 
-function Metric({ label, value }) {
-  return <div className="metric-card"><span>{label}</span><strong>{value}</strong></div>;
-}

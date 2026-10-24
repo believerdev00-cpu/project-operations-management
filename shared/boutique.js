@@ -23,9 +23,24 @@ export const BOUTIQUE_PROJECT_ID = 'PRJ-BOUTIQUE';
 export const BOUTIQUE_WORKSPACE = 'boutique';
 export const BOUTIQUE_CURRENCY = 'RWF';
 
-// What the boutique sells. `other` is for the odd line -- perfume, a belt --
-// that fits none of the four the brief names.
-export const PRODUCT_TYPES = ['clothing', 'shoes', 'bags', 'accessories', 'other'];
+// What the shop sells. The boutique is a LOCAL SHOP -- everyday goods, not
+// fashion -- so these are the categories a form offers, in the order a
+// shopkeeper thinks of them, with `other` last for anything that fits none.
+// This list is the only place they are named: the CHECK constraint, the
+// product form, the filters and the translation test all read it.
+export const PRODUCT_CATEGORIES = [
+  'groceries', 'bread_snacks', 'drinks', 'dairy_eggs', 'fresh_produce',
+  'cleaning', 'personal_care', 'household', 'stationery', 'other'
+];
+
+// The categories the shop was first built with, when it was planned as a
+// clothes boutique. Products already saved under them keep them -- nothing is
+// rewritten -- so they stay valid in the database and are still shown by name,
+// but no form offers them for a new product.
+export const LEGACY_PRODUCT_TYPES = ['clothing', 'shoes', 'bags', 'accessories'];
+
+// Every value boutique_products.product_type may hold.
+export const PRODUCT_TYPES = [...PRODUCT_CATEGORIES, ...LEGACY_PRODUCT_TYPES];
 
 // How a customer pays. The first four are the methods the shop can configure
 // on or off (boutique_payment_methods); 'Exchange credit' is never offered on
@@ -50,13 +65,26 @@ export const STOCK_MOVEMENT_KINDS = [
   'count',             // a physical count corrected the figure either way
   'supplier_return',   // sent back to the supplier (negative)
   'transfer_out',      // moved to another shop or store (negative)
-  'transfer_in'        // received from another shop or store
+  'transfer_in',       // received from another shop or store
+  'received'           // new stock arrived without a purchase order
 ];
 
 // The adjustments a manager asks for and the Director approves. Each is a
-// stock movement kind above; a sale, a receipt and the opening figure are
-// recorded by the work itself and never asked for here.
-export const ADJUSTMENT_KINDS = ['damaged', 'missing', 'count', 'supplier_return', 'transfer_out', 'transfer_in'];
+// stock movement kind above; a sale, a purchase-order receipt and the opening
+// figure are recorded by the work itself and never asked for here.
+//
+// `received` is the everyday case first: "10 more bags of sugar came in". A
+// small shop is often restocked from the market with no purchase order, and
+// without this kind the only way to put those goods on the shelf was a
+// "physical count", which REPLACES the figure -- one wrong number there and
+// stock was silently lost. Received ADDS. It still waits for the Director
+// when the manager records it, like every other change with nothing sold.
+export const ADJUSTMENT_KINDS = ['received', 'damaged', 'missing', 'count', 'supplier_return', 'transfer_out', 'transfer_in'];
+
+// The adjustments that ADD to the shelf; every other kind except a count
+// takes away. Read by the API's delta and by the form's "stock after" preview,
+// so the two can never disagree about which way a kind goes.
+export const ADDING_ADJUSTMENTS = ['received', 'transfer_in'];
 
 export const APPROVAL_STATUSES = ['pending', 'approved', 'rejected'];
 
