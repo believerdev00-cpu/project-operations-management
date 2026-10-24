@@ -12,7 +12,10 @@
 //      refused for it and asks nobody -- and the next account the Director
 //      adds with the same role, working where that work is, takes all of it
 //      over: the month, the project, the team member reporting to them;
-//      somebody added in another operation does not;
+//      somebody added in another operation does not; and the same for a
+//      manager who is only suspended -- the new one carries on the very same
+//      month, its progress and money untouched, and can reach no other
+//      operation's month;
 //   6. a manager in an operation already over the three-manager limit can
 //      still be deleted;
 //   7. an open till is the one thing still to close first.
@@ -128,15 +131,14 @@ try {
   const gone = await del(admin, `/api/users/${boss.id}`);
   check('a manager still running a month is deleted without being asked anything', gone.status === 200 && gone.body.outcome === 'closed', gone.body);
   check('  and the answer says their work waits', gone.body.waitingWork?.plans === 1 && gone.body.waitingWork?.reports === 1 && gone.body.waitingWork?.leads === 1, gone.body.waitingWork);
-  const waitingList = (await get(admin, '/api/users')).body.waiting || [];
-  const bossWaiting = waitingList.find((w) => w.id === boss.id);
-  check('People lists it as waiting for a replacement in Mining', bossWaiting?.role === 'manager' && bossWaiting.operations.includes('mining'), waitingList);
+  check('People shows no replacement alert', !('waiting' in ((await get(admin, '/api/users')).body)));
+  check('  and the month is still there, untouched', (await pool.query('SELECT manager_id FROM monthly_plans WHERE id = $1', [month.body.id])).rows[0].manager_id === boss.id);
   const elsewhere = await post(admin, '/api/users', { username: 'zz-del-agri', name: 'ZZ Del Agriculture', password: 'Temp-pass-123', role: 'manager', sectors: ['agriculture'] });
   if (elsewhere.body.id) created.push(elsewhere.body.id);
   check('a new manager in Agriculture does not take Mining’s work', elsewhere.status === 201 && !elsewhere.body.tookOver, elsewhere.body);
   const heir = await post(admin, '/api/users', { username: 'zz-del-heir', name: 'ZZ Del Heir', password: 'Temp-pass-123', role: 'manager', sectors: ['mining'] });
   if (heir.body.id) created.push(heir.body.id);
-  check('a new manager added in Mining takes it over by themselves', heir.status === 201 && heir.body.tookOver?.from?.id === boss.id, heir.body);
+  check('a new manager added in Mining takes it over by themselves', heir.status === 201 && (heir.body.tookOver?.from || []).some((f) => f.id === boss.id), heir.body);
   const after = (await pool.query(
     `SELECT (SELECT manager_id FROM monthly_plans WHERE id = $1) AS plan_manager,
             (SELECT assigned_by FROM monthly_plans WHERE id = $1) AS plan_assigned_by,
@@ -145,12 +147,50 @@ try {
   check('  the month is now theirs, handed by the Director', after.plan_manager === heir.body.id && after.plan_assigned_by === director.id, after);
   check('  so is the project', after.project_manager === heir.body.id, after);
   check('  and the team member now reports to them', after.crew_line === heir.body.id, after);
-  check('  nothing waits any more', !((await get(admin, '/api/users')).body.waiting || []).some((w) => w.id === boss.id));
   const heirNotices = await pool.query("SELECT params FROM notifications WHERE user_id = $1 AND kind = 'work_handed_over'", [heir.body.id]);
   check('  and they are told the work is theirs', heirNotices.rows.some((n) => n.params?.title === 'ZZ Del Boss'), heirNotices.rows);
   const another = await post(admin, '/api/users', { username: 'zz-del-third', name: 'ZZ Del Third', password: 'Temp-pass-123', role: 'manager', sectors: ['mining'] });
   if (another.body.id) created.push(another.body.id);
   check('the next Mining manager added takes nothing: it was already taken', another.status === 201 && !another.body.tookOver, another.body);
+
+  section('5b. A new manager continues a suspended manager’s month');
+  // The everyday case: the old manager is suspended (not deleted), a new one
+  // is added in the same operation, and the new one carries on the same
+  // month -- same targets, same progress -- with no replacement step.
+  const leaver = await account('zz-del-leaver', 'ZZ Del Leaver', 'manager', 'farming');
+  await pool.query("DELETE FROM monthly_plans WHERE sector IN ('farming', 'agriculture') AND month = '2093-03-01'");
+  const farmMonth = await post(admin, '/api/monthly-plans', { operation: 'farming', month: '2093-03', managerId: leaver.id, approvedBudget: 500,
+    objectives: [{ title: 'ZZTEST plant 10 rows', targetQuantity: 10, targetUnit: 'rows' }] });
+  if (farmMonth.status !== 201) throw new Error(`plan: ${farmMonth.status} ${farmMonth.body.message}`);
+  plansMade.push(farmMonth.body.id);
+  const farmPlan = farmMonth.body.id;
+  const objectiveId = (await get(admin, `/api/monthly-plans/${farmPlan}`)).body.objectives[0].id;
+  await post(leaver.token, `/api/monthly-plans/${farmPlan}/start`);
+  const firstDay = await post(leaver.token, `/api/monthly-plans/${farmPlan}/reports`, { date: '2093-03-02', objectiveId, quantityDone: 3, cost: 100, notes: 'ZZTEST first rows' });
+  check('the first manager records 3 of 10 rows', firstDay.status === 201, firstDay.body);
+  await patch(admin, `/api/users/${leaver.id}/status`, { status: 'suspended' });
+  const successor = await post(admin, '/api/users', { username: 'zz-del-newfarm', name: 'ZZ Del New Farmer', password: 'Temp-pass-123', role: 'manager', sectors: ['farming'] });
+  if (successor.body.id) created.push(successor.body.id);
+  check('a new Farming manager is added the normal way', successor.status === 201, successor.body);
+  // The first sign-in asks for a new password; past that, a normal session.
+  await pool.query('UPDATE users SET must_change_password = FALSE WHERE id = $1', [successor.body.id]);
+  const newToken = (await post(null, '/api/auth/login', { username: 'zz-del-newfarm', password: 'Temp-pass-123' })).body.token;
+  const seen = (await get(newToken, `/api/monthly-plans/${farmPlan}`)).body;
+  check('they open the same month, with the 3 rows already done', seen.plan?.id === farmPlan && seen.objectives?.[0]?.quantityDone === 3 && seen.objectives?.[0]?.percent === 30, seen.objectives);
+  check('  the budget and the money spent are as they were', seen.plan?.approvedBudget === 500 && seen.plan?.totalSpent === 100, seen.plan);
+  const nextDay = await post(newToken, `/api/monthly-plans/${farmPlan}/reports`, { date: '2093-03-03', objectiveId, quantityDone: 2, cost: 50, notes: 'ZZTEST more rows' });
+  check('they record the next day of work on it', nextDay.status === 201, nextDay.body);
+  const now = (await get(admin, `/api/monthly-plans/${farmPlan}`)).body;
+  check('  progress goes on from 30% to 50%, nothing reset', now.objectives?.[0]?.quantityDone === 5 && now.objectives?.[0]?.percent === 50 && now.plan?.totalSpent === 150, now.objectives);
+  check('  still one plan for the month, not a copy', (await pool.query("SELECT COUNT(*)::int AS n FROM monthly_plans WHERE sector = 'farming' AND month = '2093-03-01'")).rows[0].n === 1);
+  check('  and the first day is still credited to the first manager', (await pool.query('SELECT submitted_by FROM plan_daily_reports WHERE plan_id = $1 ORDER BY report_date LIMIT 1', [farmPlan])).rows[0].submitted_by === leaver.id);
+  // Only what their role and operation allow.
+  const agriMonth = await post(admin, '/api/monthly-plans', { operation: 'agriculture', month: '2093-03', objectives: [{ title: 'ZZTEST agriculture work' }] });
+  if (agriMonth.body.id) plansMade.push(agriMonth.body.id);
+  check('they cannot open another operation’s month', [403, 404].includes((await get(newToken, `/api/monthly-plans/${agriMonth.body.id}`)).status));
+  await patch(admin, `/api/users/${leaver.id}/status`, { status: 'active' });
+  const oldToken = (await post(null, '/api/auth/login', { username: 'zz-del-leaver', password: PASSWORD })).body.token;
+  check('recovered later, the old manager no longer works the month they handed on', [403, 404].includes((await post(oldToken, `/api/monthly-plans/${farmPlan}/reports`, { date: '2093-03-04', objectiveId, quantityDone: 1, notes: 'ZZTEST' })).status));
 
   section('6. In an operation already over the manager limit');
   // Data from before the three-per-operation rule. The rule used to fire on

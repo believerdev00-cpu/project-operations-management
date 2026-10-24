@@ -182,10 +182,7 @@ router.get('/', adminOnly('Only the Director can view the account register.'), a
     total: users.length,
     roleCounts: users.reduce((counts, account) => ({ ...counts, [account.role]: (counts[account.role] || 0) + 1 }), {}),
     unassigned: users.filter((account) => account.role === 'staff' && !account.managerId).length,
-    users,
-    // Deleted people whose work waits for the next person added with the
-    // same role (takeOverWaitingWork), shown at the top of People.
-    waiting: await waitingAccounts(pool)
+    users
   });
 }));
 
@@ -483,12 +480,13 @@ async function handOver(client, target, successorId, actor) {
   return { successor, moved };
 }
 
-// Deleted accounts whose live work still waits for somebody: the months they
-// ran, unfinished work, people reporting to them, teams and projects they led.
-// Listed on the People page as 'Waiting for a replacement'.
+// Former people -- suspended or deleted -- whose live work is still in their
+// name: the months they ran, unfinished work, people reporting to them, teams
+// and projects they led. Nothing is shown about it; the next person added in
+// the same role and operation simply continues it (takeOverWaitingWork).
 async function waitingAccounts(db) {
   const rows = await db.query(
-    `SELECT id, name, role, deleted_at FROM users WHERE status = 'deleted' AND (
+    `SELECT id, name, role, deleted_at FROM users WHERE status IN ('deleted', 'suspended') AND (
         EXISTS (SELECT 1 FROM monthly_plans WHERE manager_id = users.id AND status <> 'Closed')
      OR EXISTS (SELECT 1 FROM activities WHERE (assigned_to = users.id AND status NOT IN ('Completed', 'Rejected', 'Cancelled'))
                                          OR (approval_required_from = users.id AND approval_status = 'pending'))
@@ -496,7 +494,7 @@ async function waitingAccounts(db) {
      OR EXISTS (SELECT 1 FROM users r WHERE r.manager_id = users.id AND r.status <> 'deleted')
      OR EXISTS (SELECT 1 FROM teams WHERE supervisor_id = users.id AND status = 'active')
      OR EXISTS (SELECT 1 FROM projects WHERE manager_id = users.id))
-     ORDER BY deleted_at, id`
+     ORDER BY COALESCE(deleted_at, created_at), id`
   );
   const out = [];
   for (const row of rows.rows) {
@@ -507,24 +505,33 @@ async function waitingAccounts(db) {
   return out;
 }
 
-// The first deleted account (oldest first) whose waiting work the new account
-// can take: same role, and it works in every operation that work is in.
-// handOver() does the moving and the telling. Returns { from, moved } or null.
+// A person added in the same role and operation as people who have left
+// (suspended or deleted) continues ALL of their open work: the same monthly
+// plans with their targets, progress and budgets, the unfinished activities,
+// the people reporting to them, their teams and projects. Nothing is copied
+// or reset -- the rows keep everything and only their owner changes -- so
+// there are never two plans for one month. Only work in operations the new
+// person covers is taken, so they reach nothing their role and operation do
+// not allow. handOver() does the moving and tells them.
+// Returns { from: [{ id, name }], moved } or null when there was nothing.
 async function takeOverWaitingWork(client, newId, actor) {
   const fresh = await client.query(`SELECT id, role, sector, covers_all_sectors, ${operationsSql('users')} AS operations FROM users WHERE id = $1`, [newId]);
   const me = fresh.rows[0];
   if (!me || me.role === 'partner') return null;
   const account = { role: me.role, sector: me.sector, coversAllSectors: me.covers_all_sectors, operations: me.operations || [] };
+  const from = [];
+  const moved = {};
   for (const waiting of await waitingAccounts(client)) {
     if (waiting.role !== me.role) continue;
-    if (!waiting.operations.every((sector) => withinScope(account, sector))) continue;
+    if (!waiting.operations.length || !waiting.operations.every((sector) => withinScope(account, sector))) continue;
     const target = (await client.query('SELECT id, name, role FROM users WHERE id = $1 FOR UPDATE', [waiting.id])).rows[0];
     const result = await handOver(client, target, newId, actor);
     if (result.error) continue;
     await recordOrganization(client, actor, 'reporting_changed', { subjectUserId: newId, subjectName: result.successor.name, detail: { tookOverFrom: target.name, moved: result.moved } });
-    return { from: { id: target.id, name: target.name }, moved: result.moved };
+    from.push({ id: target.id, name: target.name });
+    for (const [key, n] of Object.entries(result.moved)) moved[key] = (moved[key] || 0) + n;
   }
-  return null;
+  return from.length ? { from, moved } : null;
 }
 
 router.delete('/:id', adminOnly('Only the Director can delete an account.'), asyncRoute(async (req, res) => {
@@ -623,7 +630,6 @@ router.delete('/:id', adminOnly('Only the Director can delete an account.'), asy
         ? `${target.name}'s account has been permanently deleted.`
         : `${target.name}'s account is deleted: they can never sign in again and are gone from every list.`)
         + (handover ? ` ${handover.successor.name} has taken over their work.` : '')
-        + (waiting ? ` Their work waits for the next ${ROLE_WORDS[target.role] || target.role} you add who works where they did; that person takes it over.` : '')
     });
   } catch (error) {
     await safeRollback(client);

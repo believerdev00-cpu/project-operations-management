@@ -86,7 +86,7 @@ function accountPayload(form) {
   if (form.role === 'general-manager') return { ...rest, managerId: form.managerId || null };
   return { ...rest, managerId: form.managerId || null, ...(form.role === 'manager' ? { sectors: chosen } : { sector }) };
 }
-const emptyRegister = { total: 0, roleCounts: {}, unassigned: 0, users: [], waiting: [] };
+const emptyRegister = { total: 0, roleCounts: {}, unassigned: 0, users: [] };
 const emptyQueue = { activities: [], movements: [], total: 0 };
 const emptyPartnerRegister = { total: 0, active: 0, byOperation: {}, partners: [] };
 // Used only until the Director's reference rate has loaded, so an equivalent is
@@ -1317,8 +1317,8 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // Delete permanently is offered only on a suspended account, and asks one
   // question -- "are you sure?" -- with what happens said in plain words.
   // Nothing to type and nobody to choose: whatever the person was still
-  // running waits, and the next person added with the same role, working
-  // where they did, takes it over by themselves. The answer is shown in a box
+  // running stays as it is, and the next person added with the same role
+  // and operation continues it (takeOverWaitingWork in routes/users.js). The answer is shown in a box
   // in front of the Director, not only in the banner at the top.
   const deleteAccount = act(async (account) => {
     const sure = await dialog.confirm({
@@ -1332,7 +1332,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     try {
       const result = await fetchJson(`/api/users/${account.id}`, { method: 'DELETE', body: JSON.stringify({}) });
       let message = fill(t(result.outcome === 'removed' ? 'msg.deletedRemoved' : 'msg.deletedClosed'), { name: account.name, count: result.records });
-      if (result.waitingWork) message += ` ${fill(t('msg.deleteWorkWaits'), { role: roleName(account.role, t) })}`;
       notify(message);
       await loadData();
       await dialog.notice({ title: t('msg.deleteDone'), message, confirmLabel: t('dialog.ok') });
@@ -2489,28 +2488,13 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         <label className="sr-only" htmlFor="user-search">{t('form.searchUsers')}</label>
         <input id="user-search" type="search" placeholder={t('form.searchUsers')} value={userSearch} onChange={(event) => setUserSearch(event.target.value)} />
       </div><button className="primary-btn" type="button" onClick={() => document.getElementById('account-form')?.scrollIntoView({ behavior: 'smooth' })}>{t('form.addUser')}</button></section>
-      {/* People deleted while still running something: their work waits for
-          the next person added with the same role who works where they did. */}
-      {register.waiting?.length > 0 && <section className="next-step next-step-warning" aria-live="polite">
-        <div className="next-step-text">
-          <strong>{t('people.waitingTitle')}</strong>
-          <ul className="btq-attention-list">{register.waiting.map((w) => <li key={w.id}><span>{fill(t('people.waitingItem'), {
-            name: w.name, role: roleName(w.role, t), operations: w.operations.map(sectorName).join(', ') || '—',
-            plans: w.heldWork.plans, work: w.heldWork.activities + w.heldWork.approvals, people: w.heldWork.reports, leads: w.heldWork.leads
-          })}</span></li>)}</ul>
-          <p>{t('people.waitingHint')}</p>
-        </div>
-      </section>}
       <Panel title={t('panel.userManagement')} subtitle={`${filteredUsers.length} / ${register.total}`}>
         {issues.users
           ? <LoadIssue onRetry={loadData} />
           : <UserTable users={filteredUsers} managers={managers} currentUserId={user.id} busy={actionBusy} language={language} onChangeSector={changeUserSector} onResetPassword={resetPassword} onSetStatus={setAccountStatus} onDelete={deleteAccount} empty={t('empty.noAccountsMatch')} />}
       </Panel>
       <AccountForm form={accountForm} setForm={setAccountForm} managers={managers}
-        generalManagers={register.users.filter((account) => account.role === 'general-manager' && account.status === 'active')} busy={actionBusy} language={language} onSubmit={(event) => submit(event, '/api/users', accountPayload(accountForm), t('msg.accountCreated'), () => setAccountForm(emptyAccount), (created) => {
-          // Somebody deleted with work still waiting has just been replaced.
-          if (created?.tookOver) dialog.notice({ title: t('msg.tookOverTitle'), message: fill(t('msg.tookOver'), { name: created.name, old: created.tookOver.from.name }), confirmLabel: t('dialog.ok') });
-        })} />
+        generalManagers={register.users.filter((account) => account.role === 'general-manager' && account.status === 'active')} busy={actionBusy} language={language} onSubmit={(event) => submit(event, '/api/users', accountPayload(accountForm), t('msg.accountCreated'), () => setAccountForm(emptyAccount))} />
       {/* Who reports to whom is a fact about the people, so it is set here. */}
       <OrganizationSection user={user} fetchJson={fetchJson} onMessage={notify} onError={fail}
         onChanged={onModuleChanged} reloadKey={summary} />
