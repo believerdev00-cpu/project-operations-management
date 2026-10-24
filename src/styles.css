@@ -1328,3 +1328,12 @@ td .operation-checks { display: grid; gap: 0; }
   .main-area, .main-content { margin: 0; padding: 0; }
   .btq-receipt { border: 0; max-width: none; }
 }
+
+/* The boutique's "what needs you" box: one line per thing waiting, each with
+   its own button, and the figures folded under it. */
+.btq-attention { margin-top: 18px; }
+.btq-attention-list { display: grid; gap: 8px; margin: 10px 0 0; padding: 0; list-style: none; }
+.btq-attention-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 14px; }
+.btq-attention-list span { flex: 1 1 220px; }
+.btq-more { margin-top: 16px; }
+.btq-report > .record-section:first-child { margin-top: 0; }

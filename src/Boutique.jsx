@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { fill, useI18n } from './i18n.js';
 import { DetailView, Fact, useBusy, useDialog } from './ui.jsx';
+import { Section } from './journey.jsx';
 import { formatDate, formatRwf, todayLocal } from './format.js';
 import {
   ADJUSTMENT_KINDS, BOUTIQUE_PAYMENT_METHODS, EXPENSE_CATEGORIES, PRODUCT_TYPES, REPORT_PERIODS,
@@ -153,32 +154,63 @@ export default function Boutique({ user, fetchJson, upload, onMessage, onError, 
 
 // ---- overview ------------------------------------------------------------------------
 
+// The first screen answers "what needs me?" before it shows any figure: one
+// line per thing waiting, each with the one button that deals with it, then
+// four numbers, and everything else folded under "More figures".
 function OverviewTab({ overview, can, go }) {
   const { t } = useI18n();
+  const cashier = can.role === 'cashier';
+  const attention = [];
+  // The Director decides; the manager and the General Manager only see that
+  // something is waiting on the Director.
+  if (can.decide && overview.pendingApprovals > 0) {
+    attention.push({ key: 'decide', text: fill(t('btq.attn.decide'), { count: overview.pendingApprovals }), action: t('btq.tab.approvals'), to: 'approvals' });
+  }
+  if (can.sell && !overview.mySessionId) {
+    attention.push({ key: 'till', text: t('btq.attn.openTill'), action: t('btq.openTill'), to: 'cash' });
+  }
+  if (overview.lowStock > 0) {
+    attention.push({ key: 'low', text: fill(t('btq.attn.lowStock'), { count: overview.lowStock }), action: t('btq.tab.stock'), to: 'stock' });
+  }
   return <>
+    <section className={`next-step next-step-${attention.length ? 'warning' : 'done'} btq-attention`} aria-live="polite">
+      <div className="next-step-text">
+        <strong>{attention.length ? t('btq.needsYou') : t('btq.allClear')}</strong>
+        {attention.length > 0 && <ul className="btq-attention-list">{attention.map((item) => <li key={item.key}>
+          <span>{item.text}</span>
+          <button type="button" className="secondary-btn" onClick={() => go(item.to)}>{item.action}</button>
+        </li>)}</ul>}
+      </div>
+    </section>
     <div className="metric-grid metric-grid-4">
-      <Metric label={t('btq.todaySales')} value={`${money(overview.todaySales.total)} · ${overview.todaySales.count}`} />
+      <Metric label={t('btq.todaySales')} value={`${money(overview.todaySales.total)} · ${overview.todaySales.count}`} tone="strong" />
+      <Metric label={t('btq.lowStockCount')} value={overview.lowStock} tone={overview.lowStock ? 'warn' : ''} />
       {/* A cashier is not given the shelf's worth at cost, the supplier
           balance or the Director's queue; the API answers null for them. */}
-      {can.role !== 'cashier' && <Metric label={t('btq.stockValue')} value={money(overview.stockValue)} />}
-      <Metric label={t('btq.piecesOnShelf')} value={overview.pieces} />
-      <Metric label={t('btq.lowStockCount')} value={overview.lowStock} tone={overview.lowStock ? 'warn' : ''} />
-      <Metric label={t('btq.openTills')} value={overview.openSessions} />
-      {can.role !== 'cashier' && <Metric label={t('btq.pendingApprovals')} value={overview.pendingApprovals} tone={overview.pendingApprovals ? 'warn' : ''} />}
-      {can.role !== 'cashier' && <Metric label={t('btq.owedToSuppliers')} value={money(overview.supplierBalance)} />}
-      <Metric label={t('btq.productsCount')} value={`${overview.products} · ${overview.variants}`} />
+      {cashier
+        ? <Metric label={t('btq.openTills')} value={overview.openSessions} />
+        : <Metric label={t('btq.pendingApprovals')} value={overview.pendingApprovals} tone={overview.pendingApprovals ? 'warn' : ''} />}
+      {cashier
+        ? <Metric label={t('btq.piecesOnShelf')} value={overview.pieces} />
+        : <Metric label={t('btq.stockValue')} value={money(overview.stockValue)} />}
     </div>
     <div className="button-row btq-quick">
       {can.sell && <button className="primary-btn big-action" type="button" onClick={() => go('sell')}>{t('btq.tab.sell')}</button>}
-      {can.sell && <button className="secondary-btn" type="button" onClick={() => go('cash')}>{overview.mySessionId ? t('btq.myTill') : t('btq.openTill')}</button>}
+      {can.sell && overview.mySessionId && <button className="secondary-btn" type="button" onClick={() => go('cash')}>{t('btq.myTill')}</button>}
       {can.manage && <button className="secondary-btn" type="button" onClick={() => go('products', { add: '1' })}>{t('btq.addProduct')}</button>}
-      {can.manage && <button className="secondary-btn" type="button" onClick={() => go('reports')}>{t('btq.tab.reports')}</button>}
       {/* The manager's line is the Director: the door to report or raise an
-          issue is on the first screen. The Director's door is the queue. */}
-      {can.role === 'manager' && <button className="secondary-btn" type="button" onClick={() => go('reports')}>{t('btq.toDirector')}</button>}
-      {can.decide && overview.pendingApprovals > 0 && <button className="secondary-btn" type="button" onClick={() => go('approvals')}>{t('btq.fromManager')} · {overview.pendingApprovals}</button>}
+          issue is on the first screen. Everyone else reads the reports. */}
+      {!cashier && <button className="secondary-btn" type="button" onClick={() => go('reports')}>{can.role === 'manager' ? t('btq.toDirector') : t('btq.tab.reports')}</button>}
     </div>
-    <p className="field-hint">{t('btq.overviewHint')}</p>
+    <Section title={t('btq.moreFigures')}>
+      <div className="metric-grid metric-grid-4 btq-more">
+        {!cashier && <Metric label={t('btq.piecesOnShelf')} value={overview.pieces} />}
+        {!cashier && <Metric label={t('btq.openTills')} value={overview.openSessions} />}
+        {!cashier && <Metric label={t('btq.owedToSuppliers')} value={money(overview.supplierBalance)} />}
+        <Metric label={t('btq.productsCount')} value={`${overview.products} · ${overview.variants}`} />
+      </div>
+      <p className="field-hint">{t('btq.overviewHint')}</p>
+    </Section>
   </>;
 }
 
@@ -1165,19 +1197,24 @@ const defaultPeriod = (kind) => {
   return { period: kind, date: today, start: today.slice(0, 8) + '01', end: today, month: today.slice(0, 7) };
 };
 
+// The four numbers an owner asks first -- sold, kept, spent, earned -- and the
+// working behind them folded away, so the answer is never buried in twelve tiles.
 function FinanceGrid({ f }) {
   const { t } = useI18n();
   return <>
     <div className="metric-grid metric-grid-4">
-      <Metric label={t('btq.grossSales')} value={`${money(f.sales.gross)} · ${f.sales.count}`} />
-      <Metric label={t('btq.discounts')} value={money(f.discounts)} />
-      <Metric label={t('btq.returnsValue')} value={money(f.returns.value)} />
-      <Metric label={t('btq.netSales')} value={money(f.netSales)} tone="strong" />
-      <Metric label={t('btq.paymentsReceived')} value={money(f.paymentsReceived)} />
-      <Metric label={t('btq.costOfSales')} value={money(f.costOfSales)} />
+      <Metric label={t('btq.netSales')} value={`${money(f.netSales)} · ${f.sales.count}`} tone="strong" />
       <Metric label={t('btq.grossProfit')} value={money(f.grossProfit)} tone="strong" />
       <Metric label={t('btq.expensesTotal')} value={money(f.expenses.total)} />
       <Metric label={t('btq.netProfit')} value={money(f.netProfit)} tone={f.netProfit < 0 ? 'warn' : 'strong'} />
+    </div>
+    <Section title={t('btq.moreFigures')}>
+    <div className="metric-grid metric-grid-4 btq-more">
+      <Metric label={t('btq.grossSales')} value={money(f.sales.gross)} />
+      <Metric label={t('btq.discounts')} value={money(f.discounts)} />
+      <Metric label={t('btq.returnsValue')} value={money(f.returns.value)} />
+      <Metric label={t('btq.costOfSales')} value={money(f.costOfSales)} />
+      <Metric label={t('btq.paymentsReceived')} value={money(f.paymentsReceived)} />
       <Metric label={t('btq.inventoryValue')} value={money(f.inventory.value)} />
       <Metric label={t('btq.purchasesReceived')} value={money(f.purchases.value)} />
       <Metric label={t('btq.owedToSuppliers')} value={money(f.supplierBalance)} />
@@ -1191,6 +1228,7 @@ function FinanceGrid({ f }) {
         <td data-label={t('btq.refunded')}>{money(m.refunded)}</td><td data-label={t('btq.receivedMoney')}>{money(m.received)}</td>
       </tr>)}</tbody>
     </table></div>
+    </Section>
   </>;
 }
 
@@ -1210,50 +1248,45 @@ function BooksTab({ fetchJson, onError }) {
 // Director and the General Manager (to read).
 function ToDirectorPanel({ fetchJson, onMessage, onError, changed, can, period, query }) {
   const { t, language } = useI18n();
+  const dialog = useDialog();
   const [busy, run] = useBusy();
   const [tick, setTick] = useState(0);
   const [submissions] = useLoad(fetchJson, '/api/boutique/submissions', tick, onError);
-  const [note, setNote] = useState('');
-  const [title, setTitle] = useState('');
-  const [issue, setIssue] = useState({ title: '', note: '' });
   const [open, setOpen] = useState(query.get('submission') || '');
   const refresh = () => { setTick((n) => n + 1); changed(); };
+  // Two buttons, not two forms always open: the report is the period already
+  // on screen (the API titles it by its dates), so all the manager adds is an
+  // optional note; an issue is asked as its subject, then what happened.
   const sendReport = () => run(async () => {
+    const note = await dialog.prompt({ title: t('btq.sendReport'), label: t('btq.reportNote'), multiline: true });
+    if (note === null) return;
     try {
-      await fetchJson('/api/boutique/submissions/report', { method: 'POST', body: JSON.stringify({ ...periodBody(period), note, title }) });
+      await fetchJson('/api/boutique/submissions/report', { method: 'POST', body: JSON.stringify({ ...periodBody(period), note }) });
       onMessage(t('btq.reportSent'));
-      setNote('');
-      setTitle('');
       refresh();
     } catch (error) { onError(error.message); }
   });
-  const raise = (e) => {
-    e.preventDefault();
-    run(async () => {
-      try {
-        await fetchJson('/api/boutique/submissions/incident', { method: 'POST', body: JSON.stringify(issue) });
-        onMessage(t('btq.issueSent'));
-        setIssue({ title: '', note: '' });
-        refresh();
-      } catch (error) { onError(error.message); }
-    });
-  };
+  const raise = () => run(async () => {
+    const title = await dialog.prompt({ title: t('btq.raiseIssue'), label: t('btq.issueTitle'), required: true });
+    if (title === null) return;
+    // Titled with the subject just typed: a second dialog under the same title
+    // would be the same element, and would keep the subject in its box.
+    const note = await dialog.prompt({ title: title.trim(), label: t('btq.issueBody'), required: true, minLength: 10, multiline: true });
+    if (note === null) return;
+    try {
+      await fetchJson('/api/boutique/submissions/incident', { method: 'POST', body: JSON.stringify({ title, note }) });
+      onMessage(t('btq.issueSent'));
+      refresh();
+    } catch (error) { onError(error.message); }
+  });
   return <Panel title={t('btq.toDirector')} subtitle={t('btq.toDirectorBlurb')}>
-    {can.manage && <div className="form-grid">
-      <Field label={t('btq.reportTitle')}><input maxLength="200" value={title} onChange={(e) => setTitle(e.target.value)} /></Field>
-      <Field label={t('btq.reportNote')} wide><textarea rows="2" maxLength="4000" value={note} onChange={(e) => setNote(e.target.value)} /></Field>
-      <div className="form-submit-bar"><button type="button" className="primary-btn" disabled={busy} onClick={sendReport}>{t('btq.sendReport')}</button></div>
+    {can.manage && <div className="button-row">
+      <button type="button" className="primary-btn big-action" disabled={busy} onClick={sendReport}>{t('btq.sendReport')}</button>
+      <button type="button" className="secondary-btn" disabled={busy} onClick={raise}>{t('btq.raiseIssue')}</button>
     </div>}
-    {can.manage && <form className="decision-form" onSubmit={raise}>
-      <h3 className="form-section-title">{t('btq.raiseIssue')}</h3>
-      <div className="form-grid">
-        <Field label={t('btq.issueTitle')}><input required maxLength="200" value={issue.title} onChange={(e) => setIssue({ ...issue, title: e.target.value })} /></Field>
-        <Field label={t('btq.issueBody')} wide><textarea required minLength="10" rows="3" maxLength="4000" value={issue.note} onChange={(e) => setIssue({ ...issue, note: e.target.value })} /></Field>
-      </div>
-      <div className="form-submit-bar"><button type="submit" className="secondary-btn" disabled={busy}>{t('btq.raiseIssue')}</button></div>
-    </form>}
-    <h3 className="form-section-title">{t('btq.submissions')}</h3>
-    <SubmissionList submissions={submissions} fetchJson={fetchJson} open={open} setOpen={setOpen} language={language} />
+    <Section title={t('btq.submissions')} count={submissions?.length ?? null} defaultOpen={Boolean(open)}>
+      <SubmissionList submissions={submissions} fetchJson={fetchJson} open={open} setOpen={setOpen} language={language} />
+    </Section>
   </Panel>;
 }
 
@@ -1308,31 +1341,33 @@ function ReportsTab({ fetchJson, onMessage, onError, changed, can, query }) {
   const { t, language } = useI18n();
   const [period, setPeriod] = useState(() => defaultPeriod('daily'));
   const [report] = useLoad(fetchJson, `/api/boutique/reports?${periodQuery(period)}`, 0, onError);
-  const section = (title, rows, head, row) => <Panel title={title}>{rows?.length ? <div className="table-wrap"><table className="card-table"><thead><tr>{head.map((h) => <th key={h}>{h}</th>)}</tr></thead><tbody>{rows.map(row)}</tbody></table></div> : <Empty>{t('btq.nothingInPeriod')}</Empty>}</Panel>;
+  // Each detail is a folded section with its row count on the bar, so the page
+  // reads as a list of headings under the summary; an empty one says so.
+  const section = (title, rows, head, row) => <Section title={title} count={rows?.length ?? 0}>{rows?.length ? <div className="table-wrap"><table className="card-table"><thead><tr>{head.map((h) => <th key={h}>{h}</th>)}</tr></thead><tbody>{rows.map(row)}</tbody></table></div> : <Empty>{t('btq.nothingInPeriod')}</Empty>}</Section>;
   return <>
-    <Panel title={t('btq.tab.reports')} action={t('btq.print')} onAction={() => window.print()}>
+    {/* A folded section prints folded: open them all first, so the paper
+        carries the whole report and not a list of headings. */}
+    <Panel title={t('btq.tab.reports')} action={t('btq.print')} onAction={() => { document.querySelectorAll('.boutique details').forEach((d) => { d.open = true; }); window.print(); }}>
       <PeriodPicker period={period} setPeriod={setPeriod} />
       {report && <p className="field-hint">{formatDate(report.period.start, language)} – {formatDate(report.period.end, language)}</p>}
+      {report ? <FinanceGrid f={report.finance} /> : <div className="loading-state"><span className="spinner" /></div>}
     </Panel>
     <ToDirectorPanel fetchJson={fetchJson} onMessage={onMessage} onError={onError} changed={changed} can={can} period={period} query={query} />
-    {!report ? <div className="loading-state"><span className="spinner" /></div> : <div className="btq-report">
-      <Panel title={t('btq.profit')}><FinanceGrid f={report.finance} /></Panel>
+    {report && <Panel title={t('btq.reportDetails')}><div className="btq-report">
       {section(t('btq.salesByDay'), report.salesByDay, [t('table.date'), t('btq.tab.sales'), t('btq.total'), t('btq.discounts')],
         (r) => <tr key={r.day}><td className="card-title-cell"><strong>{formatDate(r.day, language)}</strong></td><td data-label={t('btq.tab.sales')}>{r.sales}</td><td data-label={t('btq.total')}>{money(r.total)}</td><td data-label={t('btq.discounts')}>{money(r.discounts)}</td></tr>)}
       {section(t('btq.popularProducts'), report.topProducts, [t('btq.product'), t('btq.pieces'), t('btq.revenue'), t('btq.profit')],
         (r) => <tr key={r.sku}><td className="card-title-cell"><strong>{r.productName}</strong><small>{r.sku} {variantLabel(r)}</small></td><td data-label={t('btq.pieces')}>{r.pieces}</td><td data-label={t('btq.revenue')}>{money(r.revenue)}</td><td data-label={t('btq.profit')}>{money(r.profit)}</td></tr>)}
-      <div className="dashboard-columns">
-        {section(t('btq.sizeDemand'), report.sizeDemand, [t('btq.size'), t('btq.pieces')], (r) => <tr key={r.size}><td className="card-title-cell"><strong>{r.size}</strong></td><td data-label={t('btq.pieces')}>{r.pieces}</td></tr>)}
-        {section(t('btq.colorDemand'), report.colorDemand, [t('btq.color'), t('btq.pieces')], (r) => <tr key={r.color}><td className="card-title-cell"><strong>{r.color}</strong></td><td data-label={t('btq.pieces')}>{r.pieces}</td></tr>)}
-      </div>
+      {section(t('btq.sizeDemand'), report.sizeDemand, [t('btq.size'), t('btq.pieces')], (r) => <tr key={r.size}><td className="card-title-cell"><strong>{r.size}</strong></td><td data-label={t('btq.pieces')}>{r.pieces}</td></tr>)}
+      {section(t('btq.colorDemand'), report.colorDemand, [t('btq.color'), t('btq.pieces')], (r) => <tr key={r.color}><td className="card-title-cell"><strong>{r.color}</strong></td><td data-label={t('btq.pieces')}>{r.pieces}</td></tr>)}
       {section(t('btq.byType'), report.typeDemand, [t('btq.productType'), t('btq.pieces'), t('btq.revenue')],
         (r) => <tr key={r.productType}><td className="card-title-cell"><strong>{t(`btq.type.${r.productType}`)}</strong></td><td data-label={t('btq.pieces')}>{r.pieces}</td><td data-label={t('btq.revenue')}>{money(r.revenue)}</td></tr>)}
-      <Panel title={t('btq.inventoryReport')} subtitle={`${report.inventory.pieces} · ${money(report.inventory.value)}`}>
+      <Section title={`${t('btq.inventoryReport')} · ${report.inventory.pieces} · ${money(report.inventory.value)}`} count={report.inventory.lowStock.length || null}>
         {report.inventory.byType.length > 0 && <ul className="history-list">{report.inventory.byType.map((r) => <li key={r.productType}>{t(`btq.type.${r.productType}`)}: {r.pieces} · {money(r.value)}</li>)}</ul>}
         {report.inventory.lowStock.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('btq.lowStock')}</th><th>{t('btq.stock')}</th><th>{t('btq.reorderLevel')}</th></tr></thead>
           <tbody>{report.inventory.lowStock.map((v) => <tr key={v.id}><td className="card-title-cell"><strong>{fullName(v)}</strong><small>{v.sku}</small></td><td data-label={t('btq.stock')}>{v.stockQuantity}</td><td data-label={t('btq.reorderLevel')}>{v.reorderLevel}</td></tr>)}</tbody></table></div> : <p className="field-hint">{t('btq.noLowStock')}</p>}
-      </Panel>
-      <Panel title={t('btq.purchasesReport')}>
+      </Section>
+      <Section title={t('btq.purchasesReport')}>
         <div className="detail-facts">
           <Fact label={t('btq.deliveries')} value={report.purchases.receipts} />
           <Fact label={t('btq.pieces')} value={report.purchases.pieces} />
@@ -1340,12 +1375,12 @@ function ReportsTab({ fetchJson, onMessage, onError, changed, can, query }) {
           <Fact label={t('btq.paymentsMade')} value={money(report.purchases.supplierPayments)} />
           <Fact label={t('btq.owedToSuppliers')} value={money(report.purchases.supplierBalance)} />
         </div>
-      </Panel>
+      </Section>
       {section(t('btq.expensesByCategory'), report.expensesByCategory, [t('field.category'), t('btq.count'), t('btq.total')],
         (r) => <tr key={r.category}><td className="card-title-cell"><strong>{r.category}</strong></td><td data-label={t('btq.count')}>{r.count}</td><td data-label={t('btq.total')}>{money(r.total)}</td></tr>)}
       {section(t('btq.returns'), report.returns, [t('btq.number'), t('table.date'), t('btq.returnKindLabel'), t('btq.value'), t('btq.refund'), t('btq.reason')],
         (r) => <tr key={r.id}><td className="card-title-cell"><strong>{r.number}</strong><small>{r.saleNumber}</small></td><td data-label={t('table.date')}>{formatDate(r.returnedOn, language)}</td><td data-label={t('btq.returnKindLabel')}>{t(`btq.returnKind.${r.kind}`)}</td><td data-label={t('btq.value')}>{money(r.value)}</td><td data-label={t('btq.refund')}>{money(r.refundTotal)}</td><td data-label={t('btq.reason')}>{r.reason}</td></tr>)}
-      <Panel title={t('btq.reconciliation')} subtitle={fill(t('btq.closedTills'), { count: report.paymentReconciliation.closedSessions })}>
+      <Section title={`${t('btq.reconciliation')} · ${fill(t('btq.closedTills'), { count: report.paymentReconciliation.closedSessions })}`}>
         <div className="table-wrap"><table className="card-table">
           <thead><tr><th>{t('btq.method')}</th><th>{t('btq.receivedMoney')}</th><th>{t('btq.tillExpected')}</th><th>{t('btq.tillCounted')}</th><th>{t('btq.variance')}</th></tr></thead>
           <tbody>{report.paymentReconciliation.methods.map((m) => <tr key={m.method}>
@@ -1355,10 +1390,10 @@ function ReportsTab({ fetchJson, onMessage, onError, changed, can, query }) {
             <td data-label={t('btq.variance')}>{m.tillVariance === null ? '—' : <span className={m.tillVariance < 0 ? 'over-budget' : undefined}>{money(m.tillVariance)}</span>}</td>
           </tr>)}</tbody>
         </table></div>
-      </Panel>
+      </Section>
       {section(t('btq.cashierPerformance'), report.cashierPerformance, [t('btq.cashier'), t('btq.tab.sales'), t('btq.pieces'), t('btq.total'), t('btq.averageSale'), t('btq.discounts'), t('btq.returns'), t('btq.voidedCount')],
         (r) => <tr key={r.cashierId}><td className="card-title-cell"><strong>{r.name}</strong></td><td data-label={t('btq.tab.sales')}>{r.sales}</td><td data-label={t('btq.pieces')}>{r.pieces}</td><td data-label={t('btq.total')}>{money(r.total)}</td><td data-label={t('btq.averageSale')}>{money(r.average)}</td><td data-label={t('btq.discounts')}>{money(r.discounts)}</td><td data-label={t('btq.returns')}>{r.returns}</td><td data-label={t('btq.voidedCount')}>{r.voided}</td></tr>)}
-    </div>}
+    </div></Panel>}
   </>;
 }
 
@@ -1390,15 +1425,20 @@ function ApprovalsTab({ fetchJson, onMessage, onError, changed, can, go, query }
     } catch (error) { onError(error.message); }
   });
   if (!queue) return <div className="loading-state"><span className="spinner" /></div>;
+  // Only the kinds that have something waiting are drawn, and an empty queue
+  // is one plain sentence rather than three empty boxes.
+  if (!queue.submissions.length && !queue.adjustments.length && !queue.voids.length) {
+    return <section className="next-step next-step-done btq-attention"><div className="next-step-text"><strong>{t('btq.allClear')}</strong></div></section>;
+  }
   return <>
     {/* What the Boutique Manager sent straight up: reports and issues. The
         Director answers here; the manager and the General Manager read. */}
-    <Panel title={t('btq.fromManager')} subtitle={String(queue.submissions.length)}>
+    {queue.submissions.length > 0 && <Panel title={t('btq.fromManager')} subtitle={String(queue.submissions.length)}>
       <SubmissionList submissions={queue.submissions} fetchJson={fetchJson} open={openSubmission} setOpen={setOpenSubmission} language={language}
         decide={can.decide ? decideSubmission : null} busy={busy} />
-    </Panel>
-    <Panel title={t('btq.adjustments')} subtitle={String(queue.adjustments.length)}>
-      {queue.adjustments.length ? <ul className="decision-list">{queue.adjustments.map((a) => <li className="decision-card" key={a.id}>
+    </Panel>}
+    {queue.adjustments.length > 0 && <Panel title={t('btq.adjustments')} subtitle={String(queue.adjustments.length)}>
+      <ul className="decision-list">{queue.adjustments.map((a) => <li className="decision-card" key={a.id}>
         <div className="decision-card-main">
           <span className="decision-card-kind">{t(`btq.kind.${a.kind}`)}</span>
           <strong>{a.productName} · {a.sku} {variantLabel(a)}</strong>
@@ -1409,10 +1449,10 @@ function ApprovalsTab({ fetchJson, onMessage, onError, changed, can, go, query }
           <button type="button" className="primary-btn" disabled={busy} onClick={() => decide(`/api/boutique/stock/adjustments/${a.id}/decision`, true, t('btq.adjusted'))}>{t('btq.approve')}</button>
           <button type="button" className="danger-btn" disabled={busy} onClick={() => decide(`/api/boutique/stock/adjustments/${a.id}/decision`, false, t('btq.refused'))}>{t('btq.refuse')}</button>
         </div>}
-      </li>)}</ul> : <Empty>{t('btq.nothingWaiting')}</Empty>}
-    </Panel>
-    <Panel title={t('btq.voidRequests')} subtitle={String(queue.voids.length)}>
-      {queue.voids.length ? <ul className="decision-list">{queue.voids.map((s) => <li className="decision-card" key={s.id}>
+      </li>)}</ul>
+    </Panel>}
+    {queue.voids.length > 0 && <Panel title={t('btq.voidRequests')} subtitle={String(queue.voids.length)}>
+      <ul className="decision-list">{queue.voids.map((s) => <li className="decision-card" key={s.id}>
         <div className="decision-card-main">
           <span className="decision-card-kind">{t('btq.voidSale')}</span>
           <strong><button type="button" className="text-btn" onClick={() => go('sales', { sale: s.id })}>{s.number}</button> · {money(s.total)}</strong>
@@ -1423,8 +1463,8 @@ function ApprovalsTab({ fetchJson, onMessage, onError, changed, can, go, query }
           <button type="button" className="primary-btn" disabled={busy} onClick={() => decide(`/api/boutique/sales/${s.id}/void-decision`, true, t('btq.voided'))}>{t('btq.approve')}</button>
           <button type="button" className="danger-btn" disabled={busy} onClick={() => decide(`/api/boutique/sales/${s.id}/void-decision`, false, t('btq.voidRefused'))}>{t('btq.refuse')}</button>
         </div>}
-      </li>)}</ul> : <Empty>{t('btq.nothingWaiting')}</Empty>}
-    </Panel>
+      </li>)}</ul>
+    </Panel>}
   </>;
 }
 

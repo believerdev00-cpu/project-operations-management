@@ -1670,7 +1670,6 @@ const STRINGS = {
   'btq.details': { en: 'Details', rw: 'Ibisobanuro', fr: 'Détails', sw: 'Maelezo' },
   'btq.print': { en: 'Print', rw: 'Cyapa', fr: 'Imprimer', sw: 'Chapisha' },
   'btq.nothingInPeriod': { en: 'Nothing recorded in these dates.', rw: 'Nta kintu cyanditswe muri aya matariki.', fr: 'Rien d’enregistré sur ces dates.', sw: 'Hakuna kilichorekodiwa katika tarehe hizi.' },
-  'btq.nothingWaiting': { en: 'Nothing is waiting.', rw: 'Nta kintu gitegereje.', fr: 'Rien en attente.', sw: 'Hakuna kinachosubiri.' },
 
   // Overview
   'btq.todaySales': { en: 'Today’s sales · count', rw: 'Ibyagurishijwe uyu munsi · umubare', fr: 'Ventes du jour · nombre', sw: 'Mauzo ya leo · idadi' },
@@ -1944,6 +1943,13 @@ const STRINGS = {
   'btq.outcome.returned': { en: 'returned', rw: 'byasubijwe', fr: 'renvoyé', sw: 'imerudishwa' },
   'btq.toDirector': { en: 'Report to the Director', rw: 'Tanga raporo ku Muyobozi', fr: 'Rapporter au Directeur', sw: 'Ripoti kwa Mkurugenzi' },
   'btq.toDirectorBlurb': { en: 'The Boutique Manager reports directly to the Director. A report goes up with its figures as they stand now; an issue goes up in words. The Director accepts it or returns it with a note.', rw: 'Umuyobozi wa butike atanga raporo ku Muyobozi ako kanya, nta wundi hagati. Raporo ijyana n’imibare nk’uko iri ubu; ikibazo kijyana n’amagambo. Umuyobozi arabyemera cyangwa abisubize n’inyandiko.', fr: 'Le gestionnaire de la boutique rend compte directement au Directeur. Un rapport part avec ses chiffres tels qu’ils sont ; un problème part en mots. Le Directeur l’accepte ou le renvoie avec une note.', sw: 'Meneja wa butiki anaripoti moja kwa moja kwa Mkurugenzi. Ripoti huenda na tarakimu zake kama zilivyo sasa; tatizo huenda kwa maneno. Mkurugenzi anaikubali au anairudisha na maelezo.' },
+  'btq.needsYou': { en: 'What needs you now', rw: 'Ibigukeneye ubu', fr: 'Ce qui vous attend', sw: 'Kinachokuhitaji sasa' },
+  'btq.allClear': { en: 'All clear: nothing needs you right now.', rw: 'Byose bimeze neza: nta kigukeneye ubu.', fr: 'Tout est en ordre : rien ne vous attend.', sw: 'Kila kitu kiko sawa: hakuna kinachokuhitaji sasa.' },
+  'btq.attn.decide': { en: '{count} request(s) from the shop wait for your decision.', rw: 'Ibisabwa {count} biva mu iduka bitegereje icyemezo cyawe.', fr: '{count} demande(s) de la boutique attendent votre décision.', sw: 'Maombi {count} kutoka dukani yanasubiri uamuzi wako.' },
+  'btq.attn.openTill': { en: 'Your till is closed. Open it before taking cash.', rw: 'Ikasi yawe irafunze. Yifungure mbere yo kwakira amafaranga.', fr: 'Votre caisse est fermée. Ouvrez-la avant d’encaisser.', sw: 'Kasha lako limefungwa. Lifungue kabla ya kupokea pesa taslimu.' },
+  'btq.attn.lowStock': { en: '{count} item(s) are running low.', rw: 'Ibicuruzwa {count} bigiye gushira.', fr: '{count} article(s) bientôt en rupture.', sw: 'Bidhaa {count} zinakaribia kuisha.' },
+  'btq.moreFigures': { en: 'More figures', rw: 'Indi mibare', fr: 'Plus de chiffres', sw: 'Takwimu zaidi' },
+  'btq.reportDetails': { en: 'Report details', rw: 'Ibisobanuro bya raporo', fr: 'Détails du rapport', sw: 'Maelezo ya ripoti' },
   'btq.reportNote': { en: 'Note to the Director', rw: 'Inyandiko ku Muyobozi', fr: 'Note au Directeur', sw: 'Maelezo kwa Mkurugenzi' },
   'btq.sendReport': { en: 'Send this report to the Director', rw: 'Ohereza iyi raporo ku Muyobozi', fr: 'Envoyer ce rapport au Directeur', sw: 'Tuma ripoti hii kwa Mkurugenzi' },
   'btq.reportSent': { en: 'The report is with the Director.', rw: 'Raporo iri ku Muyobozi.', fr: 'Le rapport est chez le Directeur.', sw: 'Ripoti iko kwa Mkurugenzi.' },
@@ -1967,7 +1973,6 @@ const STRINGS = {
   'btq.answeredBy': { en: 'answered by {name}', rw: 'byasubijwe na {name}', fr: 'répondu par {name}', sw: 'imejibiwa na {name}' },
   'btq.noSubmissions': { en: 'Nothing has been sent to the Director yet.', rw: 'Nta kintu kiroherezwa ku Muyobozi.', fr: 'Rien n’a encore été envoyé au Directeur.', sw: 'Hakuna kilichotumwa kwa Mkurugenzi bado.' },
   'org.boutiqueLine': { en: 'the Director, directly', rw: 'Umuyobozi, ako kanya', fr: 'le Directeur, directement', sw: 'Mkurugenzi, moja kwa moja' },
-  'btq.reportTitle': { en: 'Title (optional)', rw: 'Umutwe (si itegeko)', fr: 'Titre (facultatif)', sw: 'Kichwa (si lazima)' },
 };
 
 // A missing language falls back to English, and an unknown key to itself, so a
