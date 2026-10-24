@@ -2,21 +2,35 @@
 // hold. Reads the .xlsx, writes a JSON file that `load-plans.mjs` then posts to
 // the API. Nothing here touches a database or a network.
 //
-//   node scripts/import/plans-from-workbook.mjs "rubaya report.xlsx" plans.json
+//   node scripts/import/plans-from-workbook.mjs <workbook.xlsx> <plans.json> --year=2026 \
+//     [--rate-frw=N --rate-fco=N] [--ranges=first-day] [--delivery-notes=<file.json>] [--exclude=op/YYYY-MM,...]
 //
 // The workbooks are a hand-kept record, not an export, so most of this file is
 // about reading them honestly rather than about the schema. Three things in
 // particular are not what they appear to be -- the dates, the money, and the
-// rows that are arithmetic about other rows -- and each is handled below with
-// the reason it has to be.
+// rows that are arithmetic about other rows -- and each is handled with the
+// reason it has to be. The rules are specific to the Rubaya & Gisuma sheets
+// (workbookRules.mjs); review them before reading any other workbook.
 import ExcelJS from 'exceljs';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { formatWorkbookNote } from '../../shared/workbookNote.js';
+import { isSummaryRow, parseDate, parseDeliveryNotes, parseYearArgument, summaryReport } from './workbookRules.mjs';
 
-const [workbookPath, outPath] = process.argv.slice(2);
+const [workbookPath, outPath] = process.argv.slice(2).filter((argument) => !argument.startsWith('--'));
 if (!workbookPath || !outPath) {
-  console.error('usage: node scripts/import/plans-from-workbook.mjs <workbook.xlsx> <plans.json>');
+  console.error('usage: node scripts/import/plans-from-workbook.mjs <workbook.xlsx> <plans.json> --year=<YYYY> [options]');
   process.exit(1);
 }
+const option = (name) => process.argv.find((argument) => argument.startsWith(`--${name}=`))?.slice(name.length + 3);
+// The year every row must fall in. Required: it used to be forced to 2026,
+// which rewrote any other year without a word.
+const yearArgument = parseYearArgument(option('year'));
+if (!yearArgument.ok) { console.error(yearArgument.why); process.exit(1); }
+const YEAR = yearArgument.year;
+// Mining's delivery summaries (sales and profit, which POMS has no field for),
+// as words for the month's notes -- only from a file given on purpose.
+const deliveryNotesPath = option('delivery-notes');
+const DELIVERY_NOTES = deliveryNotesPath ? parseDeliveryNotes(readFileSync(deliveryNotesPath, 'utf8')) : new Map();
 
 // Which column holds what, per sheet. The sheets do not agree: the farm sheet
 // carries a Category and starts a column later than the rest.
@@ -44,16 +58,9 @@ const SHEET_OPERATION = {
   'OPS Related to mining': { operation: 'movement', supports: 'mining' }
 };
 
-// ROWS THAT ARE ARITHMETIC ABOUT OTHER ROWS, not work that cost money.
-//
-// Each consignment is closed with its own sums -- "DELIVERY 2 SUMMARY", "Total
-// kgs Received", "Total Sale", "net profit", and bare sums like
-// "30911-25000-212-2149-250". Counted as costs they double the month.
-//
-// "total" is matched as a bare substring with no word boundary on purpose: one
-// line reads "DELIVERY 2Total Ops related to Mining", where the missing space
-// leaves \btotal\b nothing to anchor to and let $203 of double spending back in.
-const SUMMARY = /summary|total|net profit|sale-invest|^\s*[\d,.\s]+-[\d,.\s-]+=?\s*$/i;
+// Rows that are arithmetic about other rows (delivery summaries, totals, bare
+// sums) are set aside by isSummaryRow in workbookRules.mjs -- and reported,
+// with their money, at the end of the run.
 
 const cellValue = (cell) => {
   let value = cell.value;
@@ -79,49 +86,8 @@ const num = (cell) => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
-// THE DATES ARE NOT ALL THE SAME SHAPE.
-//
-// The workbooks are typed d/m/y. Anything with a day above 12 stayed text
-// ("26/07/2026") and is plainly d/m/y. Anything whose first two numbers were
-// both 12 or under, Excel swallowed as a real date in m/d/y -- so the cell that
-// reads 2026-07-08 was typed 7/8/2026 and means 7 AUGUST. Reading those as
-// written scatters August's work back into July and breaks every monthly total,
-// which is why a date cell is swapped back and a text cell is read as d/m/y.
-//
-// Confirmed by row order: the swapped cells always sit between neighbours that
-// bracket the swapped reading, never the literal one.
-function parseDate(cell, fallbackMonth) {
-  if (!cell || cell.v === '') return { date: null, why: 'empty' };
-  if (cell.k === 'date') {
-    const [year, month, day] = String(cell.v).split('-').map(Number);
-    // Only ambiguous when both are 12 or under; a day of 31 could never have
-    // been read as a month, so that cell is already right.
-    if (day >= 1 && day <= 12) {
-      return { date: `${year}-${String(day).padStart(2, '0')}-${String(month).padStart(2, '0')}`, why: 'swapped' };
-    }
-    return { date: String(cell.v), why: 'kept' };
-  }
-  let text = String(cell.v).trim().replace(/\/{2,}/g, '/').replace(/\s+/g, ' ');
-  text = text.replace(/^(\d{1,2})\s*[-–]\s*\d{1,2}([/ .-])/, '$1$2'); // "10-11/8/2026" -> the 10th
-  const parts = text.split(/[/ .-]+/).filter(Boolean);
-  let day;
-  let month;
-  let year;
-  if (parts.length === 3) [day, month, year] = parts.map(Number);
-  else if (parts.length === 2 && /^\d{6}$/.test(parts[1])) {        // "07/082026"
-    day = Number(parts[0]);
-    month = Number(parts[1].slice(0, 2));
-    year = Number(parts[1].slice(2));
-  } else if (parts.length === 2 && /^0?\d{4,5}$/.test(parts[1])) {  // "28/02026" -- the month was lost
-    day = Number(parts[0]);
-    month = fallbackMonth;
-    year = Number(parts[1].slice(-4));
-  } else return { date: null, why: `unparsed:${text}` };
-  if (year < 100) year += 2000;
-  if (year !== 2026) year = 2026;                                    // "25/8/2028" is a typo
-  if (!month || month < 1 || month > 12 || !day || day < 1 || day > 31) return { date: null, why: `range:${text}` };
-  return { date: `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`, why: 'text' };
-}
+// Dates (d/m/y, cells Excel swapped, and the required --year) are read by
+// parseDate in workbookRules.mjs.
 
 // ONE OBJECTIVE PER KIND OF WORK. The sheets name the same work a dozen ways
 // ("fuel", "Buying fuel", "Full tank Fuel"), and a month of twenty near-
@@ -216,15 +182,6 @@ function quantityOf(text) {
   return { value, unit: UNITS[word] || (word || null) };
 }
 
-// The delivery arithmetic the platform cannot hold: it records money going out
-// and has no concept of a sale or a profit. Kept as the month's notes, where it
-// stays readable without pretending to be spending. Edit these when a workbook
-// with new consignments is imported.
-const DELIVERY_NOTES = {
-  '2026-08': 'From the workbook delivery summaries. Delivery 1: 200kg delivered at 125 = $25,000 invested, $212 mining OPS, $250 trading licence, total sale $30,911, net profit $3,300. Delivery 2: 214.2kg received for $27,025, $204 OPS, $2,471 charges, total cost $29,700, total sale $34,778, net profit $5,078 (settled 4 Sep).',
-  '2026-09': 'From the workbook delivery summaries. Delivery 3: 197.7kg received for $25,250, $150 OPS, $1,020 charges, total cost $26,420, total sale $27,116.50, net profit $696.50. Delivery 4 was still open when the workbook was written.'
-};
-
 const workbook = new ExcelJS.Workbook();
 await workbook.xlsx.readFile(workbookPath);
 
@@ -262,12 +219,29 @@ const median = (list) => {
   const sorted = [...list].sort((a, b) => a - b);
   return sorted.length ? sorted[Math.floor(sorted.length / 2)] : null;
 };
-const rate = { frw: median(ratios.frw), fco: median(ratios.fco) };
-if (!rate.frw || !rate.fco) throw new Error('no row states both USD and a local currency, so no rate can be derived');
-console.log(`implied rates: 1 USD = ${rate.frw.toFixed(1)} FRW (${ratios.frw.length} rows), ${rate.fco.toFixed(1)} FCO (${ratios.fco.length} rows)`);
+const implied = { frw: median(ratios.frw), fco: median(ratios.fco) };
+console.log(`rates the workbook implies: 1 USD = ${implied.frw?.toFixed(1)} FRW (${ratios.frw.length} rows), ${implied.fco?.toFixed(1)} FCO (${ratios.fco.length} rows)`);
+// THE RATES THE DIRECTOR APPROVED for this import, when given: --rate-frw and
+// --rate-fco, both or neither. They replace the implied ones exactly -- no
+// mix of the two, no live market rate. FRW is the workbook's word for the
+// Rwandan franc (RWF in POMS) and FCO its word for the Congolese franc (CDF
+// in POMS); the notes keep the workbook's own words, nothing is renamed.
+const flag = (name) => process.argv.find((argument) => argument.startsWith(`--${name}=`))?.split('=')[1];
+const approved = { frw: Number(flag('rate-frw')), fco: Number(flag('rate-fco')) };
+const given = [flag('rate-frw'), flag('rate-fco')].filter((value) => value !== undefined).length;
+if (given === 1) throw new Error('give both --rate-frw and --rate-fco, or neither');
+if (given === 2 && !(approved.frw > 0 && approved.fco > 0)) throw new Error('--rate-frw and --rate-fco must be numbers above zero');
+const rate = given === 2 ? approved : implied;
+if (!rate.frw || !rate.fco) throw new Error('no rates given and none can be derived from the workbook');
+console.log(`rates USED: 1 USD = ${rate.frw} FRW, ${rate.fco} FCO (${given === 2 ? 'approved, given on the command line' : 'implied by the workbook'})`);
+const rateText = (value) => (Number.isInteger(value) ? String(value) : value.toFixed(1));
 
 const rows = [];
 const skipped = [];
+const held = [];
+const totals = [];
+// Rows whose date was a range, recorded on their first day: sheet#row -> the range as written.
+const rangeNote = new Map();
 let lastMonth = null;
 for (const row of raw) {
   const text = (index) => (index === undefined || !row.cells[index] ? '' : String(row.cells[index].v || '').trim());
@@ -276,12 +250,34 @@ for (const row of raw) {
   const usd = num(row.cells[row.columns.usd]);
   const frw = num(row.cells[row.columns.frw]);
   const fco = num(row.cells[row.columns.fco]);
-  const { date, why } = parseDate(row.cells[row.columns.date], lastMonth);
+  const { date, why } = parseDate(row.cells[row.columns.date], lastMonth, YEAR);
   if (date) lastMonth = Number(date.slice(5, 7));
 
-  const reason = SUMMARY.test(description) || SUMMARY.test(activity) ? 'summary/arithmetic row'
+  // A DATE RANGE ("10-11/8/2026", "9-24/9/2026") is one figure for several days.
+  // By default the row is HELD for the Director to decide -- putting it on the
+  // first day says something the workbook does not, and POMS records days, not
+  // periods -- and its money stays in the month's budget (the source total) as
+  // the part not yet recorded. --ranges=first-day records it instead (below).
+  const dateText = row.cells[row.columns.date]?.k === 'date' ? '' : String(row.cells[row.columns.date]?.v || '');
+  const isRange = /^\s*\d{1,2}\s*-\s*\d{1,2}\s*[/ ]/.test(dateText);
+  const summary = isSummaryRow(activity, description);
+  const reason = summary ? 'summary/arithmetic row'
     : !date ? `no usable date (${why})`
       : (!usd && !frw && !fco) ? 'no cost in any currency' : null;
+  // Kept apart so they are reported with their money: a real cost that says
+  // "total" lands here too, and a reviewer has to be able to see it.
+  if (summary) totals.push({ sheet: row.sheet, n: row.n, label: [activity, description].filter(Boolean).join(' - '), usd, frw, fco });
+  // --ranges=first-day (the Director's decision of 24 October 2026): the
+  // payment is recorded on the first day of its range, whole -- never split --
+  // and the range as written goes into the day's description.
+  const rangeOnFirstDay = process.argv.includes('--ranges=first-day');
+  if (!reason && isRange && date && rangeOnFirstDay) rangeNote.set(`${row.sheet}#${row.n}`, dateText.trim());
+  if (!reason && isRange && date && !rangeOnFirstDay) {
+    const cost = usd && usd > 0 ? usd : frw && frw > 0 ? frw / rate.frw : fco / rate.fco;
+    held.push({ sheet: row.sheet, n: row.n, month: date.slice(0, 7), dateText: dateText.trim(), label: [activity, description].filter(Boolean).join(' - '),
+      usd: Math.round(cost * 100) / 100, operation: SHEET_OPERATION[row.sheet].operation });
+    continue;
+  }
   if (reason) {
     skipped.push({ sheet: row.sheet, n: row.n, label: [activity, description].filter(Boolean).join(' - '), reason });
     continue;
@@ -290,8 +286,8 @@ for (const row of raw) {
   // The USD column when the workbook states one, otherwise converted. Both the
   // figure and where it came from are carried, so the day can say so.
   const money = usd && usd > 0 ? { usd, from: `$${usd} as recorded` }
-    : frw && frw > 0 ? { usd: frw / rate.frw, from: `${frw} FRW at ${rate.frw.toFixed(1)}/USD` }
-      : { usd: fco / rate.fco, from: `${fco} FCO at ${rate.fco.toFixed(1)}/USD` };
+    : frw && frw > 0 ? { usd: frw / rate.frw, from: `${frw} FRW at ${rateText(rate.frw)}/USD` }
+      : { usd: fco / rate.fco, from: `${fco} FCO at ${rateText(rate.fco)}/USD` };
 
   rows.push({
     sheet: row.sheet, n: row.n, date, month: date.slice(0, 7),
@@ -323,29 +319,68 @@ for (const plan of [...plans.values()].sort((a, b) => a.operation.localeCompare(
     // A figure typed without its unit takes the unit of the rows beside it: the
     // coltan column reads "4kg", "8kg", "65kg", "24". Letting that one bare 24
     // disagree turned a month of 221kg of coltan into "12 entries", which is
-    // the one thing the Director cannot act on. A bucket whose rows genuinely
-    // disagree, or do not count at all, is targeted in entries instead.
-    const units = new Set(parsed.map((quantity) => quantity && quantity.unit).filter(Boolean));
-    const countable = parsed.every((quantity) => quantity) && units.size === 1;
-    const unit = countable ? [...units][0] : 'entries';
-    const target = countable ? parsed.reduce((sum, quantity) => sum + quantity.value, 0) : objective.days.length;
+    // the one thing the Director cannot act on.
+    //
+    // A row that states NO figure at all used to do the same damage, because
+    // the whole bucket had to parse: September's "Coltan transport and
+    // delivery" reads "60kgs Delivery", "66kgs", "20kgs", "51.7kgs", "52kgs"
+    // and then one row with nothing in the quantity column, and that one row
+    // turned 249.7kg of coltan moved into "6 entries". So the unit now stands
+    // on the rows that state one, as long as they are at least two thirds of
+    // them: a silent row is a row nobody wrote a figure on, not a
+    // contradiction of the five that agree.
+    //
+    // Two thirds and not half, which was tried first and is too generous. At
+    // half, two rows reading "1Tech,1Carp&1Helper" out of four made a month of
+    // roof renovation a target of "2 tech", and one row reading "2bottles" out
+    // of two made "Meals and drinks" a target of "2 bottles". A unit has to be
+    // what the work is actually measured in, and a bare majority of a short
+    // column is not evidence of that.
+    //
+    // Below that, the rows are not describing one countable thing (August's
+    // shopping reads "Posho(25kg),Torch,Rice(2kg)&2 Big fant"), and the
+    // objective gets NO TARGET: counting its rows into "N times" (or "N
+    // entries", as the first import did) made up a commitment the workbook
+    // never states. Such an objective has no percentage ("not counted"), its
+    // days carry no quantity, and the month completes on the objectives that
+    // do carry a measured quantity -- a month of none never completes by itself.
+    const stated = parsed.filter(Boolean);
+    const units = new Set(stated.map((quantity) => quantity.unit).filter(Boolean));
+    const countable = units.size === 1 && stated.length * 3 >= parsed.length * 2;
+    const unit = countable ? [...units][0] : '';
+    const target = countable ? stated.reduce((sum, quantity) => sum + quantity.value, 0) : null;
     objectives.push({
       title: objective.title,
       supportsOperation: objective.supports,
-      targetQuantity: Math.round(target * 100) / 100,
+      targetQuantity: target === null ? null : Math.round(target * 100) / 100,
       targetUnit: unit,
       days: objective.days.map((day) => ({
         date: day.date,
-        quantityDone: countable ? day.parsed.value : 1,
+        // Null where the row stated no figure: it still carries its cost, its
+        // note and its day, and contributes nothing to a target it never
+        // claimed. The server stores that as 0 and compare.mjs reads both the
+        // same way, so a re-run cannot post the day twice.
+        quantityDone: countable ? (day.parsed ? day.parsed.value : null) : null,
         cost: day.usd,
         // The row as it was written, so the day keeps the words, the place, the
         // headcount and the figure in the currency it was actually paid in.
-        notes: [
-          [day.description, day.location].filter(Boolean).join(' @ '),
-          day.quantityText ? `Quantity: ${day.quantityText}` : '',
-          day.source,
-          `[${workbookPath.split(/[\\/]/).pop()} / ${day.sheet} row ${day.n}]`
-        ].filter(Boolean).join(' | ').slice(0, 4000)
+        // Built by shared/workbookNote.js, which compare.mjs reads back for the
+        // sheet and row. The source file is named as given on the command line.
+        // The activity column is carried from here on; days imported before it
+        // was stay as they are, because a re-run matches a recorded day on its
+        // objective, date, quantity and cost and never on its note.
+        notes: formatWorkbookNote({
+          activity: day.activity,
+          description: rangeNote.has(`${day.sheet}#${day.n}`)
+            ? `${day.description} (dates ${rangeNote.get(`${day.sheet}#${day.n}`)}, recorded on the first day)`
+            : day.description,
+          location: day.location,
+          quantityText: day.quantityText,
+          source: day.source,
+          file: workbookPath.split(/[\/]/).pop(),
+          sheet: day.sheet,
+          row: day.n
+        })
       })).sort((a, b) => a.date.localeCompare(b.date))
     });
   }
@@ -354,21 +389,39 @@ for (const plan of [...plans.values()].sort((a, b) => a.operation.localeCompare(
   // THE MONTH'S APPROVED BUDGET IS WHAT THE MONTH COST. Summed from the same
   // rounded figures the days carry, so the budget is consumed exactly: a spend
   // of precisely the remaining budget is allowed, one cent over is refused.
-  const approvedBudget = Math.round(objectives.reduce((sum, objective) => sum + spentOn(objective), 0) * 100) / 100;
+  // Rows held for review (date ranges) are part of what the month used, so
+  // they are in its budget; until they are decided, that is what remains.
+  const heldHere = held.filter((h) => h.operation === plan.operation && h.month === plan.month);
+  const heldMoney = heldHere.reduce((sum, h) => sum + h.usd, 0);
+  const approvedBudget = Math.round((objectives.reduce((sum, objective) => sum + spentOn(objective), 0) + heldMoney) * 100) / 100;
   const dayCount = objectives.reduce((sum, objective) => sum + objective.days.length, 0);
   out.push({
     operation: plan.operation,
     month: plan.month,
     approvedBudget,
+    heldForReview: heldHere,
     objectives,
     notes: [
       `Recorded from the Rubaya & Gisuma workbook (${[...plan.sheets].join('; ')}): ${dayCount} days, $${approvedBudget.toFixed(2)}.`,
-      `Figures given only in local currency were converted at the workbook's own implied rates, 1 USD = ${rate.frw.toFixed(1)} FRW and ${rate.fco.toFixed(1)} FCO; each day keeps its original figure.`,
-      plan.operation === 'mining' ? DELIVERY_NOTES[plan.month] || '' : ''
+      `Figures given only in local currency were converted at 1 USD = ${rateText(rate.frw)} FRW and ${rateText(rate.fco)} FCO (${given === 2 ? 'the rates approved for this import' : 'the rates the workbook implies'}); each day keeps its original figure.`,
+      // The Director's decisions of 24 October 2026, stated on the plan itself.
+      'Targets are the quantities the workbook records as done -- a historical record, not necessarily an originally approved target; an objective whose rows state no measured quantity has no target.',
+      'Where a row gave both FRW and FCO and no USD, the FRW figure was used.',
+      heldHere.length ? `Held for review, not yet recorded as days (dated with a range of days): ${heldHere.map((h) => `${h.sheet} row ${h.n} "${h.dateText}" ${h.usd.toFixed(2)}`).join('; ')}.` : '',
+      DELIVERY_NOTES.get(`${plan.operation}/${plan.month}`) || ''
     ].filter(Boolean).join(' ').slice(0, 2000)
   });
 }
 
+// --exclude=mining/2026-08,mining/2026-09: months left out of the file
+// entirely, so no run built from it can create, fill in or touch them --
+// whatever a comparison with the deployment finds.
+const excluded = new Set((process.argv.find((a) => a.startsWith('--exclude='))?.slice('--exclude='.length) || '').split(',').filter(Boolean));
+for (const plan of out.filter((p) => excluded.has(`${p.operation}/${p.month}`))) {
+  console.log(`EXCLUDED from this file: ${plan.operation}/${plan.month} ($${plan.approvedBudget.toFixed(2)}, ${plan.objectives.reduce((s, o) => s + o.days.length, 0)} days) -- nothing in it can be written`);
+}
+for (const key of excluded) if (!out.some((p) => `${p.operation}/${p.month}` === key)) console.log(`--exclude names ${key}, which is not in this workbook`);
+out.splice(0, out.length, ...out.filter((p) => !excluded.has(`${p.operation}/${p.month}`)));
 writeFileSync(outPath, JSON.stringify(out, null, 1));
 
 let totalDays = 0;
@@ -380,12 +433,21 @@ for (const plan of out) {
   console.log(`\n${plan.operation.toUpperCase()} / ${plan.month}   budget $${plan.approvedBudget.toFixed(2)}   ${days} days   ${plan.objectives.length} objectives`);
   for (const objective of plan.objectives) {
     const spent = objective.days.reduce((sum, day) => sum + day.cost, 0);
-    console.log(`   - ${objective.title.padEnd(38)}${String(objective.targetQuantity).padStart(8)} ${objective.targetUnit.padEnd(10)}${String(objective.days.length).padStart(3)}d  $${spent.toFixed(2).padStart(10)}${objective.supportsOperation ? `  [supports ${objective.supportsOperation}]` : ''}`);
+    console.log(`   - ${objective.title.padEnd(38)}${String(objective.targetQuantity ?? 'no target').padStart(9)} ${objective.targetUnit.padEnd(10)}${String(objective.days.length).padStart(3)}d  $${spent.toFixed(2).padStart(10)}${objective.supportsOperation ? `  [supports ${objective.supportsOperation}]` : ''}`);
   }
 }
 console.log(`\n${out.length} monthly plans, ${totalDays} days, $${totalMoney.toFixed(2)} -> ${outPath}`);
+console.log(`${held.length} rows HELD FOR REVIEW (a range of days, not one day) -- in the month's budget, not recorded:`);
+for (const h of held) console.log(`   ${h.sheet} r${h.n}: "${h.dateText}" -> ${h.operation}/${h.month} ${h.usd.toFixed(2)} -- "${h.label}"`);
 console.log(`${skipped.length} rows set aside:`);
 for (const row of skipped) console.log(`   ${row.sheet} r${row.n}: ${row.reason}${row.label ? ` -- "${row.label}"` : ''}`);
+// The rows set aside as totals/summaries, again, with their money: check each
+// one is arithmetic and not a real cost that happens to say "total".
+const totalsSetAside = summaryReport(totals);
+console.log(`${totalsSetAside.count} of those were set aside as totals/summaries (USD column $${totalsSetAside.usd.toFixed(2)}) -- check none is a real cost:`);
+for (const line of totalsSetAside.lines) console.log(line);
+for (const key of DELIVERY_NOTES.keys()) if (!out.some((p) => `${p.operation}/${p.month}` === key)) console.log(`--delivery-notes names ${key}, which is not in this file -- not used`);
+if (DELIVERY_NOTES.size) console.log(`delivery notes from ${deliveryNotesPath}: ${[...DELIVERY_NOTES.keys()].filter((key) => out.some((p) => `${p.operation}/${p.month}` === key)).join(', ') || 'none used'}`);
 // A month cannot carry more than MAX_OBJECTIVES (40) in monthlyPlans.js.
 for (const plan of out) {
   if (plan.objectives.length > 40) console.log(`OVER THE 40-OBJECTIVE LIMIT: ${plan.operation}/${plan.month}`);
