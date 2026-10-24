@@ -25,11 +25,12 @@ import express from 'express';
 import multer from 'multer';
 import { pool, safeRollback } from '../db/database.js';
 import { asyncRoute, isValidDate, parseId } from '../lib/http.js';
-import { notify, notifyDirectors } from '../lib/notifications.js';
+import { notify, notifyDirectors, notifyMany } from '../lib/notifications.js';
 import { readFile, saveFile, deleteFile, storedFileName, MAX_EVIDENCE_BYTES } from '../lib/storage.js';
 import {
   BOUTIQUE_FOLDER, BoutiqueError, SUPPLIER_BALANCE_SQL, amount, audit, boutiqueAccess, canManage, canSell, financeFigures,
-  id as parseRecordId, mapAudit, moveStock, oneOf, requireDecide, requireManage, requireNotCashier, requireSell, sessionFigures, text, wholeNumber
+  id as parseRecordId, lowStockRecipients, mapAudit, moveStock, oneOf, requireDecide, requireManage, requireNotCashier, requireSell,
+  sessionFigures, text, wholeNumber
 } from '../lib/boutique.js';
 import {
   ADJUSTMENT_KINDS, BOUTIQUE_PAYMENT_METHODS, CASH_MOVEMENT_KINDS, EXCHANGE_CREDIT, EXPENSE_CATEGORIES, PRODUCT_TYPES,
@@ -64,6 +65,13 @@ function todayInShop() {
   } catch {
     return new Date().toISOString().slice(0, 10);
   }
+}
+// A timestamp column read as the shop's calendar day, for the filters that
+// ask "which day was this?" of a till closing or a stock movement. The zone
+// name comes from the environment, never from a request, and is quoted.
+const SHOP_TIMEZONE_SQL = `'${SHOP_TIMEZONE.replace(/[^A-Za-z0-9_+\-/]/g, '')}'`;
+function shopDay(column) {
+  return `(${column} AT TIME ZONE ${SHOP_TIMEZONE_SQL})::date`;
 }
 function dateOr(value, fallback, label) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -167,7 +175,7 @@ function mapSale(row) {
     voidedBy: row.voided_by,
     voidedAt: row.voided_at,
     soldAt: row.sold_at,
-    soldOn: typeof row.sold_on === 'string' ? row.sold_on : row.sold_on?.toISOString?.().slice(0, 10),
+    soldOn: row.sold_on instanceof Date ? isoDay(row.sold_on) : row.sold_on,
     itemCount: row.item_count !== undefined ? Number(row.item_count) : undefined,
     items: row.items ? row.items.map(mapSaleItem) : undefined,
     payments: row.payments ? row.payments.map((p) => ({ id: p.id, method: p.method, amount: money(p.amount), reference: p.reference || '' })) : undefined,
@@ -333,10 +341,21 @@ function mapMovement(row) {
 }
 
 // Dates come back from pg as Date objects for DATE columns unless told
-// otherwise; the API answers them as 'YYYY-MM-DD' so nothing shifts a day in
-// the browser's timezone.
+// otherwise: a DATE of 2026-10-22 arrives as local midnight on that day. The
+// API answers them as 'YYYY-MM-DD' read from the LOCAL parts -- toISOString
+// would convert that midnight to UTC and, on any server east of Greenwich,
+// print the day before (every sale showed 21 Oct on the 22nd).
+export function isoDay(date) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
 function plainDates(value) {
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  // A DATE column arrives as local midnight; a timestamp keeps its time, and
+  // is sent whole so the trail can show the hour.
+  if (value instanceof Date) {
+    const midnight = value.getHours() === 0 && value.getMinutes() === 0 && value.getSeconds() === 0 && value.getMilliseconds() === 0;
+    return midnight ? isoDay(value) : value.toISOString();
+  }
   if (Array.isArray(value)) return value.map(plainDates);
   if (value && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, plainDates(entry)]));
@@ -387,7 +406,8 @@ router.get('/overview', asyncRoute(async (req, res) => {
     pool.query(`SELECT COUNT(*)::int AS count, COALESCE(SUM(total), 0) AS total FROM boutique_sales WHERE status <> 'voided' AND sold_on = $1`, [today]),
     pool.query(`SELECT COUNT(*)::int AS open FROM boutique_cash_sessions WHERE status = 'open'`),
     pool.query(`SELECT (SELECT COUNT(*) FROM boutique_stock_adjustments WHERE status = 'pending')::int AS adjustments,
-                       (SELECT COUNT(*) FROM boutique_sales WHERE status = 'void_requested')::int AS voids`),
+                       (SELECT COUNT(*) FROM boutique_sales WHERE status = 'void_requested')::int AS voids,
+                       (SELECT COUNT(*) FROM boutique_submissions WHERE status = 'submitted')::int AS submissions`),
     pool.query(`SELECT COALESCE(SUM(owed), 0) AS total FROM (${SUPPLIER_BALANCE_SQL}) b WHERE owed > 0`),
     pool.query(`SELECT COUNT(*)::int AS count FROM boutique_variants WHERE status = 'active' AND stock_quantity <= reorder_level`)
   ]);
@@ -408,9 +428,10 @@ router.get('/overview', asyncRoute(async (req, res) => {
     todaySales: { count: todaySales.rows[0].count, total: money(todaySales.rows[0].total) },
     openSessions: sessions.rows[0].open,
     mySessionId: mySession,
-    pendingApprovals: cashier ? 0 : approvals.rows[0].adjustments + approvals.rows[0].voids,
+    pendingApprovals: cashier ? 0 : approvals.rows[0].adjustments + approvals.rows[0].voids + approvals.rows[0].submissions,
     pendingAdjustments: cashier ? 0 : approvals.rows[0].adjustments,
     pendingVoids: cashier ? 0 : approvals.rows[0].voids,
+    pendingSubmissions: cashier ? 0 : approvals.rows[0].submissions,
     supplierBalance: cashier ? null : money(owed.rows[0].total)
   });
 }));
@@ -784,12 +805,22 @@ async function writeSale(client, { body, items, totals, payments, actor, session
     // variant row; two sales that each wrote their line first and then asked
     // for the exclusive lock in moveStock deadlocked on each other, and one
     // of them answered 500 (audit finding M5).
-    await moveStock(client, { variantId: item.variantId, quantity: -item.quantity, kind: 'sale', referenceType: 'sale', referenceId: saleId, note: number, actor });
+    const moved = await moveStock(client, { variantId: item.variantId, quantity: -item.quantity, kind: 'sale', referenceType: 'sale', referenceId: saleId, note: number, actor });
     await client.query(
       `INSERT INTO boutique_sale_items (sale_id, variant_id, product_name, sku, size, color, quantity, unit_price, unit_cost, discount, line_total)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [saleId, item.variantId, item.productName, item.sku, item.size, item.color, item.quantity, item.unitPrice, item.unitCost, item.discount, item.lineTotal]
     );
+    // The shelf just ran low: the Director and the Boutique Manager are told
+    // directly, in the same transaction as the sale that did it.
+    if (moved.ranLow) {
+      await notifyMany(client, await lowStockRecipients(client), {
+        kind: 'boutique_low_stock',
+        params: { title: `${item.productName} (${item.sku}${item.size || item.color ? ` ${[item.size, item.color].filter(Boolean).join('/')}` : ''})`, count: moved.after },
+        link: '#/boutique/stock',
+        actor
+      });
+    }
   }
   for (const payment of payments) {
     await client.query('INSERT INTO boutique_sale_payments (sale_id, method, amount, reference) VALUES ($1, $2, $3, $4)',
@@ -1055,8 +1086,8 @@ router.get('/stock/movements', asyncRoute(async (req, res) => {
   const filters = [];
   if (req.query.variantId) { values.push(parseRecordId(req.query.variantId, 'Variant')); filters.push(`m.variant_id = $${values.length}`); }
   if (req.query.kind) { values.push(req.query.kind); filters.push(`m.kind = $${values.length}`); }
-  if (req.query.from) { values.push(dateOr(req.query.from, null, 'From')); filters.push(`m.created_at >= $${values.length}::date`); }
-  if (req.query.to) { values.push(dateOr(req.query.to, null, 'To')); filters.push(`m.created_at < ($${values.length}::date + 1)`); }
+  if (req.query.from) { values.push(dateOr(req.query.from, null, 'From')); filters.push(`${shopDay('m.created_at')} >= $${values.length}`); }
+  if (req.query.to) { values.push(dateOr(req.query.to, null, 'To')); filters.push(`${shopDay('m.created_at')} <= $${values.length}`); }
   const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
   const result = await pool.query(
@@ -1414,8 +1445,8 @@ router.get('/cash/sessions', asyncRoute(async (req, res) => {
   const filters = [];
   if (req.query.status && ['open', 'closed'].includes(req.query.status)) { values.push(req.query.status); filters.push(`c.status = $${values.length}`); }
   if (req.boutique === 'cashier') { values.push(req.user.id); filters.push(`c.opened_by = $${values.length}`); }
-  if (req.query.from) { values.push(dateOr(req.query.from, null, 'From')); filters.push(`c.opened_at >= $${values.length}::date`); }
-  if (req.query.to) { values.push(dateOr(req.query.to, null, 'To')); filters.push(`c.opened_at < ($${values.length}::date + 1)`); }
+  if (req.query.from) { values.push(dateOr(req.query.from, null, 'From')); filters.push(`${shopDay('c.opened_at')} >= $${values.length}`); }
+  if (req.query.to) { values.push(dateOr(req.query.to, null, 'To')); filters.push(`${shopDay('c.opened_at')} <= $${values.length}`); }
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
   const result = await pool.query(`${SESSION_SQL} ${where} ORDER BY c.opened_at DESC LIMIT 200`, values);
   send(res, result.rows.map((row) => mapSession(row)));
@@ -1559,14 +1590,17 @@ router.get('/finance', asyncRoute(async (req, res) => {
   send(res, { ...(await financeFigures(pool, period)), period });
 }));
 
-router.get('/reports', asyncRoute(async (req, res) => {
-  if (req.boutique === 'cashier') throw new BoutiqueError(403, 'Reports are the manager’s and the Director’s.');
-  const period = resolvePeriod(req.query);
+// The period report, as one object: what the Reports tab shows, and what the
+// Boutique Manager sends to the Director frozen in a submission.
+async function buildReport(period) {
   const range = [period.start, period.end];
   const [finance, byDay, topProducts, sizes, colors, types, lowStock, byType, ordersByStatus, expensesByCategory, returns, cashiers, sessions] = await Promise.all([
     financeFigures(pool, period),
-    pool.query(`SELECT sold_on AS day, COUNT(*)::int AS sales, COALESCE(SUM(total), 0) AS total, COALESCE(SUM(discount), 0) AS discounts
-                  FROM boutique_sales WHERE status <> 'voided' AND sold_on BETWEEN $1 AND $2 GROUP BY sold_on ORDER BY sold_on`, range),
+    // Discounts per day are the sale-level ones plus the line ones, the same
+    // sum the profit tile shows for the whole period.
+    pool.query(`SELECT s.sold_on AS day, COUNT(*)::int AS sales, COALESCE(SUM(s.total), 0) AS total,
+                       COALESCE(SUM(s.discount), 0) + COALESCE(SUM((SELECT SUM(i.discount) FROM boutique_sale_items i WHERE i.sale_id = s.id)), 0) AS discounts
+                  FROM boutique_sales s WHERE s.status <> 'voided' AND s.sold_on BETWEEN $1 AND $2 GROUP BY s.sold_on ORDER BY s.sold_on`, range),
     pool.query(`SELECT i.product_name, i.sku, i.size, i.color, SUM(i.quantity)::int AS pieces, SUM(i.line_total) AS revenue, SUM(i.quantity * i.unit_cost) AS cost
                   FROM boutique_sale_items i JOIN boutique_sales s ON s.id = i.sale_id WHERE s.status <> 'voided' AND s.sold_on BETWEEN $1 AND $2
                  GROUP BY i.product_name, i.sku, i.size, i.color ORDER BY pieces DESC, revenue DESC LIMIT 20`, range),
@@ -1591,9 +1625,11 @@ router.get('/reports', asyncRoute(async (req, res) => {
                        (SELECT COUNT(*) FROM boutique_sales x WHERE x.cashier_id = u.id AND x.status = 'voided' AND x.sold_on BETWEEN $1 AND $2)::int AS voided
                   FROM boutique_sales s JOIN users u ON u.id = s.cashier_id
                  WHERE s.status <> 'voided' AND s.sold_on BETWEEN $1 AND $2 GROUP BY u.id, u.name ORDER BY total DESC`, range),
+    // A till belongs to the shop's day it was closed on, not the database's
+    // UTC day: closed at 00:30 in Kigali is still that day's till.
     pool.query(`SELECT COUNT(*)::int AS closed, COALESCE(SUM(expected_cash), 0) AS expected_cash, COALESCE(SUM(counted_cash), 0) AS counted_cash,
                        COALESCE(SUM(cash_variance), 0) AS cash_variance, COALESCE(json_agg(json_build_object('expected', expected_by_method, 'counted', counted_by_method)), '[]'::json) AS methods
-                  FROM boutique_cash_sessions WHERE status = 'closed' AND closed_at >= $1::date AND closed_at < ($2::date + 1)`, range)
+                  FROM boutique_cash_sessions WHERE status = 'closed' AND ${shopDay('closed_at')} BETWEEN $1 AND $2`, range)
   ]);
 
   // Payment reconciliation: what the sales say was taken by each method
@@ -1611,7 +1647,7 @@ router.get('/reports', asyncRoute(async (req, res) => {
     return { ...row, tillExpected: fromMinor(expected), tillCounted: counted === null ? null : fromMinor(counted), tillVariance: counted === null ? null : fromMinor(counted - expected) };
   });
 
-  send(res, {
+  return {
     period,
     finance,
     salesByDay: byDay.rows.map((r) => ({ day: r.day, sales: r.sales, total: money(r.total), discounts: money(r.discounts) })),
@@ -1625,7 +1661,126 @@ router.get('/reports', asyncRoute(async (req, res) => {
     returns: returns.rows.map(mapReturn),
     paymentReconciliation: { closedSessions: closed.closed, cashVariance: money(closed.cash_variance), methods: reconciliation },
     cashierPerformance: cashiers.rows.map((r) => ({ cashierId: r.id, name: r.name, sales: r.sales, pieces: r.pieces, total: money(r.total), discounts: money(r.discounts), average: r.sales ? fromMinor(Math.round(toMinor(r.total) / r.sales)) : 0, returns: r.returns, voided: r.voided }))
+  };
+}
+
+router.get('/reports', asyncRoute(async (req, res) => {
+  if (req.boutique === 'cashier') throw new BoutiqueError(403, 'Reports are the manager’s and the Director’s.');
+  send(res, await buildReport(resolvePeriod(req.query)));
+}));
+
+// =====================================================================================
+// 7b. The Boutique Manager's line to the Director
+// =====================================================================================
+//
+// The Boutique Manager reports DIRECTLY to the Director (Super Admin). A
+// period report is sent with its figures frozen as they stood; an incident is
+// sent as words. Every active Director is told at once; nobody else is in the
+// chain. The Director accepts or returns it with a note, the requester is
+// told, and the decision -- who, when, what -- stays on the row and in the
+// trail. Nothing here is approved on anybody's behalf.
+
+const SUBMISSION_SQL = `
+  SELECT s.*, u.name AS submitted_by_name, d.name AS decided_by_name
+    FROM boutique_submissions s LEFT JOIN users u ON u.id = s.submitted_by LEFT JOIN users d ON d.id = s.decided_by`;
+
+function mapSubmission(row, { withSnapshot = false } = {}) {
+  return {
+    id: row.id,
+    kind: row.kind,
+    title: row.title,
+    period: row.period,
+    periodStart: row.period_start,
+    periodEnd: row.period_end,
+    note: row.note || '',
+    status: row.status,
+    submittedBy: row.submitted_by,
+    submittedByName: row.submitted_by_name || '',
+    submittedAt: row.submitted_at,
+    decidedBy: row.decided_by,
+    decidedByName: row.decided_by_name || '',
+    decidedAt: row.decided_at,
+    decisionNote: row.decision_note || '',
+    snapshot: withSnapshot ? (row.snapshot || {}) : undefined
+  };
+}
+
+router.get('/submissions', asyncRoute(async (req, res) => {
+  requireNotCashier(req);
+  const values = [];
+  const filters = [];
+  if (req.query.status && ['submitted', 'accepted', 'returned'].includes(req.query.status)) { values.push(req.query.status); filters.push(`s.status = $${values.length}`); }
+  if (req.query.kind && ['report', 'incident'].includes(req.query.kind)) { values.push(req.query.kind); filters.push(`s.kind = $${values.length}`); }
+  const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+  const result = await pool.query(`${SUBMISSION_SQL} ${where} ORDER BY s.submitted_at DESC LIMIT 200`, values);
+  send(res, result.rows.map((row) => mapSubmission(row)));
+}));
+
+router.get('/submissions/:id', asyncRoute(async (req, res) => {
+  requireNotCashier(req);
+  const result = await pool.query(`${SUBMISSION_SQL} WHERE s.id = $1`, [parseRecordId(req.params.id, 'Submission')]);
+  if (!result.rowCount) throw new BoutiqueError(404, 'Submission not found.');
+  send(res, mapSubmission(result.rows[0], { withSnapshot: true }));
+}));
+
+// A period report, sent up with its figures frozen.
+router.post('/submissions/report', asyncRoute(async (req, res) => {
+  requireManage(req);
+  const period = resolvePeriod(req.body || {});
+  const note = text(req.body?.note, 4000);
+  const title = text(req.body?.title, 200) || `${period.period} report ${period.start}${period.end !== period.start ? ` to ${period.end}` : ''}`;
+  const created = await transaction(async (client) => {
+    const snapshot = await buildReport(period);
+    const inserted = await client.query(
+      `INSERT INTO boutique_submissions (kind, title, period, period_start, period_end, note, snapshot, submitted_by)
+       VALUES ('report', $1, $2, $3, $4, $5, $6::jsonb, $7) RETURNING id`,
+      [title, period.period, period.start, period.end, note, JSON.stringify(snapshot), req.user.id]
+    );
+    const id = inserted.rows[0].id;
+    await audit(client, { entityType: 'submission', entityId: id, action: 'Report sent to the Director', details: { title, period: period.period, start: period.start, end: period.end, netSales: snapshot.finance.netSales, netProfit: snapshot.finance.netProfit }, actor: req.user });
+    await notifyDirectors(client, { kind: 'boutique_report_submitted', params: { title, reason: note.slice(0, 200) }, link: `#/boutique/approvals?submission=${id}`, actor: req.user });
+    return (await client.query(`${SUBMISSION_SQL} WHERE s.id = $1`, [id])).rows[0];
   });
+  send(res, mapSubmission(created, { withSnapshot: true }), 201);
+}));
+
+// An incident or issue that needs the Director's intervention.
+router.post('/submissions/incident', asyncRoute(async (req, res) => {
+  requireManage(req);
+  const title = text(req.body?.title, 200, { required: true, label: 'A title' });
+  const note = text(req.body?.note, 4000, { required: true, label: 'What happened' });
+  if (note.length < 10) throw new BoutiqueError(400, 'Say what happened, in at least 10 characters.');
+  const created = await transaction(async (client) => {
+    const inserted = await client.query(
+      `INSERT INTO boutique_submissions (kind, title, note, submitted_by) VALUES ('incident', $1, $2, $3) RETURNING id`,
+      [title, note, req.user.id]
+    );
+    const id = inserted.rows[0].id;
+    await audit(client, { entityType: 'submission', entityId: id, action: 'Issue raised to the Director', details: { title }, actor: req.user });
+    await notifyDirectors(client, { kind: 'boutique_issue_raised', params: { title, reason: note.slice(0, 200) }, link: `#/boutique/approvals?submission=${id}`, actor: req.user });
+    return (await client.query(`${SUBMISSION_SQL} WHERE s.id = $1`, [id])).rows[0];
+  });
+  send(res, mapSubmission(created), 201);
+}));
+
+// The Director's answer: accepted, or returned with what to do about it.
+router.post('/submissions/:id/decision', asyncRoute(async (req, res) => {
+  requireDecide(req);
+  const id = parseRecordId(req.params.id, 'Submission');
+  const decision = oneOf(req.body?.decision, ['accepted', 'returned'], 'Decision');
+  const note = text(req.body?.note, 4000);
+  if (decision === 'returned' && note.length < 10) throw new BoutiqueError(400, 'Say what should be done about it, in at least 10 characters.');
+  const decided = await transaction(async (client) => {
+    const current = await client.query('SELECT * FROM boutique_submissions WHERE id = $1 FOR UPDATE', [id]);
+    if (!current.rowCount) throw new BoutiqueError(404, 'Submission not found.');
+    const row = current.rows[0];
+    if (row.status !== 'submitted') throw new BoutiqueError(409, 'This has already been answered.');
+    await client.query('UPDATE boutique_submissions SET status = $2, decided_by = $3, decided_at = NOW(), decision_note = $4 WHERE id = $1', [id, decision, req.user.id, note]);
+    await audit(client, { entityType: 'submission', entityId: id, action: decision === 'accepted' ? 'Submission accepted' : 'Submission returned', details: { title: row.title, kind: row.kind, note }, actor: req.user });
+    await notify(client, { userId: row.submitted_by, kind: 'boutique_submission_decided', params: { title: row.title, outcome: decision, reason: note }, link: `#/boutique/reports?submission=${id}`, actor: req.user });
+    return (await client.query(`${SUBMISSION_SQL} WHERE s.id = $1`, [id])).rows[0];
+  });
+  send(res, mapSubmission(decided));
 }));
 
 // What waits for the Director: the manager's adjustment requests and void
@@ -1633,11 +1788,12 @@ router.get('/reports', asyncRoute(async (req, res) => {
 // still pending.
 router.get('/approvals', asyncRoute(async (req, res) => {
   if (!canManage(req.boutique) && req.boutique !== 'reader') throw new BoutiqueError(403, 'Approvals are the manager’s and the Director’s.');
-  const [adjustments, voids] = await Promise.all([
+  const [adjustments, voids, submissions] = await Promise.all([
     pool.query(`${ADJUSTMENT_SQL} WHERE a.status = 'pending' ORDER BY a.created_at`),
-    pool.query(`${SALE_SQL} WHERE s.status = 'void_requested' ORDER BY s.sold_at`)
+    pool.query(`${SALE_SQL} WHERE s.status = 'void_requested' ORDER BY s.sold_at`),
+    pool.query(`${SUBMISSION_SQL} WHERE s.status = 'submitted' ORDER BY s.submitted_at`)
   ]);
-  send(res, { adjustments: adjustments.rows.map(mapAdjustment), voids: voids.rows.map(mapSale) });
+  send(res, { adjustments: adjustments.rows.map(mapAdjustment), voids: voids.rows.map(mapSale), submissions: submissions.rows.map((row) => mapSubmission(row)) });
 }));
 
 router.get('/audit', asyncRoute(async (req, res) => {

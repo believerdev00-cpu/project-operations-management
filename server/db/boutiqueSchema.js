@@ -445,7 +445,45 @@ const statements = [
      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
    )`,
   `CREATE INDEX IF NOT EXISTS boutique_audit_entity_idx ON boutique_audit(entity_type, entity_id, created_at DESC)`,
-  `CREATE INDEX IF NOT EXISTS boutique_audit_created_idx ON boutique_audit(created_at DESC)`
+  `CREATE INDEX IF NOT EXISTS boutique_audit_created_idx ON boutique_audit(created_at DESC)`,
+
+  // ---- what the Boutique Manager puts in front of the Director ---------------------
+  //
+  // The Boutique Manager reports directly to the Director (Super Admin): a
+  // period report (sales, stock, purchases, money, expenses, profit) as the
+  // figures stood when it was sent, frozen in `snapshot`, or an incident that
+  // needs the Director's intervention. The Director accepts it or returns it
+  // with a note; who decided, when and what they said stay on the row and in
+  // boutique_audit. Nothing in between: no General Manager, no other manager.
+  `CREATE TABLE IF NOT EXISTS boutique_submissions (
+     id SERIAL PRIMARY KEY,
+     kind VARCHAR(20) NOT NULL,
+     title VARCHAR(200) NOT NULL,
+     period VARCHAR(20),
+     period_start DATE,
+     period_end DATE,
+     note TEXT NOT NULL DEFAULT '',
+     snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+     status VARCHAR(20) NOT NULL DEFAULT 'submitted',
+     submitted_by INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+     submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+     decided_at TIMESTAMPTZ,
+     decision_note TEXT NOT NULL DEFAULT '',
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   )`,
+  ...check('boutique_submissions', 'boutique_submissions_kind_check', `kind IN ('report', 'incident')`),
+  ...check('boutique_submissions', 'boutique_submissions_status_check', `status IN ('submitted', 'accepted', 'returned')`),
+  `CREATE INDEX IF NOT EXISTS boutique_submissions_status_idx ON boutique_submissions(status, submitted_at DESC)`,
+
+  // Every Boutique Manager already on the books reports to the Director from
+  // now on. Only a manager whose own operation is the boutique (not one
+  // covering every operation), and only when the line is not a Director yet.
+  `UPDATE users u SET manager_id = (SELECT id FROM users WHERE role = 'super-admin' AND status = 'active' ORDER BY id LIMIT 1)
+    WHERE u.role = 'manager' AND u.covers_all_sectors = FALSE
+      AND (u.sector = '${RETAIL_OPERATION}' OR EXISTS (SELECT 1 FROM manager_operations mo WHERE mo.manager_id = u.id AND mo.sector = '${RETAIL_OPERATION}'))
+      AND NOT EXISTS (SELECT 1 FROM users boss WHERE boss.id = u.manager_id AND boss.role = 'super-admin')
+      AND EXISTS (SELECT 1 FROM users WHERE role = 'super-admin' AND status = 'active')`
 ];
 
 export async function migrateBoutiqueModule(pool) {

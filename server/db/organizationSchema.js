@@ -43,6 +43,15 @@ export const REPORTS_TO = {
   partner: []
 };
 
+// THE BOUTIQUE MANAGER REPORTS DIRECTLY TO THE DIRECTOR. Project 5's manager
+// (a `manager` whose operation is the boutique) has nobody between them and
+// the Super Admin: not the General Manager, not another project manager. Their
+// line is the Director's account itself, set by the API whenever such an
+// account is created or moved into the boutique, and refused by the trigger
+// below if anything else is written. A cashier still reports to the Boutique
+// Manager, as every team member reports to a manager.
+export const BOUTIQUE_MANAGER_REPORTS_TO = ['super-admin'];
+
 export const TEAM_STATUSES = ['active', 'archived'];
 
 // What the organisation trail records. Translated in the browser as
@@ -52,6 +61,8 @@ export const ORGANIZATION_ACTIONS = [
   'member_added', 'member_removed', 'leader_changed',
   'reporting_changed', 'partner_profile_changed', 'partner_projects_changed'
 ];
+
+import { RETAIL_OPERATION } from '../../shared/businessOperations.js';
 
 const inList = (values) => values.map((value) => `'${value}'`).join(', ');
 
@@ -85,7 +96,14 @@ const statements = [
      SELECT role INTO boss_role FROM users WHERE id = NEW.manager_id;
      allowed := CASE NEW.role
        WHEN 'staff' THEN ARRAY[${inList(REPORTS_TO.staff)}]
-       WHEN 'manager' THEN ARRAY[${inList(REPORTS_TO.manager)}]
+       -- The Boutique Manager (Project 5) reports to the Director and nobody
+       -- else; every other project manager to a manager or the General Manager.
+       WHEN 'manager' THEN CASE
+         WHEN NEW.covers_all_sectors = FALSE AND (NEW.sector = '${RETAIL_OPERATION}'
+              OR EXISTS (SELECT 1 FROM manager_operations mo WHERE mo.manager_id = NEW.id AND mo.sector = '${RETAIL_OPERATION}'))
+           THEN ARRAY[${inList(BOUTIQUE_MANAGER_REPORTS_TO)}]
+         ELSE ARRAY[${inList(REPORTS_TO.manager)}]
+       END
        WHEN 'general-manager' THEN ARRAY[${inList(REPORTS_TO['general-manager'])}]
        ELSE ARRAY[]::text[]
      END;

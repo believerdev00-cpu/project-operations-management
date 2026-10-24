@@ -63,6 +63,13 @@ const startedAt = new Date();
 try {
   section('setup');
   const { token: admin } = await directorSession();
+  // The books are checked as DIFFERENCES from what the day already held, so
+  // the suite also passes on a database where the shop traded today.
+  const today = (await get(admin, '/api/boutique/overview')).body.today;
+  const baseline = (await get(admin, `/api/boutique/finance?start=${today}&end=${today}`)).body;
+  const baselineReport = (await get(admin, `/api/boutique/reports?period=daily&date=${today}`)).body;
+  const delta = (after, before) => Math.round((Number(after) - Number(before)) * 100) / 100;
+  const byMethod = (figures, method) => figures.paymentsByMethod.find((m) => m.method === method);
   const manager = await account('zz-btq-manager', 'ZZ Boutique Manager', 'manager', 'boutique');
   const cashier = await account('zz-btq-cashier', 'ZZ Boutique Cashier', 'staff', 'boutique');
   const general = await account('zz-btq-gm', 'ZZ General Manager', 'general-manager', null);
@@ -296,34 +303,36 @@ try {
   check('  the manager cannot', (await post(manager.token, `/api/boutique/expenses/${expense.body.id}/void`, { reason: 'Trying to void an expense' })).status === 403);
 
   section('9. The books and the reports');
-  const today = (await get(admin, '/api/boutique/overview')).body.today;
   const books = await get(admin, `/api/boutique/finance?start=${today}&end=${today}`);
   check('the books open', books.status === 200, books.body);
+  const f = books.body;
   // Completed sales today: 65000 (split), 12000 (override), 15000 (exchange
   // sale), 35000 (top-up exchange sale), 15000 (kept after a refused void),
   // 15000 (after close). Voided: 15000 ×2.
   const grossSales = 65000 + 12000 + 15000 + 35000 + 15000 + 15000;
-  check(`  gross sales ${grossSales}, voided ones out`, books.body.sales.gross === grossSales, books.body.sales);
+  check(`  gross sales ${grossSales}, voided ones out`, delta(f.sales.gross, baseline.sales.gross) === grossSales, [f.sales, baseline.sales]);
   // Returned value: 15000 + 35000 + 12000 = 62000.
-  check('  returns 62000', books.body.returns.value === 62000, books.body.returns);
-  check('  net sales = gross − returns', books.body.netSales === grossSales - 62000, books.body.netSales);
+  check('  returns 62000', delta(f.returns.value, baseline.returns.value) === 62000, [f.returns, baseline.returns]);
+  check('  net sales = gross − returns', delta(f.netSales, baseline.netSales) === grossSales - 62000, [f.netSales, baseline.netSales]);
   // Cost of sales: sold 2×8000 + 22000 + 8000 + 8000 + 22000 + 8000 + 8000 =
   // 92000, less restocked returns 8000 + 22000 + 8000 = 38000.
-  check('  cost of sales 54000', books.body.costOfSales === 92000 - 38000, books.body.costOfSales);
+  check('  cost of sales 54000', delta(f.costOfSales, baseline.costOfSales) === 92000 - 38000, [f.costOfSales, baseline.costOfSales]);
   check('  gross profit = net sales − cost of sales', books.body.grossProfit === books.body.netSales - books.body.costOfSales);
-  check('  expenses 3000 (the voided 20000 out)', books.body.expenses.total === 3000, books.body.expenses);
-  check('  net profit = gross profit − expenses', books.body.netProfit === books.body.grossProfit - 3000);
-  const cashReceived = books.body.paymentsByMethod.find((m) => m.method === 'Cash');
+  check('  expenses 3000 (the voided 20000 out)', delta(f.expenses.total, baseline.expenses.total) === 3000, [f.expenses, baseline.expenses]);
+  check('  net profit = gross profit − expenses', near(f.netProfit, f.grossProfit - f.expenses.total), [f.netProfit, f.grossProfit, f.expenses.total]);
+  const cashReceived = byMethod(f, 'Cash');
+  const cashBefore = byMethod(baseline, 'Cash');
   // Cash taken on completed sales: 40000 (the split sale); change 5000;
   // refunded in cash 15000 + 20000. Everything else today was mobile money.
-  check('  cash received = taken − change − refunds', cashReceived.taken === 40000 && cashReceived.received === 40000 - 5000 - 35000, cashReceived);
-  const mobileReceived = books.body.paymentsByMethod.find((m) => m.method === 'Mobile Money');
+  check('  cash received = taken − change − refunds', delta(cashReceived.taken, cashBefore.taken) === 40000
+    && delta(cashReceived.received, cashBefore.received) === 40000 - 5000 - 35000, [cashReceived, cashBefore]);
   // 30000 (split sale) + 12000 (override) + 23000 (top-up) + 15000 (kept) + 15000 (after close).
-  check('  mobile money received 95000', mobileReceived.received === 95000, mobileReceived);
+  check('  mobile money received 95000', delta(byMethod(f, 'Mobile Money').received, byMethod(baseline, 'Mobile Money').received) === 95000, byMethod(f, 'Mobile Money'));
   check('  exchange credit is not money received', !books.body.paymentsByMethod.some((m) => m.method === 'Exchange credit'));
-  check('  purchases are beside the books, not in the expenses', books.body.purchases.pieces === 12 && books.body.purchases.value === 6 * 8000 + 4 * 8000 + 2 * 22000, books.body.purchases);
+  check('  purchases are beside the books, not in the expenses', delta(f.purchases.pieces, baseline.purchases.pieces) === 12
+    && delta(f.purchases.value, baseline.purchases.value) === 6 * 8000 + 4 * 8000 + 2 * 22000, [f.purchases, baseline.purchases]);
   check('  inventory value is on the shelf at cost', books.body.inventory.value > 0 && near(books.body.inventory.value, (await pool.query('SELECT SUM(stock_quantity * cost_price) AS v FROM boutique_variants')).rows[0].v));
-  check('  the supplier balance is 24000', books.body.supplierBalance === 24000, books.body.supplierBalance);
+  check('  the supplier balance grew by 24000', delta(f.supplierBalance, baseline.supplierBalance) === 24000, [f.supplierBalance, baseline.supplierBalance]);
   const report = await get(manager.token, `/api/boutique/reports?period=daily&date=${today}`);
   check('the daily report has every section', report.status === 200 && ['salesByDay', 'topProducts', 'sizeDemand', 'colorDemand', 'inventory', 'purchases', 'expensesByCategory', 'returns', 'paymentReconciliation', 'cashierPerformance'].every((k) => report.body[k]), Object.keys(report.body));
   const cashierRow = report.body.cashierPerformance.find((r) => r.cashierId === cashier.id);
@@ -331,7 +340,10 @@ try {
   // closing; the top-up exchange was the manager's.
   check('  the cashier’s performance: 4 completed sales, 2 voided', cashierRow?.sales === 4 && cashierRow.voided === 2, cashierRow);
   const cashRecon = report.body.paymentReconciliation.methods.find((m) => m.method === 'Cash');
-  check('  cash reconciliation: counted 2000 short across the tills', report.body.paymentReconciliation.closedSessions === 2 && cashRecon.tillVariance === -2000 + 3000, report.body.paymentReconciliation);
+  const reconBefore = baselineReport.paymentReconciliation;
+  const cashReconBefore = reconBefore.methods.find((m) => m.method === 'Cash');
+  check('  cash reconciliation: two tills closed, 2000 short and 3000 over', report.body.paymentReconciliation.closedSessions - reconBefore.closedSessions === 2
+    && delta(cashRecon.tillVariance, cashReconBefore.tillVariance || 0) === -2000 + 3000, [report.body.paymentReconciliation, reconBefore]);
   check('  size demand names M', report.body.sizeDemand.some((s) => s.size === 'M'));
   check('a cashier cannot read the books', (await get(cashier.token, '/api/boutique/finance')).status === 403);
   check('the General Manager can', (await get(general.token, `/api/boutique/reports?period=monthly&month=${today.slice(0, 7)}`)).status === 200);
@@ -405,6 +417,77 @@ try {
   check('one sale succeeds, five are refused, none fails', rushStatuses.filter((s) => s === 201).length === 1 && rushStatuses.filter((s) => s === 409).length === 5, rushStatuses);
   const lastShelf = await pool.query('SELECT stock_quantity, (SELECT SUM(quantity) FROM boutique_stock_movements WHERE variant_id = $1)::int AS ledger FROM boutique_variants WHERE id = $1', [last.id]);
   check('  the shelf is at 0 and the ledger agrees', lastShelf.rows[0].stock_quantity === 0 && lastShelf.rows[0].ledger === 0, lastShelf.rows[0]);
+
+  section('12. The Boutique Manager reports directly to the Director');
+  // The line: created through the API, a boutique manager reports to the
+  // Director without anybody choosing it, and cannot be put under the General
+  // Manager or another manager.
+  const directorRow = (await pool.query("SELECT id FROM users WHERE role = 'super-admin' ORDER BY id LIMIT 1")).rows[0];
+  const viaApi = await post(admin, '/api/users', { username: 'zz-btq-manager2', name: 'ZZ Boutique Manager 2', role: 'manager', sector: 'boutique', password: 'temporary-pass-123' });
+  check('a boutique manager created by the Director', viaApi.status === 201, viaApi.body);
+  const line = await pool.query('SELECT manager_id FROM users WHERE id = $1', [viaApi.body.id]);
+  check('  reports to the Director from the start', line.rows[0]?.manager_id === directorRow.id, line.rows[0]);
+  const underGm = await api(admin, `/api/users/${viaApi.body.id}/assignment`, { method: 'PATCH', body: JSON.stringify({ managerId: general.id }) });
+  check('  cannot be put under the General Manager', underGm.status === 400, underGm.body);
+  const underMiner = await api(admin, `/api/users/${viaApi.body.id}/assignment`, { method: 'PATCH', body: JSON.stringify({ managerId: miner.id }) });
+  check('  nor under another project manager', underMiner.status === 400, underMiner.body);
+  const stillDirector = await pool.query('SELECT manager_id FROM users WHERE id = $1', [viaApi.body.id]);
+  check('  and still reports to the Director', stillDirector.rows[0]?.manager_id === directorRow.id);
+  const sqlBypass = await pool.query('UPDATE users SET manager_id = $2 WHERE id = $1', [viaApi.body.id, general.id]).then(() => 'allowed', (e) => e.code);
+  check('  the trigger refuses it even by SQL', sqlBypass === 'P0001', sqlBypass);
+  const minerLine = await api(admin, `/api/users/${miner.id}/assignment`, { method: 'PATCH', body: JSON.stringify({ managerId: general.id }) });
+  check('a Mining manager still reports to the General Manager as before', minerLine.status === 200 && minerLine.body.managerId === general.id, minerLine.body);
+  const chart = await get(admin, '/api/organization');
+  const onChart = (chart.body.people || []).find((p) => p.id === viaApi.body.id);
+  check('the chart shows the boutique manager under the Director', onChart && onChart.reportsToId === directorRow.id, onChart);
+
+  // The report: sent with its figures frozen, straight to every Director.
+  const sent = await post(manager.token, '/api/boutique/submissions/report', { period: 'daily', date: today, note: 'Quiet day, one till short by 2000.' });
+  check('the manager sends today’s report to the Director', sent.status === 201 && sent.body.status === 'submitted' && sent.body.snapshot?.finance, sent.body);
+  const directorBell = (await get(admin, '/api/notifications?limit=10')).body.items || [];
+  const reportNotice = directorBell.find((n) => n.kind === 'boutique_report_submitted');
+  check('  the Director is told directly', Boolean(reportNotice) && reportNotice.link.includes(`submission=${sent.body.id}`), directorBell.map((n) => n.kind));
+  const gmBell = (await get(general.token, '/api/notifications?limit=10')).body.items || [];
+  check('  the General Manager is not in the chain', !gmBell.some((n) => n.kind === 'boutique_report_submitted'), gmBell.map((n) => n.kind));
+  check('  a cashier cannot send one', (await post(cashier.token, '/api/boutique/submissions/report', { period: 'daily' })).status === 403);
+  check('  a Mining manager cannot read them', (await get(miner.token, '/api/boutique/submissions')).status === 403);
+  check('  the General Manager reads them but cannot decide', (await get(general.token, '/api/boutique/submissions')).status === 200
+    && (await post(general.token, `/api/boutique/submissions/${sent.body.id}/decision`, { decision: 'accepted' })).status === 403);
+  check('  nor can the manager decide their own', (await post(manager.token, `/api/boutique/submissions/${sent.body.id}/decision`, { decision: 'accepted' })).status === 403);
+  check('  it is in the Director’s queue', ((await get(admin, '/api/boutique/approvals')).body.submissions || []).some((s) => s.id === sent.body.id));
+  check('  and in the Director’s badge', (await get(admin, '/api/summary')).body.summary.boutiquePending >= 1);
+  const shortReturn = await post(admin, `/api/boutique/submissions/${sent.body.id}/decision`, { decision: 'returned', note: 'why' });
+  check('returning needs a note of 10 characters', shortReturn.status === 400, shortReturn.body);
+  const returned = await post(admin, `/api/boutique/submissions/${sent.body.id}/decision`, { decision: 'returned', note: 'Explain the 2000 shortage on the cashier’s till.' });
+  check('the Director returns it with a note', returned.status === 200 && returned.body.status === 'returned' && returned.body.decidedBy === directorRow.id, returned.body);
+  const managerBell = (await get(manager.token, '/api/notifications?limit=10')).body.items || [];
+  check('  the manager is told, with the note', managerBell.some((n) => n.kind === 'boutique_submission_decided' && n.params?.outcome === 'returned' && n.params?.reason?.includes('2000')), managerBell.map((n) => [n.kind, n.params?.outcome]));
+  check('  it cannot be answered twice', (await post(admin, `/api/boutique/submissions/${sent.body.id}/decision`, { decision: 'accepted' })).status === 409);
+  const trailRow = await pool.query(`SELECT actor_id, details FROM boutique_audit WHERE entity_type = 'submission' AND entity_id = $1 AND action = 'Submission returned'`, [sent.body.id]);
+  check('  the decision, who took it and the note are in the trail', trailRow.rows[0]?.actor_id === directorRow.id && trailRow.rows[0].details.note.includes('2000'), trailRow.rows[0]);
+
+  // An issue, and its acceptance.
+  const issue = await post(manager.token, '/api/boutique/submissions/incident', { title: 'ZZTEST Leaking roof over the shoe rail', note: 'Rain came in overnight; three pairs damaged. Roofer needed.' });
+  check('the manager raises an issue', issue.status === 201 && issue.body.kind === 'incident', issue.body);
+  check('  the Director is told', ((await get(admin, '/api/notifications?limit=10')).body.items || []).some((n) => n.kind === 'boutique_issue_raised'));
+  const accepted = await post(admin, `/api/boutique/submissions/${issue.body.id}/decision`, { decision: 'accepted', note: 'Roofer booked for Monday.' });
+  check('  the Director accepts it', accepted.status === 200 && accepted.body.status === 'accepted', accepted.body);
+  const noIssue = await post(manager.token, '/api/boutique/submissions/incident', { title: 'x', note: 'short' });
+  check('  an issue needs words', noIssue.status === 400);
+
+  // The alert: a sale that takes a shelf down to its reorder level tells the
+  // Director and the manager, once.
+  const watched = (await post(manager.token, `/api/boutique/products/${dress.body.id}/variants`, { sku: 'ZZ-DRESS-XL-GRN', size: 'XL', color: 'Green', costPrice: 8000, sellingPrice: 15000, reorderLevel: 2, openingStock: 4 })).body.variants.find((v) => v.sku === 'ZZ-DRESS-XL-GRN');
+  const sellOne = () => post(cashier.token, '/api/boutique/sales', { items: [{ variantId: watched.id, quantity: 1 }], payments: [{ method: 'Mobile Money', amount: 15000 }] });
+  const lowNotices = async (token) => ((await get(token, '/api/notifications?limit=30')).body.items || []).filter((n) => n.kind === 'boutique_low_stock' && n.params?.title?.includes('ZZ-DRESS-XL-GRN'));
+  await sellOne();
+  check('4 → 3, above the reorder level of 2: no alert', (await lowNotices(admin)).length === 0);
+  await sellOne();
+  check('3 → 2, at the reorder level: the Director is alerted', (await lowNotices(admin)).length === 1, await lowNotices(admin));
+  check('  and the manager', (await lowNotices(manager.token)).length === 1);
+  check('  not the General Manager', (await lowNotices(general.token)).length === 0);
+  await sellOne();
+  check('2 → 1: no second alert', (await lowNotices(admin)).length === 1);
 } catch (error) {
   failed += 1;
   console.log(`  FAIL  unexpected error -- ${error.stack || error.message}`);
@@ -428,7 +511,8 @@ try {
     product: await ids(`SELECT id FROM boutique_products WHERE name LIKE 'ZZTEST %'`),
     variant: await ids(`SELECT id FROM boutique_variants WHERE id IN ${zzVariants}`),
     supplier: await ids(`SELECT id FROM boutique_suppliers WHERE name LIKE 'ZZTEST %'`),
-    purchase: await ids(`SELECT id FROM boutique_purchase_orders WHERE supplier_id IN (SELECT id FROM boutique_suppliers WHERE name LIKE 'ZZTEST %')`)
+    purchase: await ids(`SELECT id FROM boutique_purchase_orders WHERE supplier_id IN (SELECT id FROM boutique_suppliers WHERE name LIKE 'ZZTEST %')`),
+    submission: await ids(`SELECT id FROM boutique_submissions WHERE submitted_by IN ${zz}`)
   };
   for (const [entityType, entityIds] of Object.entries(trail)) {
     if (entityIds.length) await pool.query('DELETE FROM boutique_audit WHERE entity_type = $1 AND entity_id = ANY($2::int[])', [entityType, entityIds]);
@@ -447,6 +531,8 @@ try {
   // written since it started.
   await pool.query(`DELETE FROM boutique_audit WHERE actor_id IN ${zz} OR (entity_type = 'settings' AND created_at >= $1)`, [startedAt]);
   await pool.query(`DELETE FROM notifications WHERE actor_id IN ${zz} OR user_id IN ${zz} OR kind LIKE 'boutique_%'`);
+  await pool.query(`DELETE FROM boutique_submissions WHERE submitted_by IN ${zz}`);
+  await pool.query(`DELETE FROM organization_history WHERE subject_user_id IN ${zz} OR subject_name LIKE 'ZZ %'`);
   await pool.query(`DELETE FROM partner_operations WHERE partner_id IN ${zz}`);
   await pool.query("DELETE FROM users WHERE username LIKE 'zz-btq-%'");
   await pool.end();

@@ -964,7 +964,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       ['movements', t('nav.trips'), 0, 'main', t('nav.shortTrips')],
       // Project 5, the boutique: a workspace of its own, which the Director
       // oversees entirely (every figure, every approval).
-      ['boutique', t('nav.boutique'), 0, 'main', t('nav.boutique')],
+      // The badge is what the Boutique Manager has put in front of the
+      // Director directly: adjustments, voids, reports and issues to answer.
+      ['boutique', t('nav.boutique'), summary.summary?.boutiquePending || 0, 'main', t('nav.boutique')],
       ['reports', t('nav.reports'), 0, 'review'],
       ['projects', t('nav.projects'), 0, 'manage'],
       ['users', t('nav.users'), 0, 'manage'],
@@ -1027,13 +1029,15 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // The bar along the bottom of a phone. Someone who works in Movements &
   // Facilitation gets their trips in it; a team member gets their two pages and
   // no "More" pile behind them.
+  // The boutique's own people get their shop in the bar: it is their job,
+  // not something to look for behind "More".
   const bottomNav = isDirector
     ? ['dashboard', 'approval-queue', 'monthly', 'activities']
     : isGeneral
       ? ['dashboard', 'monthly', 'activities', 'reports']
       : isManager
-        ? ['dashboard', 'monthly']
-        : ['dashboard', 'activities'];
+        ? ['dashboard', 'monthly', ...(worksInBoutique(user) ? ['boutique'] : [])]
+        : ['dashboard', 'activities', ...(worksInBoutique(user) ? ['boutique'] : [])];
   // An address naming a page this account does not have -- a manager following
   // a Director's link to #/users -- lands on the home page instead of a blank page.
   // A manager has no work register, but they do open single records: the work
@@ -2728,7 +2732,10 @@ function ProjectTable({ projects, managers, isDirector, busy, onShowActivities, 
       // A project is managed by someone who works its own operation.
       const managerOptions = managers.filter((manager) => worksIn(manager, project.sector) || manager.id === project.managerId);
       return <tr key={project.id}>
-        <td className="card-title-cell"><strong>{project.name}</strong><small>{sectorName(project.sector)} · {project.location}</small></td>
+        <td className="card-title-cell"><strong>{project.name}</strong><small>{sectorName(project.sector)} · {project.location}</small>
+          {/* Project 5: the door into the boutique sits by the name, where it is
+              seen, rather than in the actions column off to the right. */}
+          {project.workspace === 'boutique' && <div><button className="primary-btn" type="button" onClick={() => onOpenWorkspace(project)}>{t('btq.openBoutique')}</button></div>}</td>
         <td className="card-optional" data-label={t('app.businessOperation')}>{sectorName(project.sector)}</td>
         <td className="card-optional" data-label={t('field.location')}>{project.location}</td>
         <td className="card-optional" data-label={t('field.organizationOwner')}>{project.owner}</td>
@@ -2744,7 +2751,6 @@ function ProjectTable({ projects, managers, isDirector, busy, onShowActivities, 
           {/* Project 5: the boutique opens into its own workspace, and is the
               anchor of everything recorded there, so it cannot be deleted
               (the API refuses too). */}
-          {project.workspace === 'boutique' && <button className="primary-btn" type="button" onClick={() => onOpenWorkspace(project)}>{t('btq.openBoutique')}</button>}
           <button className="text-btn" type="button" onClick={() => onShowActivities(project.id)}>{t('nav.activities')}</button>
           {isDirector && <button className="text-btn" disabled={busy} onClick={() => onEdit(project)} type="button">{t('action.edit')}</button>}
           {isDirector && !project.workspace && <button className="danger-btn" disabled={busy} onClick={() => onDelete(project)} type="button">{t('action.delete')}</button>}

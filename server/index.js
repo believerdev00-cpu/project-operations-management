@@ -429,6 +429,17 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
     scopeValues
   );
 
+  // What the Boutique Manager (Project 5) has put in front of the Director and
+  // nobody else: stock adjustments and voids to decide, reports and issues to
+  // answer. The Director's figure only; it is the Boutique badge in their menu.
+  const boutiqueQueue = isAdmin(req.user)
+    ? (await pool.query(
+      `SELECT (SELECT COUNT(*) FROM boutique_stock_adjustments WHERE status = 'pending')::int
+            + (SELECT COUNT(*) FROM boutique_sales WHERE status = 'void_requested')::int
+            + (SELECT COUNT(*) FROM boutique_submissions WHERE status = 'submitted')::int AS pending`
+    )).rows[0].pending
+    : 0;
+
   // The month at a glance, for the Director's dashboard and the manager's.
   //
   // A plan is ACTIVE from the moment the Director types it (it is created
@@ -555,6 +566,7 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
       registeredUsers,
       // The badge on "What I Need to Approve".
       approvalsAwaitingMe: approvalQueue.rows[0].activities + approvalQueue.rows[0].movements,
+      boutiquePending: boutiqueQueue,
       approvalsAwaitingMeActivities: approvalQueue.rows[0].activities,
       approvalsAwaitingMeMovements: approvalQueue.rows[0].movements,
       activityReviewsPending: reviewQueue.rows[0].activity_reviews_pending,

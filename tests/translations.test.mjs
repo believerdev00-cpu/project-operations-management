@@ -93,7 +93,11 @@ const FAMILIES = {
   // server/db/monthlySchema.js) needs a sentence in every language.
   'notice.kind.': ['plan_assigned', 'plan_changed', 'change_requested', 'report_submitted', 'report_accepted',
     'report_returned', 'work_submitted', 'work_to_check', 'work_approved', 'work_returned', 'partner_comment',
-    'team_added', 'partner_shared', 'boutique_approval_requested', 'boutique_approval_decided'],
+    'team_added', 'partner_shared', 'boutique_approval_requested', 'boutique_approval_decided',
+    'boutique_report_submitted', 'boutique_issue_raised', 'boutique_submission_decided', 'boutique_low_stock'],
+  // The Boutique Manager's submissions to the Director.
+  'btq.subKind.': ['report', 'incident'],
+  'btq.subStatus.': ['submitted', 'accepted', 'returned'],
   // The boutique (shared/boutique.js): every list a screen renders through a
   // template key, so a value added there without its words fails here.
   'btq.tab.': ['overview', 'sell', 'sales', 'products', 'stock', 'suppliers', 'cash', 'expenses', 'books', 'reports', 'approvals', 'history'],
@@ -109,7 +113,7 @@ const FAMILIES = {
   'btq.expenseStatus.': boutique.EXPENSE_STATUSES,
   'btq.itemStatus.': ['active', 'archived'],
   'btq.period.': boutique.REPORT_PERIODS,
-  'btq.outcome.': ['approved', 'refused'],
+  'btq.outcome.': ['approved', 'refused', 'accepted', 'returned'],
   // The organisation (server/db/organizationSchema.js): every trail action.
   'org.action.': ['team_created', 'team_updated', 'team_archived', 'team_restored', 'member_added', 'member_removed',
     'leader_changed', 'reporting_changed', 'partner_profile_changed', 'partner_projects_changed'],

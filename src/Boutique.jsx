@@ -173,6 +173,10 @@ function OverviewTab({ overview, can, go }) {
       {can.sell && <button className="secondary-btn" type="button" onClick={() => go('cash')}>{overview.mySessionId ? t('btq.myTill') : t('btq.openTill')}</button>}
       {can.manage && <button className="secondary-btn" type="button" onClick={() => go('products', { add: '1' })}>{t('btq.addProduct')}</button>}
       {can.manage && <button className="secondary-btn" type="button" onClick={() => go('reports')}>{t('btq.tab.reports')}</button>}
+      {/* The manager's line is the Director: the door to report or raise an
+          issue is on the first screen. The Director's door is the queue. */}
+      {can.role === 'manager' && <button className="secondary-btn" type="button" onClick={() => go('reports')}>{t('btq.toDirector')}</button>}
+      {can.decide && overview.pendingApprovals > 0 && <button className="secondary-btn" type="button" onClick={() => go('approvals')}>{t('btq.fromManager')} · {overview.pendingApprovals}</button>}
     </div>
     <p className="field-hint">{t('btq.overviewHint')}</p>
   </>;
@@ -715,7 +719,9 @@ function StockTab({ fetchJson, onMessage, onError, changed, can }) {
   const [tick, setTick] = useState(0);
   const [stock] = useLoad(fetchJson, `/api/boutique/stock?${low ? 'low=1&' : ''}${search ? `search=${encodeURIComponent(search)}` : ''}`, tick, onError);
   const [movements] = useLoad(fetchJson, '/api/boutique/stock/movements?limit=60', tick, onError);
-  const [adjustments] = useLoad(fetchJson, '/api/boutique/stock/adjustments', tick, onError);
+  // The adjustments queue is the manager's and the Director's; a cashier is
+  // refused it, so the screen does not ask.
+  const [adjustments] = useLoad(fetchJson, can.role === 'cashier' ? null : '/api/boutique/stock/adjustments', tick, onError);
   const [form, setForm] = useState({ variant: null, kind: 'damaged', quantity: '', reason: '' });
   const refresh = () => { setTick((n) => n + 1); changed(); };
   const submit = (e) => {
@@ -1178,11 +1184,11 @@ function FinanceGrid({ f }) {
     </div>
     <p className="field-hint">{t('btq.noDoubleCount')}</p>
     <div className="table-wrap"><table className="card-table">
-      <thead><tr><th>{t('btq.method')}</th><th>{t('btq.taken')}</th><th>{t('btq.change')}</th><th>{t('btq.refunded')}</th><th>{t('btq.received')}</th></tr></thead>
+      <thead><tr><th>{t('btq.method')}</th><th>{t('btq.taken')}</th><th>{t('btq.change')}</th><th>{t('btq.refunded')}</th><th>{t('btq.receivedMoney')}</th></tr></thead>
       <tbody>{f.paymentsByMethod.map((m) => <tr key={m.method}>
         <td className="card-title-cell"><strong>{t(`btq.method.${m.method}`)}</strong></td>
         <td data-label={t('btq.taken')}>{money(m.taken)}</td><td data-label={t('btq.change')}>{money(m.changeGiven)}</td>
-        <td data-label={t('btq.refunded')}>{money(m.refunded)}</td><td data-label={t('btq.received')}>{money(m.received)}</td>
+        <td data-label={t('btq.refunded')}>{money(m.refunded)}</td><td data-label={t('btq.receivedMoney')}>{money(m.received)}</td>
       </tr>)}</tbody>
     </table></div>
   </>;
@@ -1198,7 +1204,107 @@ function BooksTab({ fetchJson, onError }) {
   </Panel>;
 }
 
-function ReportsTab({ fetchJson, onError }) {
+// The Boutique Manager's line to the Director: a report sent with its figures
+// frozen, or an issue raised, and the Director's answers to both. Nobody in
+// between. Shown on the Reports tab to the manager (to send) and to the
+// Director and the General Manager (to read).
+function ToDirectorPanel({ fetchJson, onMessage, onError, changed, can, period, query }) {
+  const { t, language } = useI18n();
+  const [busy, run] = useBusy();
+  const [tick, setTick] = useState(0);
+  const [submissions] = useLoad(fetchJson, '/api/boutique/submissions', tick, onError);
+  const [note, setNote] = useState('');
+  const [title, setTitle] = useState('');
+  const [issue, setIssue] = useState({ title: '', note: '' });
+  const [open, setOpen] = useState(query.get('submission') || '');
+  const refresh = () => { setTick((n) => n + 1); changed(); };
+  const sendReport = () => run(async () => {
+    try {
+      await fetchJson('/api/boutique/submissions/report', { method: 'POST', body: JSON.stringify({ ...periodBody(period), note, title }) });
+      onMessage(t('btq.reportSent'));
+      setNote('');
+      setTitle('');
+      refresh();
+    } catch (error) { onError(error.message); }
+  });
+  const raise = (e) => {
+    e.preventDefault();
+    run(async () => {
+      try {
+        await fetchJson('/api/boutique/submissions/incident', { method: 'POST', body: JSON.stringify(issue) });
+        onMessage(t('btq.issueSent'));
+        setIssue({ title: '', note: '' });
+        refresh();
+      } catch (error) { onError(error.message); }
+    });
+  };
+  return <Panel title={t('btq.toDirector')} subtitle={t('btq.toDirectorBlurb')}>
+    {can.manage && <div className="form-grid">
+      <Field label={t('btq.reportTitle')}><input maxLength="200" value={title} onChange={(e) => setTitle(e.target.value)} /></Field>
+      <Field label={t('btq.reportNote')} wide><textarea rows="2" maxLength="4000" value={note} onChange={(e) => setNote(e.target.value)} /></Field>
+      <div className="form-submit-bar"><button type="button" className="primary-btn" disabled={busy} onClick={sendReport}>{t('btq.sendReport')}</button></div>
+    </div>}
+    {can.manage && <form className="decision-form" onSubmit={raise}>
+      <h3 className="form-section-title">{t('btq.raiseIssue')}</h3>
+      <div className="form-grid">
+        <Field label={t('btq.issueTitle')}><input required maxLength="200" value={issue.title} onChange={(e) => setIssue({ ...issue, title: e.target.value })} /></Field>
+        <Field label={t('btq.issueBody')} wide><textarea required minLength="10" rows="3" maxLength="4000" value={issue.note} onChange={(e) => setIssue({ ...issue, note: e.target.value })} /></Field>
+      </div>
+      <div className="form-submit-bar"><button type="submit" className="secondary-btn" disabled={busy}>{t('btq.raiseIssue')}</button></div>
+    </form>}
+    <h3 className="form-section-title">{t('btq.submissions')}</h3>
+    <SubmissionList submissions={submissions} fetchJson={fetchJson} open={open} setOpen={setOpen} language={language} />
+  </Panel>;
+}
+
+function periodBody(period) {
+  if (period.period === 'daily') return { period: 'daily', date: period.date };
+  if (period.period === 'weekly') return { period: 'weekly', start: period.start };
+  if (period.period === 'monthly') return { period: 'monthly', month: period.month };
+  return { period: 'custom', start: period.start, end: period.end };
+}
+
+const SUBMISSION_TONE = { submitted: 'waiting', accepted: 'done', returned: 'stopped' };
+
+// Each submission as a line; the open one shows its note, the Director's
+// answer and, for a report, the key figures as they were when it was sent.
+function SubmissionList({ submissions, fetchJson, open, setOpen, language, decide, busy }) {
+  const { t } = useI18n();
+  const [detail, setDetail] = useState(null);
+  useEffect(() => {
+    if (!open) { setDetail(null); return; }
+    let cancelled = false;
+    fetchJson(`/api/boutique/submissions/${encodeURIComponent(open)}`).then((row) => { if (!cancelled) setDetail(row); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [open, fetchJson]);
+  if (!submissions) return <div className="compact-loading"><span className="spinner" /></div>;
+  if (!submissions.length) return <Empty>{t('btq.noSubmissions')}</Empty>;
+  return <ul className="decision-list">{submissions.map((s) => <li className="decision-card" key={s.id}>
+    <div className="decision-card-main">
+      <span className="decision-card-kind">{t(`btq.subKind.${s.kind}`)}</span>
+      <strong><button type="button" className="text-btn" onClick={() => setOpen(String(open) === String(s.id) ? '' : String(s.id))}>{s.title}</button> <Badge tone={SUBMISSION_TONE[s.status]}>{t(`btq.subStatus.${s.status}`)}</Badge></strong>
+      <span className="decision-card-meta">{fill(t('btq.sentBy'), { name: s.submittedByName })} · {formatDate(s.submittedAt, language)}{s.decidedByName && ` · ${fill(t('btq.answeredBy'), { name: s.decidedByName })} · ${formatDate(s.decidedAt, language)}`}</span>
+      {String(open) === String(s.id) && <div className="detail-notes">
+        {s.note && <p>{s.note}</p>}
+        {s.decisionNote && <p className="admin-note"><strong>{t('btq.decisionNote')}:</strong> {s.decisionNote}</p>}
+        {detail?.snapshot?.finance && <div className="detail-facts">
+          <Fact label={t('btq.netSales')} value={money(detail.snapshot.finance.netSales)} />
+          <Fact label={t('btq.netProfit')} value={money(detail.snapshot.finance.netProfit)} />
+          <Fact label={t('btq.inventoryValue')} value={money(detail.snapshot.finance.inventory.value)} />
+          <Fact label={t('btq.owedToSuppliers')} value={money(detail.snapshot.finance.supplierBalance)} />
+          <Fact label={t('btq.lowStockCount')} value={detail.snapshot.inventory?.lowStock?.length ?? 0} />
+          <Fact label={t('btq.expensesTotal')} value={money(detail.snapshot.finance.expenses.total)} />
+        </div>}
+      </div>}
+    </div>
+    {decide && s.status === 'submitted' && <div className="decision-card-actions">
+      <button type="button" className="primary-btn" disabled={busy} onClick={() => decide(s, 'accepted')}>{t('btq.accept')}</button>
+      <button type="button" className="danger-btn" disabled={busy} onClick={() => decide(s, 'returned')}>{t('btq.returnWithNote')}</button>
+    </div>}
+  </li>)}</ul>;
+}
+
+function ReportsTab({ fetchJson, onMessage, onError, changed, can, query }) {
   const { t, language } = useI18n();
   const [period, setPeriod] = useState(() => defaultPeriod('daily'));
   const [report] = useLoad(fetchJson, `/api/boutique/reports?${periodQuery(period)}`, 0, onError);
@@ -1208,6 +1314,7 @@ function ReportsTab({ fetchJson, onError }) {
       <PeriodPicker period={period} setPeriod={setPeriod} />
       {report && <p className="field-hint">{formatDate(report.period.start, language)} – {formatDate(report.period.end, language)}</p>}
     </Panel>
+    <ToDirectorPanel fetchJson={fetchJson} onMessage={onMessage} onError={onError} changed={changed} can={can} period={period} query={query} />
     {!report ? <div className="loading-state"><span className="spinner" /></div> : <div className="btq-report">
       <Panel title={t('btq.profit')}><FinanceGrid f={report.finance} /></Panel>
       {section(t('btq.salesByDay'), report.salesByDay, [t('table.date'), t('btq.tab.sales'), t('btq.total'), t('btq.discounts')],
@@ -1240,10 +1347,10 @@ function ReportsTab({ fetchJson, onError }) {
         (r) => <tr key={r.id}><td className="card-title-cell"><strong>{r.number}</strong><small>{r.saleNumber}</small></td><td data-label={t('table.date')}>{formatDate(r.returnedOn, language)}</td><td data-label={t('btq.returnKindLabel')}>{t(`btq.returnKind.${r.kind}`)}</td><td data-label={t('btq.value')}>{money(r.value)}</td><td data-label={t('btq.refund')}>{money(r.refundTotal)}</td><td data-label={t('btq.reason')}>{r.reason}</td></tr>)}
       <Panel title={t('btq.reconciliation')} subtitle={fill(t('btq.closedTills'), { count: report.paymentReconciliation.closedSessions })}>
         <div className="table-wrap"><table className="card-table">
-          <thead><tr><th>{t('btq.method')}</th><th>{t('btq.received')}</th><th>{t('btq.tillExpected')}</th><th>{t('btq.tillCounted')}</th><th>{t('btq.variance')}</th></tr></thead>
+          <thead><tr><th>{t('btq.method')}</th><th>{t('btq.receivedMoney')}</th><th>{t('btq.tillExpected')}</th><th>{t('btq.tillCounted')}</th><th>{t('btq.variance')}</th></tr></thead>
           <tbody>{report.paymentReconciliation.methods.map((m) => <tr key={m.method}>
             <td className="card-title-cell"><strong>{t(`btq.method.${m.method}`)}</strong></td>
-            <td data-label={t('btq.received')}>{money(m.received)}</td><td data-label={t('btq.tillExpected')}>{money(m.tillExpected)}</td>
+            <td data-label={t('btq.receivedMoney')}>{money(m.received)}</td><td data-label={t('btq.tillExpected')}>{money(m.tillExpected)}</td>
             <td data-label={t('btq.tillCounted')}>{m.tillCounted === null ? '—' : money(m.tillCounted)}</td>
             <td data-label={t('btq.variance')}>{m.tillVariance === null ? '—' : <span className={m.tillVariance < 0 ? 'over-budget' : undefined}>{money(m.tillVariance)}</span>}</td>
           </tr>)}</tbody>
@@ -1257,20 +1364,39 @@ function ReportsTab({ fetchJson, onError }) {
 
 // ---- approvals and history ------------------------------------------------------------
 
-function ApprovalsTab({ fetchJson, onMessage, onError, changed, can, go }) {
+function ApprovalsTab({ fetchJson, onMessage, onError, changed, can, go, query }) {
   const { t, language } = useI18n();
   const dialog = useDialog();
   const [busy, run] = useBusy();
   const [tick, setTick] = useState(0);
   const [queue] = useLoad(fetchJson, '/api/boutique/approvals', tick, onError);
+  // ?submission=<id> from the bell opens that one.
+  const [openSubmission, setOpenSubmission] = useState(query.get('submission') || '');
   const refresh = () => { setTick((n) => n + 1); changed(); };
   const decide = (path, approve, done) => run(async () => {
     const note = approve ? '' : await dialog.prompt({ title: t('btq.refuse'), label: t('btq.reason'), required: true, minLength: 10, multiline: true });
     if (note === null) return;
     try { await fetchJson(path, { method: 'POST', body: JSON.stringify({ approve, note }) }); onMessage(done); refresh(); } catch (error) { onError(error.message); }
   });
+  const decideSubmission = (submission, decision) => run(async () => {
+    const note = decision === 'accepted'
+      ? (await dialog.prompt({ title: t('btq.accept'), label: t('btq.decisionNote'), multiline: true })) ?? null
+      : await dialog.prompt({ title: t('btq.returnWithNote'), label: t('btq.decisionNote'), required: true, minLength: 10, multiline: true });
+    if (note === null) return;
+    try {
+      await fetchJson(`/api/boutique/submissions/${submission.id}/decision`, { method: 'POST', body: JSON.stringify({ decision, note }) });
+      onMessage(decision === 'accepted' ? t('btq.accepted') : t('btq.returned'));
+      refresh();
+    } catch (error) { onError(error.message); }
+  });
   if (!queue) return <div className="loading-state"><span className="spinner" /></div>;
   return <>
+    {/* What the Boutique Manager sent straight up: reports and issues. The
+        Director answers here; the manager and the General Manager read. */}
+    <Panel title={t('btq.fromManager')} subtitle={String(queue.submissions.length)}>
+      <SubmissionList submissions={queue.submissions} fetchJson={fetchJson} open={openSubmission} setOpen={setOpenSubmission} language={language}
+        decide={can.decide ? decideSubmission : null} busy={busy} />
+    </Panel>
     <Panel title={t('btq.adjustments')} subtitle={String(queue.adjustments.length)}>
       {queue.adjustments.length ? <ul className="decision-list">{queue.adjustments.map((a) => <li className="decision-card" key={a.id}>
         <div className="decision-card-main">

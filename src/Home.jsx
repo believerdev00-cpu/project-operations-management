@@ -606,8 +606,10 @@ export function noticeSentence(notice, t, language) {
     team: params.team || '',
     project: params.project || '',
     title: params.title || '',
-    // The boutique's decisions: approved or refused, in the reader's words.
-    outcome: params.outcome ? t(`btq.outcome.${params.outcome}`) : ''
+    // The boutique's decisions: approved or refused, accepted or returned, in
+    // the reader's words; and a figure (the pieces left on a shelf).
+    outcome: params.outcome ? t(`btq.outcome.${params.outcome}`) : '',
+    count: params.count ?? ''
   });
 }
 

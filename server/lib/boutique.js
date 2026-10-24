@@ -23,7 +23,7 @@
 // runs, so no route has to remember to check.
 
 import { isAdmin, isGeneralManager, parseId, validNumber } from './http.js';
-import { worksInBoutique } from '../../shared/businessOperations.js';
+import { RETAIL_OPERATION, worksInBoutique } from '../../shared/businessOperations.js';
 import { BOUTIQUE_PAYMENT_METHODS, EXCHANGE_CREDIT, STOCK_MOVEMENT_KINDS, fromMinor, toMinor } from '../../shared/boutique.js';
 
 export const BOUTIQUE_FOLDER = 'boutique';
@@ -123,13 +123,14 @@ export async function moveStock(client, { variantId, quantity, kind, referenceTy
   const change = Math.trunc(Number(quantity));
   if (!change) throw new BoutiqueError(400, 'A stock movement cannot be zero.');
   const locked = await client.query(
-    `SELECT v.id, v.stock_quantity, v.sku, v.status, p.name AS product_name
+    `SELECT v.id, v.stock_quantity, v.reorder_level, v.sku, v.size, v.color, v.status, p.name AS product_name
        FROM boutique_variants v JOIN boutique_products p ON p.id = v.product_id
       WHERE v.id = $1 FOR UPDATE OF v`,
     [variantId]
   );
   if (!locked.rowCount) throw new BoutiqueError(404, 'Product variant not found.');
   const variant = locked.rows[0];
+  const before = variant.stock_quantity;
   const after = variant.stock_quantity + change;
   if (after < 0) {
     throw new BoutiqueError(409,
@@ -142,7 +143,28 @@ export async function moveStock(client, { variantId, quantity, kind, referenceTy
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
     [variantId, change, kind, after, referenceType, referenceId, note, actor?.id ?? null]
   );
-  return { movement: movement.rows[0], variant: { ...variant, stock_quantity: after } };
+  return {
+    movement: movement.rows[0],
+    variant: { ...variant, stock_quantity: after },
+    before,
+    after,
+    // Crossed down to the reorder level with this very movement: the moment
+    // to tell the Director and the manager, once, not on every sale after.
+    ranLow: before > variant.reorder_level && after <= variant.reorder_level
+  };
+}
+
+// Who is told a shelf has run low: every active Director, and the boutique's
+// own manager(s). Directly, the line the Boutique Manager reports along.
+export async function lowStockRecipients(db) {
+  const result = await db.query(
+    `SELECT id FROM users WHERE status = 'active' AND (role = 'super-admin'
+        OR (role = 'manager' AND covers_all_sectors = FALSE AND (sector = $1
+            OR EXISTS (SELECT 1 FROM manager_operations mo WHERE mo.manager_id = users.id AND mo.sector = $1))))
+      ORDER BY id`,
+    [RETAIL_OPERATION]
+  );
+  return result.rows.map((row) => row.id);
 }
 
 // ---- the audit trail ----------------------------------------------------------------

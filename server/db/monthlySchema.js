@@ -504,7 +504,13 @@ export const NOTIFICATION_KINDS = [
   // The boutique (server/routes/boutique.js): a manager's stock adjustment or
   // sale void waits for the Director; the Director's answer, with its note.
   'boutique_approval_requested',
-  'boutique_approval_decided'
+  'boutique_approval_decided',
+  // The Boutique Manager reports directly to the Director: a period report or
+  // an incident sent up, the Director's answer, and a shelf running low.
+  'boutique_report_submitted',
+  'boutique_issue_raised',
+  'boutique_submission_decided',
+  'boutique_low_stock'
 ];
 
 export async function migrateMonthlyModule(pool) {

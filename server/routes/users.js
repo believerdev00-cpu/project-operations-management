@@ -2,8 +2,31 @@ import express from 'express';
 import { pool, safeRollback } from '../db/database.js';
 import { ALL_OPERATIONS, asyncRoute, isAdmin, operationsSql, parseId, requiredText, sectorIds, withinScope } from '../lib/http.js';
 import { hashPassword, passwordProblem } from '../lib/passwords.js';
-import { REPORTS_TO } from '../db/organizationSchema.js';
+import { BOUTIQUE_MANAGER_REPORTS_TO, REPORTS_TO } from '../db/organizationSchema.js';
 import { recordOrganization } from '../lib/organization.js';
+import { resolveDirector } from '../lib/approvals.js';
+import { RETAIL_OPERATION } from '../../shared/businessOperations.js';
+
+// The Boutique Manager (Project 5): a manager whose own operations include the
+// boutique. Not a manager covering every operation -- that is somebody running
+// the whole organisation's operations in general, placed like any manager.
+function isBoutiqueManager(role, coversAll, operations) {
+  return role === 'manager' && !coversAll && (operations || []).includes(RETAIL_OPERATION);
+}
+
+// The line a boutique manager is given: the Director, always. A line the
+// Director chose by hand is refused unless it is a Director, so the General
+// Manager or another project manager can never be put between them. Returns
+// { managerId } or { error }.
+async function boutiqueLine(db, requestedManagerId) {
+  if (requestedManagerId) {
+    const boss = await db.query('SELECT id FROM users WHERE id = $1 AND role = ANY($2::text[])', [requestedManagerId, BOUTIQUE_MANAGER_REPORTS_TO]);
+    if (!boss.rowCount) return { error: 'The Boutique Manager reports directly to the Director; nobody else can be put between them.' };
+    return { managerId: boss.rows[0].id };
+  }
+  const director = await resolveDirector(db);
+  return { managerId: director?.id ?? null };
+}
 
 const router = express.Router();
 
@@ -181,9 +204,16 @@ router.post('/', adminOnly('Only the Director can create accounts.'), asyncRoute
   const { coversAll, operations } = requested;
   const storedSector = coversAll ? null : operations[0];
 
-  const managerId = req.body?.managerId ? parseId(req.body.managerId) : null;
+  let managerId = req.body?.managerId ? parseId(req.body.managerId) : null;
   if (req.body?.managerId && !managerId) return res.status(400).json({ message: 'The selected manager is invalid.' });
-  if (managerId) {
+  // The Boutique Manager's line is the Director's, chosen or not.
+  const boutiqueManager = isBoutiqueManager(role, coversAll, operations);
+  if (boutiqueManager) {
+    const line = await boutiqueLine(pool, managerId);
+    if (line.error) return res.status(400).json({ message: line.error });
+    managerId = line.managerId;
+  }
+  if (managerId && !boutiqueManager) {
     const manager = await pool.query(
       `SELECT id, sector, role, covers_all_sectors AS "coversAllSectors", ${operationsSql('users')} AS operations
        FROM users WHERE id = $1 AND role = ANY($2::text[])`,
@@ -348,7 +378,21 @@ router.patch('/:id/assignment', adminOnly('Only the Director can change an assig
     return res.status(400).json({ message: 'The selected manager is invalid.' });
   }
 
-  if (managerId) {
+  // Into the boutique: the line becomes the Director's, whatever was chosen
+  // or left. Out of the boutique: a line that pointed at the Director (which
+  // only the Boutique Manager may have) is cleared, so the ordinary rule
+  // applies again.
+  const boutiqueManager = isBoutiqueManager(target.role, coversAll, operations);
+  if (boutiqueManager) {
+    const line = await boutiqueLine(pool, managerGiven ? managerId : null);
+    if (line.error) return res.status(400).json({ message: line.error });
+    managerId = line.managerId;
+  } else if (managerId && !managerGiven) {
+    const boss = await pool.query('SELECT role FROM users WHERE id = $1', [managerId]);
+    if (boss.rows[0]?.role === 'super-admin') managerId = null;
+  }
+
+  if (managerId && !boutiqueManager) {
     if (!Number.isInteger(managerId)) return res.status(400).json({ message: 'The selected manager is invalid.' });
     if (managerId === target.id) return res.status(400).json({ message: 'An account cannot report to itself.' });
 

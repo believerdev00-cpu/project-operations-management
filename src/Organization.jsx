@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BUSINESS_OPERATIONS, operationName, operationsOf, worksIn } from '../shared/businessOperations.js';
+import { BUSINESS_OPERATIONS, isRetailOperation, operationName, operationsOf, worksIn } from '../shared/businessOperations.js';
+
+// The Boutique Manager (Project 5): a project manager whose own operation is
+// the boutique. Their line is the Director's, fixed by the API.
+function isBoutiqueManager(person) {
+  return person.role === 'manager' && !person.coversAllSectors && (person.operations || []).some(isRetailOperation);
+}
 import { fill, useI18n } from './i18n.js';
 import { useBusy, useDialog } from './ui.jsx';
 
@@ -233,7 +239,12 @@ function OrgChart({ data, user, t, language, busy, onOpenTeam, onChangeLine }) {
           <div className="org-children">
             {group.managers.map((manager) => <div className="org-node" key={manager.id}>
               <PersonCard person={manager} user={user} t={t} language={language} tone="manager">
-                {data.can.changeReportingLines && <label className="form-field org-line-select">
+                {/* The Boutique Manager (Project 5) reports directly to the
+                    Director; the line is fixed by the API, so there is nothing
+                    to choose here. */}
+                {isBoutiqueManager(manager)
+                  ? <p className="field-hint"><strong>{t('field.reportsTo')}:</strong> {t('org.boutiqueLine')}</p>
+                  : data.can.changeReportingLines && <label className="form-field org-line-select">
                   <span>{t('field.reportsTo')}</span>
                   <select value={manager.reportsToId && byId.get(manager.reportsToId)?.role === 'general-manager' ? manager.reportsToId : ''}
                     disabled={busy || (manager.reportsToId && byId.get(manager.reportsToId)?.role === 'manager')}
