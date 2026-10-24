@@ -4,6 +4,7 @@ import { ALL_OPERATIONS, asyncRoute, isAdmin, operationsSql, parseId, requiredTe
 import { hashPassword, passwordProblem } from '../lib/passwords.js';
 import { BOUTIQUE_MANAGER_REPORTS_TO, REPORTS_TO } from '../db/organizationSchema.js';
 import { recordOrganization } from '../lib/organization.js';
+import { notify } from '../lib/notifications.js';
 import { resolveDirector } from '../lib/approvals.js';
 import { RETAIL_OPERATION } from '../../shared/businessOperations.js';
 
@@ -181,7 +182,10 @@ router.get('/', adminOnly('Only the Director can view the account register.'), a
     total: users.length,
     roleCounts: users.reduce((counts, account) => ({ ...counts, [account.role]: (counts[account.role] || 0) + 1 }), {}),
     unassigned: users.filter((account) => account.role === 'staff' && !account.managerId).length,
-    users
+    users,
+    // Deleted people whose work waits for the next person added with the
+    // same role (takeOverWaitingWork), shown at the top of People.
+    waiting: await waitingAccounts(pool)
   });
 }));
 
@@ -231,6 +235,7 @@ router.post('/', adminOnly('Only the Director can create accounts.'), asyncRoute
   const passwordHash = await hashPassword(password);
   const client = await pool.connect();
   let createdId;
+  let tookOver = null;
   try {
     await client.query('BEGIN');
     const inserted = await client.query(
@@ -249,6 +254,10 @@ router.post('/', adminOnly('Only the Director can create accounts.'), asyncRoute
     // In the same transaction, so the three-managers limit on a second
     // operation refuses the whole account rather than leaving half of it.
     if (role === 'manager') await setManagerOperations(client, createdId, operations, req.user.id);
+    // The person added takes the place of somebody deleted with work still
+    // waiting -- same role, working where that work is -- in the same
+    // transaction, so the account and its inherited work arrive together.
+    tookOver = await takeOverWaitingWork(client, createdId, req.user);
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -258,7 +267,7 @@ router.post('/', adminOnly('Only the Director can create accounts.'), asyncRoute
   } finally {
     client.release();
   }
-  res.status(201).json(await loadAccount(createdId));
+  res.status(201).json({ ...(await loadAccount(createdId)), tookOver });
 }));
 
 // Reset only. The stored value is a bcrypt hash and is never read back, so a
@@ -397,6 +406,127 @@ async function heldWorkOf(db, userId) {
   return result.rows[0];
 }
 
+// The operations a person's live work is in, read from the work itself:
+// whoever takes it over has to work in every one of them.
+const WORK_SECTORS_SQL = `
+  SELECT DISTINCT sector FROM (
+    SELECT sector FROM monthly_plans WHERE manager_id = $1 AND status <> 'Closed'
+    UNION SELECT sector FROM activities WHERE assigned_to = $1 AND status NOT IN ('Completed', 'Rejected', 'Cancelled')
+    UNION SELECT sector FROM activities WHERE approval_required_from = $1 AND approval_status = 'pending'
+    UNION SELECT sector FROM projects WHERE manager_id = $1
+    UNION SELECT p.sector FROM teams t JOIN projects p ON p.id = t.project_id WHERE t.supervisor_id = $1 AND t.status = 'active'
+    UNION SELECT sector FROM users WHERE manager_id = $1 AND status <> 'deleted' AND role = 'staff'
+  ) held WHERE sector IS NOT NULL`;
+
+const ROLE_WORDS = { 'super-admin': 'Director', 'general-manager': 'General Manager', manager: 'project manager', staff: 'team member' };
+
+// Everything live that `target` holds moves to the successor, inside the
+// delete's own transaction, so the person who takes the place continues
+// exactly where the other stopped and nothing is left pointing at a closed
+// account. The successor must be an active account of the SAME role (a
+// month needs a manager, a team needs a team member) that works in every
+// operation the work is in -- authorised against where the work is now,
+// like every other assignment. Returns { successor, moved } or { error }.
+async function handOver(client, target, successorId, actor) {
+  const found = await client.query(
+    `SELECT id, name, role, status, sector, covers_all_sectors, manager_id, ${operationsSql('users')} AS operations
+       FROM users WHERE id = $1 FOR UPDATE`, [successorId]);
+  const row = found.rows[0];
+  if (!row || row.status === 'deleted' || row.role === 'partner') return { error: 'The person chosen to take over was not found. Choose someone else.' };
+  if (row.id === target.id) return { error: `Choose somebody other than ${target.name} to take over.` };
+  if (row.status !== 'active') return { error: `${row.name} is suspended. Reactivate them first, or choose someone else to take over.` };
+  if (row.role !== target.role) {
+    return { error: `${target.name} is a ${ROLE_WORDS[target.role] || target.role} and ${row.name} is a ${ROLE_WORDS[row.role] || row.role}. Choose a ${ROLE_WORDS[target.role] || target.role} to take over.` };
+  }
+  const successor = { id: row.id, name: row.name, role: row.role, sector: row.sector, coversAllSectors: row.covers_all_sectors, operations: row.operations || [] };
+
+  // The operations the work is in, read from the work itself.
+  const where = await client.query(WORK_SECTORS_SQL, [target.id]);
+  const outside = where.rows.map((r) => r.sector).filter((sector) => !withinScope(successor, sector));
+  if (outside.length) {
+    return { error: `${row.name} does not work in ${outside.join(', ')}, where ${target.name}'s work is. Give them that operation first (People → working area), or choose someone who works there.` };
+  }
+
+  const moved = {};
+  const run = async (key, sql, values) => { moved[key] = (moved[key] || 0) + (await client.query(sql, values)).rowCount; };
+  // Somebody who reported to the person leaving now reports to whoever
+  // they reported to -- the successor cannot report to themselves.
+  if (row.manager_id === target.id) {
+    const above = await client.query('SELECT manager_id FROM users WHERE id = $1', [target.id]);
+    await client.query('UPDATE users SET manager_id = $2 WHERE id = $1', [row.id, above.rows[0]?.manager_id ?? null]);
+  }
+  // The months they run, stamped as handed over by the Director now.
+  await run('plans', `UPDATE monthly_plans SET manager_id = $2, assigned_by = $3, assigned_at = NOW() WHERE manager_id = $1 AND status <> 'Closed'`, [target.id, row.id, actor.id]);
+  await run('activities', `UPDATE activities SET assigned_to = $2 WHERE assigned_to = $1 AND status NOT IN ('Completed', 'Rejected', 'Cancelled')`, [target.id, row.id]);
+  await run('approvals', `UPDATE activities SET approval_required_from = $2 WHERE approval_required_from = $1 AND approval_status = 'pending'`, [target.id, row.id]);
+  await run('approvals', `UPDATE movements SET approval_required_from = $2 WHERE approval_required_from = $1 AND approval_status = 'pending'`, [target.id, row.id]);
+  await run('checks', `UPDATE activities SET completion_checker_id = $2 WHERE completion_checker_id = $1 AND status NOT IN ('Completed', 'Rejected', 'Cancelled')`, [target.id, row.id]);
+  await run('reports', `UPDATE users SET manager_id = $2 WHERE manager_id = $1 AND status <> 'deleted' AND id <> $2`, [target.id, row.id]);
+  await run('leads', `UPDATE teams SET supervisor_id = $2 WHERE supervisor_id = $1`, [target.id, row.id]);
+  await run('leads', `UPDATE projects SET manager_id = $2 WHERE manager_id = $1`, [target.id, row.id]);
+  await run('partners', `UPDATE users SET partner_contact_id = $2 WHERE partner_contact_id = $1`, [target.id, row.id]);
+  // A team member's places on teams, leadership included.
+  const places = await client.query('SELECT team_id, is_leader FROM team_members WHERE user_id = $1', [target.id]);
+  await client.query('DELETE FROM team_members WHERE user_id = $1', [target.id]);
+  for (const place of places.rows) {
+    await client.query(
+      `INSERT INTO team_members (team_id, user_id, is_leader, added_by) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (team_id, user_id) DO UPDATE SET is_leader = team_members.is_leader OR EXCLUDED.is_leader`,
+      [place.team_id, row.id, place.is_leader, actor.id]
+    );
+  }
+  moved.teams = places.rowCount;
+  const total = Object.values(moved).reduce((sum, n) => sum + n, 0);
+  if (total) {
+    await notify(client, { userId: row.id, kind: 'work_handed_over', params: { title: target.name, count: total }, link: '#/', actor });
+  }
+  return { successor, moved };
+}
+
+// Deleted accounts whose live work still waits for somebody: the months they
+// ran, unfinished work, people reporting to them, teams and projects they led.
+// Listed on the People page as 'Waiting for a replacement'.
+async function waitingAccounts(db) {
+  const rows = await db.query(
+    `SELECT id, name, role, deleted_at FROM users WHERE status = 'deleted' AND (
+        EXISTS (SELECT 1 FROM monthly_plans WHERE manager_id = users.id AND status <> 'Closed')
+     OR EXISTS (SELECT 1 FROM activities WHERE (assigned_to = users.id AND status NOT IN ('Completed', 'Rejected', 'Cancelled'))
+                                         OR (approval_required_from = users.id AND approval_status = 'pending'))
+     OR EXISTS (SELECT 1 FROM movements WHERE approval_required_from = users.id AND approval_status = 'pending')
+     OR EXISTS (SELECT 1 FROM users r WHERE r.manager_id = users.id AND r.status <> 'deleted')
+     OR EXISTS (SELECT 1 FROM teams WHERE supervisor_id = users.id AND status = 'active')
+     OR EXISTS (SELECT 1 FROM projects WHERE manager_id = users.id))
+     ORDER BY deleted_at, id`
+  );
+  const out = [];
+  for (const row of rows.rows) {
+    const held = await heldWorkOf(db, row.id);
+    const where = await db.query(WORK_SECTORS_SQL, [row.id]);
+    out.push({ id: row.id, name: row.name, role: row.role, deletedAt: row.deleted_at, heldWork: held, operations: where.rows.map((r) => r.sector) });
+  }
+  return out;
+}
+
+// The first deleted account (oldest first) whose waiting work the new account
+// can take: same role, and it works in every operation that work is in.
+// handOver() does the moving and the telling. Returns { from, moved } or null.
+async function takeOverWaitingWork(client, newId, actor) {
+  const fresh = await client.query(`SELECT id, role, sector, covers_all_sectors, ${operationsSql('users')} AS operations FROM users WHERE id = $1`, [newId]);
+  const me = fresh.rows[0];
+  if (!me || me.role === 'partner') return null;
+  const account = { role: me.role, sector: me.sector, coversAllSectors: me.covers_all_sectors, operations: me.operations || [] };
+  for (const waiting of await waitingAccounts(client)) {
+    if (waiting.role !== me.role) continue;
+    if (!waiting.operations.every((sector) => withinScope(account, sector))) continue;
+    const target = (await client.query('SELECT id, name, role FROM users WHERE id = $1 FOR UPDATE', [waiting.id])).rows[0];
+    const result = await handOver(client, target, newId, actor);
+    if (result.error) continue;
+    await recordOrganization(client, actor, 'reporting_changed', { subjectUserId: newId, subjectName: result.successor.name, detail: { tookOverFrom: target.name, moved: result.moved } });
+    return { from: { id: target.id, name: target.name }, moved: result.moved };
+  }
+  return null;
+}
+
 router.delete('/:id', adminOnly('Only the Director can delete an account.'), asyncRoute(async (req, res) => {
   const userId = parseId(req.params.id);
   if (!userId) return res.status(404).json({ message: 'Account not found.' });
@@ -413,15 +543,13 @@ router.delete('/:id', adminOnly('Only the Director can delete an account.'), asy
       return res.status(404).json({ message: 'Account not found.' });
     }
     const target = found.rows[0];
-    // The confirmation the screen asks for, checked here too: the account
-    // typed out -- its username or the person's full name, whichever the
-    // Director knows them by (asking for the username alone was refused
-    // every time somebody typed the name they could see). One stray click
-    // cannot delete anybody.
-    const typed = String(req.body?.confirmUsername || '').trim().replace(/\s+/g, ' ').toLowerCase();
-    if (!typed || (typed !== target.username.toLowerCase() && typed !== String(target.name).trim().replace(/\s+/g, ' ').toLowerCase())) {
+    // Two steps, never one: an account is suspended first (one press, undone
+    // by Recover), and only a suspended account can be deleted. That is the
+    // protection against a stray click -- not a username to type, which the
+    // Director found too much to ask.
+    if (target.status !== 'suspended') {
       await safeRollback(client);
-      return res.status(400).json({ code: 'CONFIRM_REQUIRED', message: `Nothing was deleted. To confirm, type ${target.name} or the username ${target.username}.` });
+      return res.status(409).json({ code: 'SUSPEND_FIRST', message: `Suspend ${target.name} first. A suspended account can then be recovered or deleted permanently.` });
     }
     if (target.role === 'super-admin') {
       // Locked, so two Directors deleting each other at once cannot both land.
@@ -432,25 +560,40 @@ router.delete('/:id', adminOnly('Only the Director can delete an account.'), asy
       }
     }
     const held = await heldWorkOf(client, userId);
-    if (Object.values(held).some((n) => n > 0)) {
+    // Cash in an open till is counted by a person and cannot be handed to
+    // anybody: the till is closed first (Boutique → Cash), the one thing a
+    // delete still asks for.
+    if (held.tills > 0) {
       await safeRollback(client);
       return res.status(409).json({
-        code: 'HOLDS_WORK', heldWork: held,
-        message: `${target.name} still holds work that somebody must take over first: ${[
-          held.plans && `${held.plans} open monthly plan(s)`,
-          held.activities && `${held.activities} unfinished activity(ies)`,
-          held.approvals && `${held.approvals} decision(s) waiting on them`,
-          held.reports && `${held.reports} person(s) reporting to them`,
-          held.leads && `${held.leads} team(s) or project(s) they lead`,
-          held.tills && `${held.tills} open till(s)`
-        ].filter(Boolean).join(', ')}. Hand these over, then delete the account.`
+        code: 'OPEN_TILL', heldWork: held,
+        message: `${target.name} still has an open till in the shop. Close it first (Boutique → Cash: count the money in it), then delete the account.`
       });
     }
+    // Live work is never a reason to refuse and never a question. If the
+    // Director names a successor (successorId) it moves now; otherwise it
+    // WAITS on the closed account -- the same months, unfinished work, people
+    // reporting, teams and projects -- and the next account the Director
+    // creates with the same role, working where that work is, takes it all
+    // over automatically (takeOverWaitingWork, on POST /). An account still
+    // holding work is therefore always closed, never removed: removing it
+    // would SET NULL every one of those links and lose the work.
+    const holdsWork = held.plans + held.activities + held.approvals + held.reports + held.leads > 0;
+    let handover = null;
+    const successorId = parseId(req.body?.successorId);
+    if (holdsWork && successorId) {
+      handover = await handOver(client, target, successorId, req.user);
+      if (handover.error) {
+        await safeRollback(client);
+        return res.status(400).json({ code: 'SUCCESSOR_INVALID', heldWork: held, message: handover.error });
+      }
+    }
+    const waiting = holdsWork && !handover;
 
     const references = await historyReferences(client, userId);
     let outcome;
-    if (references === 0) {
-      await recordOrganization(client, req.user, 'account_deleted', { subjectName: target.name, detail: { role: target.role, outcome: 'removed' } });
+    if (references === 0 && !waiting) {
+      await recordOrganization(client, req.user, 'account_deleted', { subjectName: target.name, detail: { role: target.role, outcome: 'removed', handedTo: handover?.successor.name || null, handedOver: handover?.moved || null } });
       await client.query('DELETE FROM users WHERE id = $1', [userId]);
       outcome = 'removed';
     } else {
@@ -466,15 +609,21 @@ router.delete('/:id', adminOnly('Only the Director can delete an account.'), asy
       );
       await client.query('DELETE FROM manager_operations WHERE manager_id = $1', [userId]);
       await client.query('DELETE FROM team_members WHERE user_id = $1', [userId]);
-      await recordOrganization(client, req.user, 'account_deleted', { subjectUserId: userId, subjectName: target.name, detail: { role: target.role, outcome: 'closed', records: references } });
+      await recordOrganization(client, req.user, 'account_deleted', { subjectUserId: userId, subjectName: target.name, detail: { role: target.role, outcome: 'closed', records: references, waiting, handedTo: handover?.successor.name || null, handedOver: handover?.moved || null } });
       outcome = 'closed';
     }
     await client.query('COMMIT');
     res.json({
       id: userId, outcome, records: references,
-      message: outcome === 'removed'
+      handedTo: handover ? { id: handover.successor.id, name: handover.successor.name } : null,
+      handedOver: handover?.moved || null,
+      // What waits for the next person with the same role, when nobody was named.
+      waitingWork: waiting ? held : null,
+      message: (outcome === 'removed'
         ? `${target.name}'s account has been permanently deleted.`
-        : `${target.name}'s account is deleted: they can never sign in again and are gone from every list. Their name stays on the ${references} record(s) they made, so those still show who did the work.`
+        : `${target.name}'s account is deleted: they can never sign in again and are gone from every list.`)
+        + (handover ? ` ${handover.successor.name} has taken over their work.` : '')
+        + (waiting ? ` Their work waits for the next ${ROLE_WORDS[target.role] || target.role} you add who works where they did; that person takes it over.` : '')
     });
   } catch (error) {
     await safeRollback(client);

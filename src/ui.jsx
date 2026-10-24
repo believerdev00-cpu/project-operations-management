@@ -187,7 +187,9 @@ export function DialogProvider({ children }) {
     prompt: (options) => open({ ...options, kind: 'prompt' }),
     password: (options) => open({ ...options, kind: 'password' }),
     // An answer the reader must see -- done, or why not -- with one button.
-    notice: (options) => open({ ...options, kind: 'notice' })
+    notice: (options) => open({ ...options, kind: 'notice' }),
+    // One answer picked from a short list (options: [{ value, label }]).
+    choose: (options) => open({ ...options, kind: 'choose' })
   }), [open]);
 
   return <DialogContext.Provider value={api}>
@@ -270,7 +272,7 @@ function Dialog({ dialog, onClose }) {
 
   const text = value.trim();
   let problem = null;
-  if (dialog.kind === 'prompt' && dialog.required && !text) problem = t('dialog.required');
+  if ((dialog.kind === 'prompt' || dialog.kind === 'choose') && dialog.required && !text) problem = t('dialog.required');
   // A floor on what counts as an answer, for prompts whose answer someone else
   // has to act on -- the reason work is sent back, which the API holds to the
   // same length.
@@ -314,6 +316,14 @@ function Dialog({ dialog, onClose }) {
         {dialog.multiline
           ? <textarea rows="3" value={value} placeholder={dialog.placeholder} onChange={(event) => setValue(event.target.value)} />
           : <input value={value} placeholder={dialog.placeholder} onChange={(event) => setValue(event.target.value)} />}
+      </label>}
+
+      {dialog.kind === 'choose' && <label className="form-field">
+        <span>{dialog.label}</span>
+        <select value={value} onChange={(event) => setValue(event.target.value)}>
+          <option value="">{dialog.placeholder || t('dialog.pickOne')}</option>
+          {(dialog.options || []).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select>
       </label>}
 
       {dialog.kind === 'password' && <>

@@ -512,6 +512,7 @@ export const NOTIFICATION_KINDS = [
   // The organisation (server/routes/organization.js, partners.js).
   'team_added',           // to a team member: you were put on a team
   'partner_shared',       // to a partner: a project was shared with you
+  'work_handed_over',     // to whoever takes a deleted account's place: its live work is now theirs
   // The boutique (server/routes/boutique.js): a manager's stock adjustment or
   // sale void waits for the Director; the Director's answer, with its note.
   'boutique_approval_requested',

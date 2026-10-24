@@ -86,7 +86,7 @@ function accountPayload(form) {
   if (form.role === 'general-manager') return { ...rest, managerId: form.managerId || null };
   return { ...rest, managerId: form.managerId || null, ...(form.role === 'manager' ? { sectors: chosen } : { sector }) };
 }
-const emptyRegister = { total: 0, roleCounts: {}, unassigned: 0, users: [] };
+const emptyRegister = { total: 0, roleCounts: {}, unassigned: 0, users: [], waiting: [] };
 const emptyQueue = { activities: [], movements: [], total: 0 };
 const emptyPartnerRegister = { total: 0, active: 0, byOperation: {}, partners: [] };
 // Used only until the Director's reference rate has loaded, so an equivalent is
@@ -226,7 +226,12 @@ function useApi(token, onExpired) {
       expired.current(reason);
       throw new Error(reason);
     }
-    throw new Error(payload.code ? authRefusal(payload, translator.current) : (payload.message || translator.current('app.requestFailed')));
+    // The code travels with the message, so a screen can act on a refusal
+    // (choose who takes over) and not only print it.
+    const failure = new Error(payload.code ? authRefusal(payload, translator.current) : (payload.message || translator.current('app.requestFailed')));
+    failure.code = payload.code || null;
+    failure.payload = payload;
+    throw failure;
   }, [token]);
 
   const fetchJson = useCallback(async (url, options = {}) => {
@@ -1295,68 +1300,44 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     openFile(path).catch((fileError) => fail(fileError.message));
   }, [openFile, fail]);
 
-  // Suspending signs the person out everywhere at once. It is never blocked by
-  // the work they hold -- locking out someone who has left cannot wait -- but
-  // that work is named afterwards, so it can be handed to somebody else.
+  // Suspend and Recover are one press each, no questions: both are undone by
+  // the other, and nothing the person recorded is touched. A suspended
+  // account is signed out at once and then offers Recover or Delete
+  // permanently on its row.
   const setAccountStatus = act(async (account, status) => {
     const suspending = status === 'suspended';
-    const confirmed = await dialog.confirm({
-      title: fill(t(suspending ? 'msg.suspendTitle' : 'msg.reactivateTitle'), { name: account.name }),
-      message: t(suspending ? 'msg.suspendBody' : 'msg.reactivateBody'),
-      confirmLabel: t(suspending ? 'action.suspend' : 'action.reactivate'),
-      danger: suspending
-    });
-    if (!confirmed) return;
     setError('');
     try {
-      const result = await fetchJson(`/api/users/${account.id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
-      const held = result.heldWork || {};
-      if (!suspending) notify(fill(t('msg.reactivated'), { name: account.name }));
-      else if (held.approvals || held.activities || held.plans) {
-        fail(fill(t('msg.suspendedHeldWork'), { name: account.name, approvals: held.approvals, activities: held.activities, plans: held.plans }));
-      } else notify(fill(t('msg.suspended'), { name: account.name }));
+      await fetchJson(`/api/users/${account.id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
+      notify(fill(t(suspending ? 'msg.suspended' : 'msg.reactivated'), { name: account.name }));
       await loadData();
     } catch (statusError) { fail(statusError.message); }
   });
 
-  // Deleting is for good, so it is asked as the account's username typed out
-  // -- one stray click on the button cannot do it -- with what will happen
-  // said in plain words first. The server checks the same username, refuses
-  // your own account, the last Director and anyone still holding work, and
-  // answers whether the account was removed or closed; the message repeats
-  // exactly that, never more.
-  //
-  // Every answer -- done, refused, or a typing slip -- is shown in a box in
-  // front of the Director. It used to go to the banner at the top of the page,
-  // far above the People list, so a refused delete looked like a button that
-  // did nothing. The person's name is accepted as well as their username.
+  // Delete permanently is offered only on a suspended account, and asks one
+  // question -- "are you sure?" -- with what happens said in plain words.
+  // Nothing to type and nobody to choose: whatever the person was still
+  // running waits, and the next person added with the same role, working
+  // where they did, takes it over by themselves. The answer is shown in a box
+  // in front of the Director, not only in the banner at the top.
   const deleteAccount = act(async (account) => {
-    const said = (title, message) => dialog.notice({ title, message, confirmLabel: t('dialog.ok') });
-    const typed = await dialog.prompt({
+    const sure = await dialog.confirm({
       title: fill(t('msg.deleteTitle'), { name: account.name }),
       message: t('msg.deleteBody'),
-      label: fill(t('msg.deleteTypeUsername'), { name: account.name, username: account.username }),
-      required: true,
-      confirmLabel: t('action.deleteAccount'),
+      confirmLabel: t('action.deletePermanently'),
       danger: true
     });
-    if (typed === null) return;
-    const plain = (value) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
-    if (plain(typed) !== plain(account.username) && plain(typed) !== plain(account.name)) {
-      await said(t('msg.deleteNotDone'), fill(t('msg.deleteWrongUsername'), { name: account.name, username: account.username }));
-      return;
-    }
+    if (!sure) return;
     setError('');
     try {
-      const result = await fetchJson(`/api/users/${account.id}`, { method: 'DELETE', body: JSON.stringify({ confirmUsername: typed.trim() }) });
-      const message = fill(t(result.outcome === 'removed' ? 'msg.deletedRemoved' : 'msg.deletedClosed'), { name: account.name, count: result.records });
+      const result = await fetchJson(`/api/users/${account.id}`, { method: 'DELETE', body: JSON.stringify({}) });
+      let message = fill(t(result.outcome === 'removed' ? 'msg.deletedRemoved' : 'msg.deletedClosed'), { name: account.name, count: result.records });
+      if (result.waitingWork) message += ` ${fill(t('msg.deleteWorkWaits'), { role: roleName(account.role, t) })}`;
       notify(message);
       await loadData();
-      await said(t('msg.deleteDone'), message);
+      await dialog.notice({ title: t('msg.deleteDone'), message, confirmLabel: t('dialog.ok') });
     } catch (deleteError) {
-      // The server's own reason: who still reports to them, which months they
-      // still run -- the things to hand over before trying again.
-      await said(t('msg.deleteNotDone'), deleteError.message);
+      await dialog.notice({ title: t('msg.deleteNotDone'), message: deleteError.message, confirmLabel: t('dialog.ok') });
     }
   });
 
@@ -2508,13 +2489,28 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         <label className="sr-only" htmlFor="user-search">{t('form.searchUsers')}</label>
         <input id="user-search" type="search" placeholder={t('form.searchUsers')} value={userSearch} onChange={(event) => setUserSearch(event.target.value)} />
       </div><button className="primary-btn" type="button" onClick={() => document.getElementById('account-form')?.scrollIntoView({ behavior: 'smooth' })}>{t('form.addUser')}</button></section>
+      {/* People deleted while still running something: their work waits for
+          the next person added with the same role who works where they did. */}
+      {register.waiting?.length > 0 && <section className="next-step next-step-warning" aria-live="polite">
+        <div className="next-step-text">
+          <strong>{t('people.waitingTitle')}</strong>
+          <ul className="btq-attention-list">{register.waiting.map((w) => <li key={w.id}><span>{fill(t('people.waitingItem'), {
+            name: w.name, role: roleName(w.role, t), operations: w.operations.map(sectorName).join(', ') || '—',
+            plans: w.heldWork.plans, work: w.heldWork.activities + w.heldWork.approvals, people: w.heldWork.reports, leads: w.heldWork.leads
+          })}</span></li>)}</ul>
+          <p>{t('people.waitingHint')}</p>
+        </div>
+      </section>}
       <Panel title={t('panel.userManagement')} subtitle={`${filteredUsers.length} / ${register.total}`}>
         {issues.users
           ? <LoadIssue onRetry={loadData} />
           : <UserTable users={filteredUsers} managers={managers} currentUserId={user.id} busy={actionBusy} language={language} onChangeSector={changeUserSector} onResetPassword={resetPassword} onSetStatus={setAccountStatus} onDelete={deleteAccount} empty={t('empty.noAccountsMatch')} />}
       </Panel>
       <AccountForm form={accountForm} setForm={setAccountForm} managers={managers}
-        generalManagers={register.users.filter((account) => account.role === 'general-manager' && account.status === 'active')} busy={actionBusy} language={language} onSubmit={(event) => submit(event, '/api/users', accountPayload(accountForm), t('msg.accountCreated'), () => setAccountForm(emptyAccount))} />
+        generalManagers={register.users.filter((account) => account.role === 'general-manager' && account.status === 'active')} busy={actionBusy} language={language} onSubmit={(event) => submit(event, '/api/users', accountPayload(accountForm), t('msg.accountCreated'), () => setAccountForm(emptyAccount), (created) => {
+          // Somebody deleted with work still waiting has just been replaced.
+          if (created?.tookOver) dialog.notice({ title: t('msg.tookOverTitle'), message: fill(t('msg.tookOver'), { name: created.name, old: created.tookOver.from.name }), confirmLabel: t('dialog.ok') });
+        })} />
       {/* Who reports to whom is a fact about the people, so it is set here. */}
       <OrganizationSection user={user} fetchJson={fetchJson} onMessage={notify} onError={fail}
         onChanged={onModuleChanged} reloadKey={summary} />
@@ -2726,12 +2722,15 @@ function UserTable({ users, currentUserId, busy, language, onChangeSector, onRes
           ? <span className="muted-cell">{t('user.thisIsYou')}</span>
           : <>
             <button className="text-btn" disabled={busy} onClick={() => onResetPassword(account)} type="button">{t('action.changePassword')}</button>
+            {/* Two steps, in order: Suspend first (one press, undone by
+                Recover); a suspended account then offers Recover or Delete
+                permanently. An active account is never one press from gone. */}
             {!isDirector && (account.status === 'suspended'
-              ? <button className="text-btn" disabled={busy} onClick={() => onSetStatus(account, 'active')} type="button">{t('action.reactivate')}</button>
+              ? <>
+                <button className="secondary-btn" disabled={busy} onClick={() => onSetStatus(account, 'active')} type="button">{t('action.recover')}</button>
+                <button className="danger-btn outlined" disabled={busy} onClick={() => onDelete(account)} type="button">{t('action.deletePermanently')}</button>
+              </>
               : <button className="danger-btn outlined" disabled={busy} onClick={() => onSetStatus(account, 'suspended')} type="button">{t('action.suspend')}</button>)}
-            {/* Apart from Suspend on purpose: the reversible step comes first,
-                and deleting asks for the username typed out. */}
-            <button className="danger-btn outlined" disabled={busy} onClick={() => onDelete(account)} type="button">{t('action.deleteAccount')}</button>
           </>}</td>
       </tr>;
     })}

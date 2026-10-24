@@ -93,7 +93,7 @@ const FAMILIES = {
   // server/db/monthlySchema.js) needs a sentence in every language.
   'notice.kind.': ['plan_assigned', 'plan_changed', 'change_requested', 'report_submitted', 'report_accepted',
     'report_returned', 'work_submitted', 'work_to_check', 'work_approved', 'work_returned', 'partner_comment',
-    'team_added', 'partner_shared', 'boutique_approval_requested', 'boutique_approval_decided',
+    'team_added', 'partner_shared', 'work_handed_over', 'boutique_approval_requested', 'boutique_approval_decided',
     'boutique_report_submitted', 'boutique_issue_raised', 'boutique_submission_decided', 'boutique_low_stock'],
   // The Boutique Manager's submissions to the Director.
   'btq.subKind.': ['report', 'incident'],
