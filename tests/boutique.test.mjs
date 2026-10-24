@@ -551,6 +551,18 @@ try {
   check('two write-offs at once: one lands, one is refused', landed === 1 && refusedOne === 1, both.map((r) => r.status));
   check('  the shelf is 14 and the ledger agrees', await stockOf() === 14 && ledgerSum.rows[0].total === 14, { shelf: await stockOf(), ledger: ledgerSum.rows[0].total });
 
+  section('13b. What a quantity is counted in');
+  const flour = await post(manager.token, '/api/boutique/products', { name: 'ZZTEST Maize flour', productType: 'groceries', unit: 'kg', variants: [{ costPrice: 800, sellingPrice: 1000, openingStock: 50 }] });
+  check('a product is saved with its quantity counted in kg', flour.status === 201 && flour.body.unit === 'kg' && flour.body.stockQuantity === 50, flour.body);
+  const flourInStock = (await get(manager.token, '/api/boutique/stock?search=ZZTEST%20Maize')).body.items?.[0];
+  check('  the stock list says what the 50 are', flourInStock?.productUnit === 'kg' && flourInStock.stockQuantity === 50, flourInStock);
+  const flourRow = (await get(admin, `/api/boutique/reports?period=daily&date=${today}`)).body.stockProfit.rows.find((r) => r.variantId === flour.body.variants[0].id);
+  check('  and so does the stock-and-profit report', flourRow?.unit === 'kg' && flourRow.closing === 50, flourRow);
+  const recounted = await put(manager.token, `/api/boutique/products/${flour.body.id}`, { unit: 'sacks' });
+  check('the unit can be changed later without touching anything else', recounted.status === 200 && recounted.body.unit === 'sacks' && recounted.body.name === 'ZZTEST Maize flour' && recounted.body.stockQuantity === 50, recounted.body);
+  const longUnit = await post(manager.token, '/api/boutique/products', { name: 'ZZTEST Long unit', unit: 'x'.repeat(80), variants: [{ sellingPrice: 1 }] });
+  check('  a unit longer than 30 letters is cut, not stored whole', longUnit.status === 201 && longUnit.body.unit.length === 30, longUnit.body.unit);
+
   section('14. Counting the shelf: sales, cost and profit worked out from what is left');
   // Every figure below is checked against the rows this section made, or as a
   // difference from what the day already held, so other trading today cannot

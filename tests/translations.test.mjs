@@ -116,6 +116,8 @@ const FAMILIES = {
   'btq.reasonExample.': boutique.ADJUSTMENT_KINDS,
   'btq.stockState.': ['ok', 'low', 'out'],
   'btq.countStatus.': boutique.SHELF_COUNT_STATUSES,
+  // UNIT_SUGGESTIONS in src/Boutique.jsx, offered by the 'Counted in' box.
+  'btq.unit.': ['kg', 'g', 'litres', 'pieces', 'bottles', 'packets', 'bags', 'boxes', 'dozens', 'sacks', 'trays'],
   'btq.period.': boutique.REPORT_PERIODS,
   'btq.outcome.': ['approved', 'refused', 'accepted', 'returned'],
   // The organisation (server/db/organizationSchema.js): every trail action.

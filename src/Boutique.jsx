@@ -32,6 +32,11 @@ const TABS = {
 
 const money = formatRwf;
 const variantLabel = (v) => [v.size, v.color].filter(Boolean).join(' / ');
+// A quantity with what it is counted in -- '20 kg', '12 bottles' -- or the
+// bare number for a product saved before the unit was asked.
+const qty = (n, unit) => (unit ? `${n} ${unit}` : String(n));
+// Suggestions for 'Counted in'. Typed freely; these are only the usual ones.
+const UNIT_SUGGESTIONS = ['kg', 'g', 'litres', 'pieces', 'bottles', 'packets', 'bags', 'boxes', 'dozens', 'sacks', 'trays'];
 const fullName = (v) => `${v.productName || ''}${variantLabel(v) ? ` (${variantLabel(v)})` : ''}`;
 
 function Panel({ title, subtitle, children, action, onAction }) {
@@ -572,7 +577,7 @@ export function newRequestKey() {
 // arrives -- its name, what kind of thing it is, how many there are and what
 // one sells for. Everything else is folded under "More details" and optional.
 const emptyProduct = () => ({
-  name: '', productType: 'groceries', quantity: '', price: '', costPrice: '', reorderLevel: '',
+  name: '', productType: 'groceries', quantity: '', unit: '', price: '', costPrice: '', reorderLevel: '',
   barcode: '', sku: '', brand: '', description: '', requestKey: newRequestKey()
 });
 
@@ -586,6 +591,7 @@ function productProblems(form, t) {
   if (form.quantity === '' || !whole(form.quantity)) problems.quantity = t('btq.err.quantity');
   if (form.costPrice === '' || !(Number(form.costPrice) >= 0)) problems.costPrice = t('btq.err.buyingPrice');
   if (!whole(form.reorderLevel)) problems.reorderLevel = t('btq.err.quantity');
+  if (!form.unit.trim()) problems.unit = t('btq.err.unit');
   return problems;
 }
 
@@ -627,7 +633,7 @@ function ProductsTab({ fetchJson, upload, onMessage, onError, changed, can, go, 
         const created = await fetchJson('/api/boutique/products', {
           method: 'POST',
           body: JSON.stringify({
-            name: form.name, productType: form.productType, brand: form.brand, description: form.description, requestKey: form.requestKey,
+            name: form.name, productType: form.productType, unit: form.unit, brand: form.brand, description: form.description, requestKey: form.requestKey,
             variants: [{ sku: form.sku, barcode: form.barcode, sellingPrice: form.price, costPrice: form.costPrice || 0, reorderLevel: form.reorderLevel || 0, openingStock: form.quantity }]
           })
         });
@@ -659,6 +665,8 @@ function ProductsTab({ fetchJson, upload, onMessage, onError, changed, can, go, 
   });
 
   return <>
+    {/* The usual units, offered by every "Counted in" box on this tab. */}
+    <datalist id="btq-units">{UNIT_SUGGESTIONS.map((u) => <option key={u} value={t(`btq.unit.${u}`)} />)}</datalist>
     {openId && <ProductDetail productId={openId} fetchJson={fetchJson} upload={upload} onMessage={onMessage} onError={onError} can={can} onClose={() => go('products')} onChanged={refresh} go={go} />}
     <section className="toolbar-row">
       <div className="filter-group">
@@ -694,6 +702,13 @@ function ProductsTab({ fetchJson, upload, onMessage, onError, changed, can, go, 
           <input type="number" inputMode="numeric" min="0" step="1" value={form.quantity} placeholder="40" aria-invalid={Boolean(problems.quantity)} onChange={(e) => set({ quantity: e.target.value })} />
           <small className="field-hint">{t('btq.quantityInStockHint')}</small>
           <FieldError>{problems.quantity}</FieldError>
+        </Field>
+        {/* What the quantity is counted in, right beside it: 50 kg of sugar,
+            40 bottles of water. Typed freely, with the usual ones offered. */}
+        <Field label={`${t('btq.countedIn')} *`}>
+          <input list="btq-units" maxLength="30" value={form.unit} placeholder={t('btq.countedInExample')} aria-invalid={Boolean(problems.unit)} onChange={(e) => set({ unit: e.target.value })} />
+          <small className="field-hint">{t('btq.countedInHint')}</small>
+          <FieldError>{problems.unit}</FieldError>
         </Field>
       </div>
       {/* The profit one piece makes, worked out as it is typed. */}
@@ -732,7 +747,7 @@ function ProductsTab({ fetchJson, upload, onMessage, onError, changed, can, go, 
             <td className="card-title-cell"><button type="button" className="text-btn" onClick={() => go('products', { product: p.id })}><strong>{p.name}</strong></button>
               {p.variants.length > 1 && <small>{fill(t('btq.versionsCount'), { count: p.variants.length })}</small>}</td>
             <td data-label={t('btq.productType')}>{t(`btq.type.${p.productType}`)}</td>
-            <td data-label={t('btq.inStock')}>{p.stockQuantity}</td>
+            <td data-label={t('btq.inStock')}>{qty(p.stockQuantity, p.unit)}</td>
             <td data-label={t('btq.pricePerUnit')}>{p.variants.length > 1 && new Set(prices).size > 1 ? fill(t('btq.priceFrom'), { price: money(lowest) }) : money(lowest)}</td>
             <td data-label={t('btq.stockStatus')}>{state
               ? <Badge tone={state.tone}>{t(`btq.stockState.${state.key}`)}</Badge>
@@ -760,7 +775,7 @@ function ProductDetail({ productId, fetchJson, upload, onMessage, onError, can, 
   const [newVariant, setNewVariant] = useState(null);
   const [imageUrl, setImageUrl] = useState('');
   const refresh = () => { setTick((n) => n + 1); onChanged(); };
-  useEffect(() => { if (product) setForm({ name: product.name, productType: product.productType, category: product.category, brand: product.brand, description: product.description, status: product.status }); }, [product]);
+  useEffect(() => { if (product) setForm({ name: product.name, productType: product.productType, unit: product.unit || '', category: product.category, brand: product.brand, description: product.description, status: product.status }); }, [product]);
   // The picture is fetched with the session header and shown from a blob
   // URL, so no token ever sits in an <img src>.
   useEffect(() => {
@@ -820,6 +835,7 @@ function ProductDetail({ productId, fetchJson, upload, onMessage, onError, can, 
         {can.manage ? <form className="form-grid" onSubmit={save}>
           <Field label={t('field.name')}><input required maxLength="200" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
           <Field label={t('btq.productType')}><select value={form.productType} onChange={(e) => setForm({ ...form, productType: e.target.value })}>{(PRODUCT_CATEGORIES.includes(form.productType) ? PRODUCT_CATEGORIES : [...PRODUCT_CATEGORIES, form.productType]).map((p) => <option key={p} value={p}>{t(`btq.type.${p}`)}</option>)}</select></Field>
+          <Field label={t('btq.countedIn')}><input list="btq-units" maxLength="30" value={form.unit} placeholder={t('btq.countedInExample')} onChange={(e) => setForm({ ...form, unit: e.target.value })} /></Field>
           <Field label={t('field.category')}><input maxLength="100" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} /></Field>
           <Field label={t('btq.brand')}><input maxLength="100" value={form.brand} onChange={(e) => setForm({ ...form, brand: e.target.value })} /></Field>
           <Field label={t('field.status')}><select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}><option value="active">{t('btq.itemStatus.active')}</option><option value="archived">{t('btq.itemStatus.archived')}</option></select></Field>
@@ -947,7 +963,7 @@ function StockTab({ fetchJson, onMessage, onError, changed, can, query }) {
           const state = stockStatus(v.stockQuantity, v.reorderLevel);
           return <tr key={v.id} className={state.key !== 'ok' ? 'btq-low' : undefined}>
             <td className="card-title-cell"><strong>{fullName(v)}</strong><small>{t(`btq.type.${v.productType}`)} · {v.sku}</small></td>
-            <td data-label={t('btq.inStock')}>{v.stockQuantity}</td>
+            <td data-label={t('btq.inStock')}>{qty(v.stockQuantity, v.productUnit)}</td>
             <td data-label={t('btq.stockStatus')}><Badge tone={state.tone}>{t(`btq.stockState.${state.key}`)}</Badge></td>
             <td data-label={t('btq.pricePerUnit')}>{money(v.sellingPrice)}</td>
             <td data-label={t('btq.lowStockAt')}>{v.reorderLevel}</td>
@@ -965,7 +981,7 @@ function StockTab({ fetchJson, onMessage, onError, changed, can, query }) {
       <div className="panel-header"><div><h2>{t('btq.updateStock')}</h2><span>{can.decide ? t('btq.adjustDirectorHint') : t('btq.adjustManagerHint')}</span></div></div>
       <h3 className="form-section-title">1. {t('btq.step.which')}</h3>
       {form.variant
-        ? <p className="btq-picked"><strong>{fullName(form.variant)}</strong> · {fill(t('btq.inStockCount'), { count: onShelf })}
+        ? <p className="btq-picked"><strong>{fullName(form.variant)}</strong> · {fill(t('btq.inStockCount'), { count: qty(onShelf, form.variant.productUnit) })}
           <button type="button" className="text-btn" onClick={() => setForm({ ...form, variant: null })}>{t('btq.pickAnother')}</button></p>
         : <VariantSearch fetchJson={fetchJson} onPick={(v) => { setForm({ ...form, variant: v }); setProblem(''); }} placeholder={t('btq.pickVariant')} />}
       <h3 className="form-section-title">2. {t('btq.step.what')}</h3>
@@ -987,9 +1003,9 @@ function StockTab({ fetchJson, onMessage, onError, changed, can, query }) {
       {/* Before and after, side by side: the difference between "add 10" and
           "there are now 10" is exactly the mistake this form exists to stop. */}
       {form.variant && <div className="btq-stock-preview" aria-live="polite">
-        <Fact label={t('btq.stockNow')} value={onShelf} />
+        <Fact label={t('btq.stockNow')} value={qty(onShelf, form.variant.productUnit)} />
         <Fact label={t('btq.change')} value={after === null ? '—' : (after - onShelf > 0 ? `+${after - onShelf}` : String(after - onShelf))} />
-        <Fact label={t('btq.stockAfterUpdate')} value={after === null ? '—' : <strong className={after < 0 ? 'over-budget' : undefined}>{after}</strong>} />
+        <Fact label={t('btq.stockAfterUpdate')} value={after === null ? '—' : <strong className={after < 0 ? 'over-budget' : undefined}>{qty(after, form.variant.productUnit)}</strong>} />
       </div>}
       {!can.decide && <p className="field-hint">{t('btq.waitsForDirector')}</p>}
       {problem && <p className="field-error" role="alert">{problem}</p>}
@@ -1043,11 +1059,11 @@ function StockProfitPanel({ data }) {
       </tr></thead>
       <tbody>{rows.map((r) => <tr key={r.variantId}>
         <td className="card-title-cell"><strong>{fullName(r)}</strong><small>{r.sku}</small></td>
-        <td data-label={t('btq.sp.opening')}>{r.opening}</td>
+        <td data-label={t('btq.sp.opening')}>{qty(r.opening, r.unit)}</td>
         <td data-label={t('btq.sp.received')}>{r.received ? `+${r.received}` : 0}</td>
-        <td data-label={t('btq.sp.sold')}><strong>{r.sold}</strong></td>
+        <td data-label={t('btq.sp.sold')}><strong>{qty(r.sold, r.unit)}</strong></td>
         <td data-label={t('btq.sp.other')}>{signed(r.other)}</td>
-        <td data-label={t('btq.sp.closing')}>{r.closing}</td>
+        <td data-label={t('btq.sp.closing')}>{qty(r.closing, r.unit)}</td>
         <td data-label={t('btq.sp.revenue')}>{money(r.revenue)}</td>
         <td data-label={t('btq.sp.cost')}>{money(r.cost)}</td>
         <td data-label={t('btq.sp.profit')}><strong className={r.profit < 0 ? 'over-budget' : undefined}>{money(r.profit)}</strong></td>
@@ -1098,7 +1114,7 @@ function CountTab({ fetchJson, onMessage, onError, changed, can }) {
     const raw = left[v.id];
     const n = Number(raw);
     const whole = Number.isInteger(n) && n >= 0;
-    const problem = !whole ? t('btq.err.quantity') : n > v.stockQuantity ? fill(t('btq.count.tooMany'), { count: v.stockQuantity }) : '';
+    const problem = !whole ? t('btq.err.quantity') : n > v.stockQuantity ? fill(t('btq.count.tooMany'), { count: qty(v.stockQuantity, v.productUnit) }) : '';
     const sold = whole && !problem ? v.stockQuantity - n : 0;
     return { v, counted: n, sold, problem, revenue: sold * Number(v.sellingPrice || 0), cost: sold * Number(v.costPrice || 0) };
   });
@@ -1146,13 +1162,13 @@ function CountTab({ fetchJson, onMessage, onError, changed, can }) {
           const line = lineFor(v.id);
           return <tr key={v.id} className={line?.problem ? 'btq-low' : undefined}>
             <td className="card-title-cell"><strong>{fullName(v)}</strong><small>{money(v.sellingPrice)} · {v.sku}</small></td>
-            <td data-label={t('btq.count.shouldHave')}>{v.stockQuantity}</td>
+            <td data-label={t('btq.count.shouldHave')}>{qty(v.stockQuantity, v.productUnit)}</td>
             <td data-label={t('btq.count.leftNow')}>
               <input type="number" inputMode="numeric" min="0" step="1" value={left[v.id] ?? ''} aria-label={`${t('btq.count.leftNow')}: ${fullName(v)}`}
                 aria-invalid={Boolean(line?.problem)} onChange={(e) => setLeft({ ...left, [v.id]: e.target.value })} />
               {line?.problem && <FieldError>{line.problem}</FieldError>}
             </td>
-            <td data-label={t('btq.count.sold')}>{line && !line.problem ? <strong>{line.sold}</strong> : '—'}</td>
+            <td data-label={t('btq.count.sold')}>{line && !line.problem ? <strong>{qty(line.sold, v.productUnit)}</strong> : '—'}</td>
             <td data-label={t('btq.count.sales')}>{line && !line.problem ? money(line.revenue) : '—'}</td>
           </tr>;
         })}</tbody>

@@ -115,6 +115,41 @@ try {
   const twice = await del(admin, `/api/users/${worker.id}`, { confirmUsername: row?.username });
   check('  nor deleted a second time', twice.status === 404, twice.body);
 
+  section('4b. Typed as a name, and in a crowded operation');
+  // The Director types the name they can see, not the username.
+  const byName = await account('zz-del-byname', 'ZZ Del By Name', 'staff', 'mining');
+  const named = await del(admin, `/api/users/${byName.id}`, { confirmUsername: '  zz del   BY name ' });
+  check('typing the person’s name (any case, extra spaces) confirms it too', named.status === 200, named.body);
+  // An operation holding more managers than the three-per-operation rule
+  // allows -- data from before the rule. The rule fired on every update of a
+  // manager's row, so closing one of them was refused by the very rule it
+  // would have helped satisfy.
+  const crowd = [];
+  const tx = await pool.connect();
+  try {
+    await tx.query('BEGIN');
+    await tx.query('ALTER TABLE users DISABLE TRIGGER manager_sector_limit');
+    for (let n = 1; n <= 4; n += 1) {
+      const row = await tx.query(
+        "INSERT INTO users (username, password_hash, name, role, sector) VALUES ($1, $2, $3, 'manager', 'movement') RETURNING id",
+        [`zz-del-crowd-${n}`, bcrypt.hashSync(PASSWORD, 4), `ZZ Del Crowd ${n}`]
+      );
+      crowd.push(row.rows[0].id);
+      created.push(row.rows[0].id);
+    }
+    await tx.query('ALTER TABLE users ENABLE TRIGGER manager_sector_limit');
+    await tx.query('COMMIT');
+  } catch (error) {
+    await tx.query('ROLLBACK');
+    throw error;
+  } finally {
+    tx.release();
+  }
+  // History, so the account is closed (an UPDATE) rather than removed.
+  await pool.query("INSERT INTO organization_history (action, subject_user_id, subject_name, detail) VALUES ('account_suspended', $1, 'ZZ Del Crowd 1', '{}')", [crowd[0]]);
+  const crowded = await del(admin, `/api/users/${crowd[0]}`, { confirmUsername: 'zz-del-crowd-1' });
+  check('a manager in an operation with too many managers can still be closed', crowded.status === 200 && crowded.body.outcome === 'closed', crowded.body);
+
   section('5. Once the work is handed over');
   const freed = await del(admin, `/api/users/${boss.id}`, { confirmUsername: boss.username });
   check('the manager can be deleted once nobody reports to them', freed.status === 200 && ['removed', 'closed'].includes(freed.body.outcome), freed.body);

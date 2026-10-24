@@ -413,11 +413,15 @@ router.delete('/:id', adminOnly('Only the Director can delete an account.'), asy
       return res.status(404).json({ message: 'Account not found.' });
     }
     const target = found.rows[0];
-    // The confirmation the screen asks for, checked here too: the username,
-    // typed. One stray click cannot delete anybody.
-    if (String(req.body?.confirmUsername || '').trim().toLowerCase() !== target.username.toLowerCase()) {
+    // The confirmation the screen asks for, checked here too: the account
+    // typed out -- its username or the person's full name, whichever the
+    // Director knows them by (asking for the username alone was refused
+    // every time somebody typed the name they could see). One stray click
+    // cannot delete anybody.
+    const typed = String(req.body?.confirmUsername || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    if (!typed || (typed !== target.username.toLowerCase() && typed !== String(target.name).trim().replace(/\s+/g, ' ').toLowerCase())) {
       await safeRollback(client);
-      return res.status(400).json({ code: 'CONFIRM_REQUIRED', message: `To delete this account, type its username (${target.username}) exactly.` });
+      return res.status(400).json({ code: 'CONFIRM_REQUIRED', message: `Nothing was deleted. To confirm, type ${target.name} or the username ${target.username}.` });
     }
     if (target.role === 'super-admin') {
       // Locked, so two Directors deleting each other at once cannot both land.

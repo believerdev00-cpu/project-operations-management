@@ -291,7 +291,7 @@ export default function Home({
   return <div className="home">
     <section className="home-hello">
       <div>
-        <h2>{isDirector || user.coversAllSectors ? t('user.allOperations') : operationsOf(user).map((id) => operationName(id, language)).join(' · ')}</h2>
+        <h2>{isDirector || user.coversAllSectors ? t('home.allProjects') : operationsOf(user).map((id) => operationName(id, language)).join(' · ')}</h2>
         <p>{todayLabel(language)}</p>
       </div>
       {/* The Director's five doors (section 1 of the brief), in the words of

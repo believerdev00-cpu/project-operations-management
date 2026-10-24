@@ -1325,26 +1325,39 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // your own account, the last Director and anyone still holding work, and
   // answers whether the account was removed or closed; the message repeats
   // exactly that, never more.
+  //
+  // Every answer -- done, refused, or a typing slip -- is shown in a box in
+  // front of the Director. It used to go to the banner at the top of the page,
+  // far above the People list, so a refused delete looked like a button that
+  // did nothing. The person's name is accepted as well as their username.
   const deleteAccount = act(async (account) => {
+    const said = (title, message) => dialog.notice({ title, message, confirmLabel: t('dialog.ok') });
     const typed = await dialog.prompt({
       title: fill(t('msg.deleteTitle'), { name: account.name }),
       message: t('msg.deleteBody'),
-      label: fill(t('msg.deleteTypeUsername'), { username: account.username }),
+      label: fill(t('msg.deleteTypeUsername'), { name: account.name, username: account.username }),
       required: true,
       confirmLabel: t('action.deleteAccount'),
       danger: true
     });
     if (typed === null) return;
-    if (typed.trim().toLowerCase() !== String(account.username).toLowerCase()) {
-      fail(fill(t('msg.deleteWrongUsername'), { username: account.username }));
+    const plain = (value) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    if (plain(typed) !== plain(account.username) && plain(typed) !== plain(account.name)) {
+      await said(t('msg.deleteNotDone'), fill(t('msg.deleteWrongUsername'), { name: account.name, username: account.username }));
       return;
     }
     setError('');
     try {
       const result = await fetchJson(`/api/users/${account.id}`, { method: 'DELETE', body: JSON.stringify({ confirmUsername: typed.trim() }) });
-      notify(fill(t(result.outcome === 'removed' ? 'msg.deletedRemoved' : 'msg.deletedClosed'), { name: account.name, count: result.records }));
+      const message = fill(t(result.outcome === 'removed' ? 'msg.deletedRemoved' : 'msg.deletedClosed'), { name: account.name, count: result.records });
+      notify(message);
       await loadData();
-    } catch (deleteError) { fail(deleteError.message); }
+      await said(t('msg.deleteDone'), message);
+    } catch (deleteError) {
+      // The server's own reason: who still reports to them, which months they
+      // still run -- the things to hand over before trying again.
+      await said(t('msg.deleteNotDone'), deleteError.message);
+    }
   });
 
   const resetPassword = act(async (account) => {

@@ -126,6 +126,9 @@ function mapVariant(row) {
     // Carried when the variant is listed outside its product (stock, search).
     productName: row.product_name,
     productType: row.product_type,
+    // What one unit of stock is: kg, bottles, pieces. Blank on products saved
+    // before it was asked, which read as plain numbers.
+    productUnit: row.product_unit ?? row.unit ?? '',
     brand: row.brand,
     hasImage: row.image_stored_name ? true : undefined
   };
@@ -143,6 +146,7 @@ function mapProduct(row) {
     id: row.id,
     name: row.name,
     productType: row.product_type,
+    unit: row.unit || '',
     category: row.category || '',
     brand: row.brand || '',
     description: row.description || '',
@@ -150,7 +154,7 @@ function mapProduct(row) {
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    variants: (row.variants || []).map(mapVariant),
+    variants: (row.variants || []).map((v) => mapVariant({ ...v, product_unit: row.unit || '' })),
     stockQuantity: (row.variants || []).reduce((sum, v) => sum + Number(v.stock_quantity || 0), 0)
   };
 }
@@ -499,6 +503,9 @@ function readProduct(body, current = null) {
     // Any saved value stays valid (an old 'clothing' product can still be
     // edited); a new product with no category is 'other'.
     productType: oneOf(pick('productType', current?.product_type || 'other'), PRODUCT_TYPES, 'Category'),
+    // What the quantity is counted in -- kg, bottles, pieces, litres -- so
+    // "20" on a screen always says 20 of what.
+    unit: text(pick('unit', current?.unit), 30),
     category: text(pick('category', current?.category), 100),
     brand: text(pick('brand', current?.brand), 100),
     description: text(pick('description', current?.description), 2000),
@@ -571,9 +578,9 @@ router.post('/products', asyncRoute(async (req, res) => {
   }
   const created = await transaction(async (client) => {
     const inserted = await client.query(
-      `INSERT INTO boutique_products (name, product_type, category, brand, description, status, created_by, request_key)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-      [product.name, product.productType, product.category, product.brand, product.description, product.status, req.user.id, requestKey]
+      `INSERT INTO boutique_products (name, product_type, category, brand, description, status, created_by, request_key, unit)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+      [product.name, product.productType, product.category, product.brand, product.description, product.status, req.user.id, requestKey, product.unit]
     );
     const productId = inserted.rows[0].id;
     await audit(client, { entityType: 'product', entityId: productId, action: 'Product created', details: { name: product.name, type: product.productType }, actor: req.user });
@@ -591,8 +598,8 @@ router.put('/products/:id', asyncRoute(async (req, res) => {
     if (!current.rowCount) throw new BoutiqueError(404, 'Product not found.');
     const product = readProduct(req.body || {}, current.rows[0]);
     await client.query(
-      `UPDATE boutique_products SET name = $2, product_type = $3, category = $4, brand = $5, description = $6, status = $7, updated_at = NOW() WHERE id = $1`,
-      [productId, product.name, product.productType, product.category, product.brand, product.description, product.status]
+      `UPDATE boutique_products SET name = $2, product_type = $3, category = $4, brand = $5, description = $6, status = $7, unit = $8, updated_at = NOW() WHERE id = $1`,
+      [productId, product.name, product.productType, product.category, product.brand, product.description, product.status, product.unit]
     );
     await audit(client, { entityType: 'product', entityId: productId, action: 'Product updated', details: { before: { name: current.rows[0].name, status: current.rows[0].status }, after: { name: product.name, status: product.status } }, actor: req.user });
     return loadProduct(client, productId);
@@ -716,7 +723,7 @@ router.get('/pos/search', asyncRoute(async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return send(res, []);
   const result = await pool.query(
-    `SELECT v.*, p.name AS product_name, p.product_type, p.brand, p.image_stored_name
+    `SELECT v.*, p.name AS product_name, p.product_type, p.unit AS product_unit, p.brand, p.image_stored_name
        FROM boutique_variants v JOIN boutique_products p ON p.id = v.product_id
       WHERE v.status = 'active' AND p.status = 'active'
         AND (v.barcode = $1 OR v.sku ILIKE $2 OR p.name ILIKE $2 OR p.brand ILIKE $2)
@@ -1102,7 +1109,7 @@ router.post('/sales/:id/returns', asyncRoute(async (req, res) => {
 // =====================================================================================
 
 const STOCK_SQL = `
-  SELECT v.*, p.name AS product_name, p.product_type, p.brand, p.image_stored_name
+  SELECT v.*, p.name AS product_name, p.product_type, p.unit AS product_unit, p.brand, p.image_stored_name
     FROM boutique_variants v JOIN boutique_products p ON p.id = v.product_id`;
 
 router.get('/stock', asyncRoute(async (req, res) => {
@@ -1860,7 +1867,7 @@ async function stockProfit(period) {
   const day = shopDay('m.created_at');
   const [ledger, till, returned, counted] = await Promise.all([
     pool.query(
-      `SELECT v.id, v.sku, v.size, v.color, v.cost_price, v.stock_quantity, v.status, p.name AS product_name, p.product_type,
+      `SELECT v.id, v.sku, v.size, v.color, v.cost_price, v.stock_quantity, v.status, p.name AS product_name, p.product_type, p.unit,
               COALESCE(SUM(m.quantity) FILTER (WHERE ${day} < $1), 0)::int AS opening,
               COALESCE(SUM(m.quantity) FILTER (WHERE ${day} BETWEEN $1 AND $2 AND m.kind = ANY($3::text[])), 0)::int AS received,
               COALESCE(SUM(m.quantity) FILTER (WHERE ${day} BETWEEN $1 AND $2 AND m.kind = ANY($4::text[])), 0)::int AS sold_signed,
@@ -1869,7 +1876,7 @@ async function stockProfit(period) {
               COUNT(m.id) FILTER (WHERE ${day} BETWEEN $1 AND $2)::int AS moves
          FROM boutique_variants v JOIN boutique_products p ON p.id = v.product_id
          LEFT JOIN boutique_stock_movements m ON m.variant_id = v.id
-        GROUP BY v.id, p.name, p.product_type
+        GROUP BY v.id, p.name, p.product_type, p.unit
         ORDER BY p.name, v.size, v.color`,
       [...range, RECEIVED_KINDS, SOLD_KINDS]
     ),
@@ -1908,7 +1915,7 @@ async function stockProfit(period) {
     const cost = toMinor(t?.cost) - toMinor(r?.cost) + toMinor(k?.cost);
     const stockValue = toMinor(v.cost_price) * v.closing;
     const row = {
-      variantId: v.id, productName: v.product_name, productType: v.product_type, sku: v.sku, size: v.size || '', color: v.color || '',
+      variantId: v.id, productName: v.product_name, productType: v.product_type, unit: v.unit || '', sku: v.sku, size: v.size || '', color: v.color || '',
       opening: v.opening, received: v.received, sold: -v.sold_signed, other: v.other, closing: v.closing,
       revenue: fromMinor(revenue), cost: fromMinor(cost), profit: fromMinor(revenue - cost),
       unitCost: money(v.cost_price), stockValue: fromMinor(stockValue)

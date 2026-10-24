@@ -510,6 +510,12 @@ const statements = [
   // never rewrite the revenue or the profit of a day already counted. The sold
   // pieces leave the shelf through moveStock (kind count_sale), so the ledger
   // and the shelf still agree; a void puts them back (count_sale_void).
+  // What one unit of a product is -- kg, bottles, pieces, litres -- typed
+  // beside the quantity when the product is added. Blank on products saved
+  // before it was asked. Quantities stay whole numbers: sugar sold by the
+  // half-kilo is counted in 500 g bags, not in 0.5 kg.
+  `ALTER TABLE boutique_products ADD COLUMN IF NOT EXISTS unit VARCHAR(30) NOT NULL DEFAULT ''`,
+
   `CREATE TABLE IF NOT EXISTS boutique_shelf_counts (
      id SERIAL PRIMARY KEY,
      counted_on DATE NOT NULL,

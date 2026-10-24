@@ -185,7 +185,9 @@ export function DialogProvider({ children }) {
   const api = useMemo(() => ({
     confirm: (options) => open({ ...options, kind: 'confirm' }),
     prompt: (options) => open({ ...options, kind: 'prompt' }),
-    password: (options) => open({ ...options, kind: 'password' })
+    password: (options) => open({ ...options, kind: 'password' }),
+    // An answer the reader must see -- done, or why not -- with one button.
+    notice: (options) => open({ ...options, kind: 'notice' })
   }), [open]);
 
   return <DialogContext.Provider value={api}>
@@ -285,7 +287,7 @@ function Dialog({ dialog, onClose }) {
     event.preventDefault();
     setTouched(true);
     if (problem) return;
-    if (dialog.kind === 'confirm') onClose(true);
+    if (dialog.kind === 'confirm' || dialog.kind === 'notice') onClose(true);
     else if (dialog.kind === 'password') onClose(dialog.current ? { current, next: value } : value);
     else onClose(text);
   };
@@ -332,7 +334,7 @@ function Dialog({ dialog, onClose }) {
       {touched && problem && <p className="dialog-error" role="alert">{problem}</p>}
 
       <div className="dialog-actions">
-        <button className="secondary-btn" type="button" onClick={() => onClose(cancelValue)}>{dialog.cancelLabel || t('action.cancel')}</button>
+        {dialog.kind !== 'notice' && <button className="secondary-btn" type="button" onClick={() => onClose(cancelValue)}>{dialog.cancelLabel || t('action.cancel')}</button>}
         <button className={dialog.danger ? 'danger-btn filled' : 'primary-btn'} type="submit">
           {dialog.confirmLabel || t('dialog.confirm')}
         </button>

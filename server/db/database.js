@@ -291,7 +291,10 @@ export async function initDatabase() {
       CREATE OR REPLACE FUNCTION enforce_manager_sector_limit()
       RETURNS trigger AS $$
       BEGIN
-        IF NEW.role = 'manager' AND NEW.sector IS NOT NULL AND
+        -- Closing an account (status deleted) never adds a manager, so it is
+        -- never refused here -- in an operation already holding three, the
+        -- rule used to block the very delete that would bring it down to two.
+        IF NEW.role = 'manager' AND NEW.status <> 'deleted' AND NEW.sector IS NOT NULL AND
           (SELECT COUNT(*) FROM users WHERE role = 'manager' AND status <> 'deleted' AND sector = NEW.sector AND id <> COALESCE(NEW.id, 0)) >= 3 THEN
           RAISE EXCEPTION 'A sector cannot have more than three managers';
         END IF;
@@ -300,7 +303,13 @@ export async function initDatabase() {
       $$ LANGUAGE plpgsql;
     `);
     await pool.query(`DROP TRIGGER IF EXISTS manager_sector_limit ON users`);
-    await pool.query(`CREATE TRIGGER manager_sector_limit BEFORE INSERT OR UPDATE ON users FOR EACH ROW EXECUTE FUNCTION enforce_manager_sector_limit()`);
+    // Only when a manager can actually be ADDED to an operation: a new account,
+    // or a change of role or operation. It used to fire on every update of the
+    // row, so in an operation already holding more managers than the limit
+    // (data from before the rule) none of them could be suspended, given a new
+    // password, moved off a team or deleted -- the update was refused by a
+    // rule it had nothing to do with.
+    await pool.query(`CREATE TRIGGER manager_sector_limit BEFORE INSERT OR UPDATE OF role, sector ON users FOR EACH ROW EXECUTE FUNCTION enforce_manager_sector_limit()`);
     await pool.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS manager_id INTEGER REFERENCES users(id) ON DELETE SET NULL');
     await pool.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()');
     await pool.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()');
@@ -410,11 +419,16 @@ export async function initDatabase() {
       ON CONFLICT DO NOTHING
     `);
     // The users trigger keeps its own function, now counting both routes.
+    // This is the definition in force (it replaces the first-boot one above
+    // on every migration). Closing an account (status deleted) never adds a
+    // manager, so it is never refused: in an operation already over the
+    // limit -- data from before the rule -- this blocked the very delete that
+    // brings the count down.
     await pool.query(`
       CREATE OR REPLACE FUNCTION enforce_manager_sector_limit()
       RETURNS trigger AS $$
       BEGIN
-        IF NEW.role = 'manager' AND NEW.sector IS NOT NULL AND ${countHolders('COALESCE(NEW.id, 0)', 'NEW.sector')} THEN
+        IF NEW.role = 'manager' AND NEW.status <> 'deleted' AND NEW.sector IS NOT NULL AND ${countHolders('COALESCE(NEW.id, 0)', 'NEW.sector')} THEN
           RAISE EXCEPTION 'A sector cannot have more than three managers';
         END IF;
         RETURN NEW;
