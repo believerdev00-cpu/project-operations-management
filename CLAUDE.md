@@ -85,7 +85,7 @@ A fifth business operation, `boutique` (`RETAIL_OPERATION`, `kind: 'retail'` in 
 - **Closing a till** freezes `expected_cash` (float + cash taken − change − cash refunds − cash expenses paid from it − payouts + cash put in, voided sales excluded) and `expected_by_method` beside what was counted; `cash_variance` is the day's shortage or surplus and is never recomputed. One open till per person.
 - **The books never count twice** (`financeFigures`): net sales = gross − returns; cost of sales = frozen unit costs sold − cost of restocked returns; gross profit = net sales − cost of sales; net profit = gross profit − active expenses; payments received by method = taken − change − refunds, exchange credit excluded; goods bought are stock, not expenses, until sold; inventory value is the shelf at cost. `GET /reports?period=daily|weekly|monthly|custom` adds sales by day, most sold, size/colour/type demand, low stock, purchases, expenses by category, returns, payment reconciliation against the closed tills, and cashier performance. A cashier reads none of this.
 - **Dates** are the shop's day (`BOUTIQUE_TIMEZONE`, default `Africa/Kigali`), not the database's UTC day.
-- **The suite (`npm test boutique`)** is 114 checks against the live API; fixtures are `zz-btq-*` accounts and `ZZTEST` products/suppliers, removed in `finally`.
+- **The suite (`npm test boutique`)** is 174 checks against the live API; fixtures are `zz-btq-*` accounts and `ZZTEST` products/suppliers, removed in `finally`.
 
 ### Domain invariants
 
