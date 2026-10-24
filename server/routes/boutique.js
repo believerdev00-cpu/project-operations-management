@@ -414,7 +414,11 @@ router.get('/overview', asyncRoute(async (req, res) => {
                        COALESCE(SUM(v.stock_quantity * v.selling_price), 0) AS retail_value
                   FROM boutique_products p LEFT JOIN boutique_variants v ON v.product_id = p.id AND v.status = 'active'
                  WHERE p.status = 'active'`),
-    pool.query(`SELECT COUNT(*)::int AS count, COALESCE(SUM(total), 0) AS total FROM boutique_sales WHERE status <> 'voided' AND sold_on = $1`, [today]),
+    // Today's sales: the till's, plus what today's shelf counts found sold.
+    pool.query(`SELECT (SELECT COUNT(*) FROM boutique_sales WHERE status <> 'voided' AND sold_on = $1)::int AS count,
+                       (SELECT COALESCE(SUM(total), 0) FROM boutique_sales WHERE status <> 'voided' AND sold_on = $1)
+                     + (SELECT COALESCE(SUM(l.revenue), 0) FROM boutique_shelf_counts c JOIN boutique_shelf_count_lines l ON l.count_id = c.id
+                         WHERE c.status = 'recorded' AND c.counted_on = $1) AS total`, [today]),
     pool.query(`SELECT COUNT(*)::int AS open FROM boutique_cash_sessions WHERE status = 'open'`),
     pool.query(`SELECT (SELECT COUNT(*) FROM boutique_stock_adjustments WHERE status = 'pending')::int AS adjustments,
                        (SELECT COUNT(*) FROM boutique_sales WHERE status = 'void_requested')::int AS voids,
@@ -1236,6 +1240,194 @@ router.post('/stock/adjustments/:id/decision', asyncRoute(async (req, res) => {
 }));
 
 // =====================================================================================
+// 3b. Counting the shelf: what was sold, worked out from what is left
+// =====================================================================================
+//
+// For a shop that sells over the counter without ringing each sale up. The
+// manager (or the Director) counts what is left of each product; for each one
+//
+//     sold = what the shelf should hold now − what was counted
+//
+// where "what the shelf should hold" is the ledger's figure: the opening
+// stock, plus every delivery recorded, minus damaged/missing/other
+// adjustments, minus the till's own sales. So the formula in the brief --
+// opening + received − closing, corrected for adjustments -- is exactly
+// expected − counted, and nothing is counted twice: a piece sold at the till
+// has already left the shelf before the count.
+//
+// Refused rather than guessed:
+//  * counting MORE than the shelf should hold (COUNT_ABOVE_SHELF). That means
+//    stock came in that nobody recorded; booking it as "−5 sold" would invent
+//    a negative sale. The answer says to record the delivery first.
+//  * a count on any day but today, so the pieces (ledger rows, written now)
+//    and the money (counted_on) always fall on the same day of every report.
+//
+// The selling and buying prices are frozen on each line at the moment of the
+// count, so changing a price afterwards rewrites nothing. Nothing is deleted:
+// the Director voids a wrong count with a reason, which puts its pieces back.
+
+const SHELF_COUNT_SQL = `
+  SELECT c.*, u.name AS counted_by_name, vu.name AS voided_by_name,
+         COALESCE((SELECT SUM(l.sold) FROM boutique_shelf_count_lines l WHERE l.count_id = c.id), 0)::int AS pieces,
+         COALESCE((SELECT SUM(l.revenue) FROM boutique_shelf_count_lines l WHERE l.count_id = c.id), 0) AS revenue,
+         COALESCE((SELECT SUM(l.cost) FROM boutique_shelf_count_lines l WHERE l.count_id = c.id), 0) AS cost,
+         (SELECT COUNT(*) FROM boutique_shelf_count_lines l WHERE l.count_id = c.id)::int AS line_count
+    FROM boutique_shelf_counts c
+    LEFT JOIN users u ON u.id = c.counted_by LEFT JOIN users vu ON vu.id = c.voided_by`;
+
+function mapShelfCount(row, lines = null) {
+  return {
+    id: row.id,
+    countedOn: row.counted_on,
+    note: row.note || '',
+    status: row.status,
+    countedBy: row.counted_by,
+    countedByName: row.counted_by_name || '',
+    voidedByName: row.voided_by_name || '',
+    voidedAt: row.voided_at,
+    voidReason: row.void_reason || '',
+    lineCount: Number(row.line_count || 0),
+    pieces: Number(row.pieces || 0),
+    revenue: money(row.revenue),
+    cost: money(row.cost),
+    profit: fromMinor(toMinor(row.revenue) - toMinor(row.cost)),
+    createdAt: row.created_at,
+    lines: lines ? lines.map((l) => ({
+      id: l.id, variantId: l.variant_id, productName: l.product_name, sku: l.sku,
+      expected: l.expected, counted: l.counted, sold: l.sold,
+      unitPrice: money(l.unit_price), unitCost: money(l.unit_cost), revenue: money(l.revenue), cost: money(l.cost),
+      profit: fromMinor(toMinor(l.revenue) - toMinor(l.cost))
+    })) : undefined
+  };
+}
+
+async function loadShelfCount(db, countId) {
+  const row = await db.query(`${SHELF_COUNT_SQL} WHERE c.id = $1`, [countId]);
+  if (!row.rowCount) throw new BoutiqueError(404, 'Shelf count not found.');
+  const lines = await db.query('SELECT * FROM boutique_shelf_count_lines WHERE count_id = $1 ORDER BY product_name, id', [countId]);
+  return mapShelfCount(row.rows[0], lines.rows);
+}
+
+router.get('/shelf-counts', asyncRoute(async (req, res) => {
+  requireNotCashier(req);
+  const values = [];
+  const filters = [];
+  if (req.query.from) { values.push(dateOr(req.query.from, null, 'From')); filters.push(`c.counted_on >= $${values.length}`); }
+  if (req.query.to) { values.push(dateOr(req.query.to, null, 'To')); filters.push(`c.counted_on <= $${values.length}`); }
+  const result = await pool.query(`${SHELF_COUNT_SQL} ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''} ORDER BY c.created_at DESC LIMIT 100`, values);
+  send(res, result.rows.map((row) => mapShelfCount(row)));
+}));
+
+router.get('/shelf-counts/:id', asyncRoute(async (req, res) => {
+  requireNotCashier(req);
+  send(res, await loadShelfCount(pool, parseRecordId(req.params.id, 'Shelf count')));
+}));
+
+router.post('/shelf-counts', asyncRoute(async (req, res) => {
+  requireManage(req);
+  const body = req.body || {};
+  const lines = Array.isArray(body.lines) ? body.lines : [];
+  if (!lines.length) throw new BoutiqueError(400, 'Write how many are left of at least one product, then save.');
+  if (lines.length > 1000) throw new BoutiqueError(400, 'A count can hold at most 1,000 products.');
+  const wanted = lines.map((line) => ({
+    variantId: parseRecordId(line?.variantId, 'Product'),
+    counted: wholeNumber(line?.counted, { label: 'The number counted', minimum: 0 })
+  }));
+  if (new Set(wanted.map((line) => line.variantId)).size !== wanted.length) {
+    throw new BoutiqueError(400, 'Each product can be counted only once in the same count.');
+  }
+  const note = text(body.note, 1000);
+  const requestKey = requestKeyOf(body);
+  if (requestKey) {
+    const earlier = await pool.query('SELECT id FROM boutique_shelf_counts WHERE request_key = $1', [requestKey]);
+    if (earlier.rowCount) return send(res, await loadShelfCount(pool, earlier.rows[0].id), 200);
+  }
+  const countedOn = todayInShop();
+  const saved = await transaction(async (client) => {
+    // Every product in the count is locked in id order -- the order every
+    // other writer locks in -- so a till sale and a count cannot deadlock,
+    // and "what the shelf should hold" cannot change between reading it and
+    // booking the difference.
+    const ids = [...wanted.map((line) => line.variantId)].sort((a, b) => a - b);
+    const locked = await client.query(
+      `SELECT v.id, v.sku, v.stock_quantity, v.selling_price, v.cost_price, v.status, p.name AS product_name, p.status AS product_status
+         FROM boutique_variants v JOIN boutique_products p ON p.id = v.product_id
+        WHERE v.id = ANY($1::int[]) ORDER BY v.id FOR UPDATE OF v`,
+      [ids]
+    );
+    const byId = new Map(locked.rows.map((row) => [row.id, row]));
+    for (const line of wanted) {
+      const variant = byId.get(line.variantId);
+      if (!variant) throw new BoutiqueError(404, 'One of the products in this count no longer exists. Reload the page and count again.');
+      if (variant.status !== 'active' || variant.product_status !== 'active') {
+        throw new BoutiqueError(400, `"${variant.product_name}" is archived and cannot be counted.`);
+      }
+      if (line.counted > variant.stock_quantity) {
+        throw new BoutiqueError(409,
+          `"${variant.product_name}": you counted ${line.counted}, but the shelf should only hold ${variant.stock_quantity}. If new stock came in, record it first (Update stock → New stock arrived), then count again.`,
+          'COUNT_ABOVE_SHELF');
+      }
+    }
+    const inserted = await client.query(
+      'INSERT INTO boutique_shelf_counts (counted_on, note, counted_by, request_key) VALUES ($1, $2, $3, $4) RETURNING id',
+      [countedOn, note, req.user.id, requestKey]
+    );
+    const countId = inserted.rows[0].id;
+    let pieces = 0;
+    let revenue = 0;
+    for (const line of wanted) {
+      const variant = byId.get(line.variantId);
+      const expected = variant.stock_quantity;
+      const sold = expected - line.counted;
+      // Integer hundredths, like every money sum in the shop.
+      const lineRevenue = toMinor(variant.selling_price) * sold;
+      const lineCost = toMinor(variant.cost_price) * sold;
+      await client.query(
+        `INSERT INTO boutique_shelf_count_lines (count_id, variant_id, product_name, sku, expected, counted, sold, unit_price, unit_cost, revenue, cost)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [countId, variant.id, variant.product_name, variant.sku, expected, line.counted, sold,
+          money(variant.selling_price), money(variant.cost_price), fromMinor(lineRevenue), fromMinor(lineCost)]
+      );
+      if (sold > 0) {
+        const moved = await moveStock(client, { variantId: variant.id, quantity: -sold, kind: 'count_sale', referenceType: 'shelf_count', referenceId: countId, note: note || 'Sold, by shelf count', actor: req.user });
+        if (moved.ranLow) {
+          await notifyMany(client, await lowStockRecipients(client), {
+            kind: 'boutique_low_stock', params: { title: `${variant.product_name} (${variant.sku})`, count: moved.after }, link: '#/boutique/stock', actor: req.user
+          });
+        }
+      }
+      pieces += sold;
+      revenue += lineRevenue;
+    }
+    await audit(client, { entityType: 'shelf_count', entityId: countId, action: 'Shelf counted', details: { countedOn, products: wanted.length, pieces, revenue: fromMinor(revenue) }, actor: req.user });
+    return loadShelfCount(client, countId);
+  });
+  send(res, saved, 201);
+}));
+
+router.post('/shelf-counts/:id/void', asyncRoute(async (req, res) => {
+  requireDecide(req);
+  const countId = parseRecordId(req.params.id, 'Shelf count');
+  const reason = text(req.body?.reason, 1000);
+  if (reason.length < 10) throw new BoutiqueError(400, 'Say why this count is wrong, in at least 10 characters.');
+  const voided = await transaction(async (client) => {
+    const current = await client.query("UPDATE boutique_shelf_counts SET status = 'voided', voided_by = $2, voided_at = NOW(), void_reason = $3 WHERE id = $1 AND status = 'recorded' RETURNING id", [countId, req.user.id, reason]);
+    if (!current.rowCount) {
+      const exists = await client.query('SELECT 1 FROM boutique_shelf_counts WHERE id = $1', [countId]);
+      throw new BoutiqueError(exists.rowCount ? 409 : 404, exists.rowCount ? 'This count has already been voided.' : 'Shelf count not found.');
+    }
+    // The pieces the count booked as sold go back on the shelf, in id order.
+    const lines = await client.query('SELECT variant_id, sold FROM boutique_shelf_count_lines WHERE count_id = $1 AND sold > 0 ORDER BY variant_id', [countId]);
+    for (const line of lines.rows) {
+      await moveStock(client, { variantId: line.variant_id, quantity: line.sold, kind: 'count_sale_void', referenceType: 'shelf_count', referenceId: countId, note: reason, actor: req.user });
+    }
+    await audit(client, { entityType: 'shelf_count', entityId: countId, action: 'Shelf count voided', details: { reason }, actor: req.user });
+    return loadShelfCount(client, countId);
+  });
+  send(res, voided);
+}));
+
+// =====================================================================================
 // 4. Suppliers and purchases
 // =====================================================================================
 
@@ -1637,18 +1829,136 @@ router.get('/finance', asyncRoute(async (req, res) => {
 
 // The period report, as one object: what the Reports tab shows, and what the
 // Boutique Manager sends to the Director frozen in a submission.
+// ---- stock and profit, product by product ------------------------------------
+//
+// One line per product for the period, read from the ledger and the frozen
+// prices, so it always adds up:
+//
+//     opening + received − sold + other changes = closing
+//
+//  * opening   the shelf at the start of the first day (every ledger row before it)
+//  * received  the first count, purchase-order deliveries, "new stock arrived",
+//              transfers in
+//  * sold      till sales and shelf-count sales, less what came back (returns
+//              restocked, voided sales, voided counts)
+//  * other     damaged, missing, a physical count, sent back to the supplier,
+//              transferred out -- signed, usually negative
+//  * revenue   the till's line totals with the sale's own discount shared out
+//              over its lines, less returns, plus the counted lines -- at the
+//              prices frozen when each was sold, never today's price
+//  * cost      the buying price frozen on each line sold (till and count), less
+//              the cost of what went back on the shelf
+//  * stock value  closing × the buying price per unit
+//
+// Pieces are dated by the ledger row and money by the sale or count, which
+// fall on the same shop day for everything rung up or counted.
+const SOLD_KINDS = ['sale', 'sale_return', 'void', 'count_sale', 'count_sale_void'];
+const RECEIVED_KINDS = ['opening', 'purchase_receipt', 'received', 'transfer_in'];
+
+async function stockProfit(period) {
+  const range = [period.start, period.end];
+  const day = shopDay('m.created_at');
+  const [ledger, till, returned, counted] = await Promise.all([
+    pool.query(
+      `SELECT v.id, v.sku, v.size, v.color, v.cost_price, v.stock_quantity, v.status, p.name AS product_name, p.product_type,
+              COALESCE(SUM(m.quantity) FILTER (WHERE ${day} < $1), 0)::int AS opening,
+              COALESCE(SUM(m.quantity) FILTER (WHERE ${day} BETWEEN $1 AND $2 AND m.kind = ANY($3::text[])), 0)::int AS received,
+              COALESCE(SUM(m.quantity) FILTER (WHERE ${day} BETWEEN $1 AND $2 AND m.kind = ANY($4::text[])), 0)::int AS sold_signed,
+              COALESCE(SUM(m.quantity) FILTER (WHERE ${day} BETWEEN $1 AND $2 AND NOT (m.kind = ANY($3::text[])) AND NOT (m.kind = ANY($4::text[]))), 0)::int AS other,
+              COALESCE(SUM(m.quantity) FILTER (WHERE ${day} <= $2), 0)::int AS closing,
+              COUNT(m.id) FILTER (WHERE ${day} BETWEEN $1 AND $2)::int AS moves
+         FROM boutique_variants v JOIN boutique_products p ON p.id = v.product_id
+         LEFT JOIN boutique_stock_movements m ON m.variant_id = v.id
+        GROUP BY v.id, p.name, p.product_type
+        ORDER BY p.name, v.size, v.color`,
+      [...range, RECEIVED_KINDS, SOLD_KINDS]
+    ),
+    pool.query(
+      `SELECT i.variant_id,
+              -- The sale's own discount shared over its lines in proportion,
+              -- so the lines of a sale add up to what the customer paid.
+              SUM(CASE WHEN s.subtotal > 0 THEN ROUND(i.line_total * s.total / s.subtotal, 2) ELSE 0 END) AS revenue,
+              SUM(i.quantity * i.unit_cost) AS cost
+         FROM boutique_sale_items i JOIN boutique_sales s ON s.id = i.sale_id
+        WHERE s.status <> 'voided' AND s.sold_on BETWEEN $1 AND $2 GROUP BY i.variant_id`, range),
+    pool.query(
+      `SELECT ri.variant_id, SUM(ri.quantity * ri.unit_price) AS value,
+              SUM(CASE WHEN ri.restock THEN ri.quantity * ri.unit_cost ELSE 0 END) AS cost
+         FROM boutique_return_items ri JOIN boutique_returns r ON r.id = ri.return_id
+        WHERE r.returned_on BETWEEN $1 AND $2 GROUP BY ri.variant_id`, range),
+    pool.query(
+      `SELECT l.variant_id, SUM(l.revenue) AS revenue, SUM(l.cost) AS cost
+         FROM boutique_shelf_count_lines l JOIN boutique_shelf_counts c ON c.id = l.count_id
+        WHERE c.status = 'recorded' AND c.counted_on BETWEEN $1 AND $2 GROUP BY l.variant_id`, range)
+  ]);
+  const index = (rows) => new Map(rows.map((row) => [row.variant_id, row]));
+  const tillBy = index(till.rows);
+  const returnedBy = index(returned.rows);
+  const countedBy = index(counted.rows);
+  const totals = { opening: 0, received: 0, sold: 0, other: 0, closing: 0, revenue: 0, cost: 0, profit: 0, stockValue: 0 };
+  const rows = [];
+  for (const v of ledger.rows) {
+    // A product that is archived and did nothing in the period is history,
+    // not part of this period's shelf.
+    if (v.status !== 'active' && !v.moves && !v.closing) continue;
+    const t = tillBy.get(v.id);
+    const r = returnedBy.get(v.id);
+    const k = countedBy.get(v.id);
+    const revenue = toMinor(t?.revenue) - toMinor(r?.value) + toMinor(k?.revenue);
+    const cost = toMinor(t?.cost) - toMinor(r?.cost) + toMinor(k?.cost);
+    const stockValue = toMinor(v.cost_price) * v.closing;
+    const row = {
+      variantId: v.id, productName: v.product_name, productType: v.product_type, sku: v.sku, size: v.size || '', color: v.color || '',
+      opening: v.opening, received: v.received, sold: -v.sold_signed, other: v.other, closing: v.closing,
+      revenue: fromMinor(revenue), cost: fromMinor(cost), profit: fromMinor(revenue - cost),
+      unitCost: money(v.cost_price), stockValue: fromMinor(stockValue)
+    };
+    rows.push(row);
+    for (const key of ['opening', 'received', 'sold', 'other', 'closing']) totals[key] += row[key];
+    totals.revenue += revenue;
+    totals.cost += cost;
+    totals.stockValue += stockValue;
+  }
+  totals.profit = fromMinor(totals.revenue - totals.cost);
+  totals.revenue = fromMinor(totals.revenue);
+  totals.cost = fromMinor(totals.cost);
+  totals.stockValue = fromMinor(totals.stockValue);
+  return { rows, totals };
+}
+
+// Till sales and shelf-count sales, one row per day. `sales` stays the number
+// of till sales; `counted` is the part of the day's total that a count found.
+function mergeSalesByDay(tillRows, countedRows) {
+  const key = (day) => (day instanceof Date ? isoDay(day) : String(day).slice(0, 10));
+  const days = new Map();
+  for (const r of tillRows) days.set(key(r.day), { day: key(r.day), sales: r.sales, till: toMinor(r.total), counted: 0, discounts: money(r.discounts) });
+  for (const r of countedRows) {
+    const entry = days.get(key(r.day)) || { day: key(r.day), sales: 0, till: 0, counted: 0, discounts: 0 };
+    entry.counted += toMinor(r.total);
+    days.set(entry.day, entry);
+  }
+  return [...days.values()].sort((a, b) => a.day.localeCompare(b.day))
+    .map((d) => ({ day: d.day, sales: d.sales, total: fromMinor(d.till + d.counted), counted: fromMinor(d.counted), discounts: d.discounts }));
+}
+
 async function buildReport(period) {
   const range = [period.start, period.end];
-  const [finance, byDay, topProducts, sizes, colors, types, lowStock, byType, ordersByStatus, expensesByCategory, returns, cashiers, sessions] = await Promise.all([
+  const [finance, byDay, topProducts, sizes, colors, types, lowStock, byType, ordersByStatus, expensesByCategory, returns, cashiers, sessions, products, countedByDay] = await Promise.all([
     financeFigures(pool, period),
     // Discounts per day are the sale-level ones plus the line ones, the same
     // sum the profit tile shows for the whole period.
     pool.query(`SELECT s.sold_on AS day, COUNT(*)::int AS sales, COALESCE(SUM(s.total), 0) AS total,
                        COALESCE(SUM(s.discount), 0) + COALESCE(SUM((SELECT SUM(i.discount) FROM boutique_sale_items i WHERE i.sale_id = s.id)), 0) AS discounts
                   FROM boutique_sales s WHERE s.status <> 'voided' AND s.sold_on BETWEEN $1 AND $2 GROUP BY s.sold_on ORDER BY s.sold_on`, range),
-    pool.query(`SELECT i.product_name, i.sku, i.size, i.color, SUM(i.quantity)::int AS pieces, SUM(i.line_total) AS revenue, SUM(i.quantity * i.unit_cost) AS cost
-                  FROM boutique_sale_items i JOIN boutique_sales s ON s.id = i.sale_id WHERE s.status <> 'voided' AND s.sold_on BETWEEN $1 AND $2
-                 GROUP BY i.product_name, i.sku, i.size, i.color ORDER BY pieces DESC, revenue DESC LIMIT 20`, range),
+    // Sold at the till or found sold by a shelf count: both are sales.
+    pool.query(`SELECT product_name, sku, size, color, SUM(pieces)::int AS pieces, SUM(revenue) AS revenue, SUM(cost) AS cost FROM (
+                  SELECT i.product_name, i.sku, i.size, i.color, i.quantity AS pieces, i.line_total AS revenue, i.quantity * i.unit_cost AS cost
+                    FROM boutique_sale_items i JOIN boutique_sales s ON s.id = i.sale_id WHERE s.status <> 'voided' AND s.sold_on BETWEEN $1 AND $2
+                  UNION ALL
+                  SELECT l.product_name, l.sku, v.size, v.color, l.sold, l.revenue, l.cost
+                    FROM boutique_shelf_count_lines l JOIN boutique_shelf_counts c ON c.id = l.count_id JOIN boutique_variants v ON v.id = l.variant_id
+                   WHERE c.status = 'recorded' AND c.counted_on BETWEEN $1 AND $2 AND l.sold > 0
+                 ) sold GROUP BY product_name, sku, size, color ORDER BY pieces DESC, revenue DESC LIMIT 20`, range),
     pool.query(`SELECT COALESCE(NULLIF(i.size, ''), '—') AS size, SUM(i.quantity)::int AS pieces FROM boutique_sale_items i JOIN boutique_sales s ON s.id = i.sale_id
                  WHERE s.status <> 'voided' AND s.sold_on BETWEEN $1 AND $2 GROUP BY 1 ORDER BY pieces DESC LIMIT 20`, range),
     pool.query(`SELECT COALESCE(NULLIF(i.color, ''), '—') AS color, SUM(i.quantity)::int AS pieces FROM boutique_sale_items i JOIN boutique_sales s ON s.id = i.sale_id
@@ -1674,7 +1984,11 @@ async function buildReport(period) {
     // UTC day: closed at 00:30 in Kigali is still that day's till.
     pool.query(`SELECT COUNT(*)::int AS closed, COALESCE(SUM(expected_cash), 0) AS expected_cash, COALESCE(SUM(counted_cash), 0) AS counted_cash,
                        COALESCE(SUM(cash_variance), 0) AS cash_variance, COALESCE(json_agg(json_build_object('expected', expected_by_method, 'counted', counted_by_method)), '[]'::json) AS methods
-                  FROM boutique_cash_sessions WHERE status = 'closed' AND ${shopDay('closed_at')} BETWEEN $1 AND $2`, range)
+                  FROM boutique_cash_sessions WHERE status = 'closed' AND ${shopDay('closed_at')} BETWEEN $1 AND $2`, range),
+    stockProfit(period),
+    pool.query(`SELECT c.counted_on AS day, COALESCE(SUM(l.revenue), 0) AS total
+                  FROM boutique_shelf_counts c JOIN boutique_shelf_count_lines l ON l.count_id = c.id
+                 WHERE c.status = 'recorded' AND c.counted_on BETWEEN $1 AND $2 GROUP BY c.counted_on`, range)
   ]);
 
   // Payment reconciliation: what the sales say was taken by each method
@@ -1695,7 +2009,10 @@ async function buildReport(period) {
   return {
     period,
     finance,
-    salesByDay: byDay.rows.map((r) => ({ day: r.day, sales: r.sales, total: money(r.total), discounts: money(r.discounts) })),
+    // A day's sales are the till's plus what that day's shelf counts found
+    // sold, the same two the gross-sales figure adds.
+    salesByDay: mergeSalesByDay(byDay.rows, countedByDay.rows),
+    stockProfit: products,
     topProducts: topProducts.rows.map((r) => ({ productName: r.product_name, sku: r.sku, size: r.size, color: r.color, pieces: r.pieces, revenue: money(r.revenue), profit: fromMinor(toMinor(r.revenue) - toMinor(r.cost)) })),
     sizeDemand: sizes.rows.map((r) => ({ size: r.size, pieces: r.pieces })),
     colorDemand: colors.rows.map((r) => ({ color: r.color, pieces: r.pieces })),

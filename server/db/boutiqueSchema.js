@@ -42,7 +42,7 @@
 import {
   ADJUSTMENT_KINDS, ALL_BOUTIQUE_PAYMENT_METHODS, APPROVAL_STATUSES, BOUTIQUE_PAYMENT_METHODS, BOUTIQUE_PROJECT_ID,
   BOUTIQUE_WORKSPACE, CASH_MOVEMENT_KINDS, EXPENSE_STATUSES, PRODUCT_TYPES, PURCHASE_STATUSES, RETURN_KINDS,
-  SALE_STATUSES, SESSION_STATUSES, STOCK_MOVEMENT_KINDS
+  SALE_STATUSES, SESSION_STATUSES, SHELF_COUNT_STATUSES, STOCK_MOVEMENT_KINDS
 } from '../../shared/boutique.js';
 import { RETAIL_OPERATION } from '../../shared/businessOperations.js';
 
@@ -497,7 +497,51 @@ const statements = [
   `ALTER TABLE boutique_products ADD COLUMN IF NOT EXISTS request_key VARCHAR(64)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS boutique_products_request_key_idx ON boutique_products(request_key) WHERE request_key IS NOT NULL`,
   `ALTER TABLE boutique_stock_adjustments ADD COLUMN IF NOT EXISTS request_key VARCHAR(64)`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS boutique_stock_adjustments_request_key_idx ON boutique_stock_adjustments(request_key) WHERE request_key IS NOT NULL`
+  `CREATE UNIQUE INDEX IF NOT EXISTS boutique_stock_adjustments_request_key_idx ON boutique_stock_adjustments(request_key) WHERE request_key IS NOT NULL`,
+
+  // ---- sales worked out by counting the shelf ----------------------------------
+  //
+  // A small shop often sells over the counter without ringing each sale up.
+  // It still knows what it sold by counting what is left: one row here per
+  // count, one line per product counted. `expected` is the shelf as the ledger
+  // had it at the moment of the count (opening + received − adjustments − till
+  // sales), `counted` what was found, `sold` the difference. The selling price
+  // and the buying price are FROZEN onto the line, so a later price change can
+  // never rewrite the revenue or the profit of a day already counted. The sold
+  // pieces leave the shelf through moveStock (kind count_sale), so the ledger
+  // and the shelf still agree; a void puts them back (count_sale_void).
+  `CREATE TABLE IF NOT EXISTS boutique_shelf_counts (
+     id SERIAL PRIMARY KEY,
+     counted_on DATE NOT NULL,
+     note TEXT NOT NULL DEFAULT '',
+     status VARCHAR(20) NOT NULL DEFAULT 'recorded',
+     counted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+     voided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+     voided_at TIMESTAMPTZ,
+     void_reason TEXT NOT NULL DEFAULT '',
+     request_key VARCHAR(64),
+     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+   )`,
+  ...check('boutique_shelf_counts', 'boutique_shelf_counts_status_check', `status IN (${list(SHELF_COUNT_STATUSES)})`),
+  `CREATE UNIQUE INDEX IF NOT EXISTS boutique_shelf_counts_request_key_idx ON boutique_shelf_counts(request_key) WHERE request_key IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS boutique_shelf_counts_day_idx ON boutique_shelf_counts(counted_on, status)`,
+  `CREATE TABLE IF NOT EXISTS boutique_shelf_count_lines (
+     id SERIAL PRIMARY KEY,
+     count_id INTEGER NOT NULL REFERENCES boutique_shelf_counts(id) ON DELETE RESTRICT,
+     variant_id INTEGER NOT NULL REFERENCES boutique_variants(id) ON DELETE RESTRICT,
+     product_name VARCHAR(200) NOT NULL,
+     sku VARCHAR(60) NOT NULL,
+     expected INTEGER NOT NULL,
+     counted INTEGER NOT NULL,
+     sold INTEGER NOT NULL,
+     unit_price NUMERIC(18,2) NOT NULL,
+     unit_cost NUMERIC(18,2) NOT NULL,
+     revenue NUMERIC(18,2) NOT NULL,
+     cost NUMERIC(18,2) NOT NULL,
+     UNIQUE (count_id, variant_id)
+   )`,
+  ...check('boutique_shelf_count_lines', 'boutique_shelf_count_lines_check',
+    'counted >= 0 AND expected >= counted AND sold = expected - counted AND unit_price >= 0 AND unit_cost >= 0 AND revenue >= 0 AND cost >= 0')
 ];
 
 export async function migrateBoutiqueModule(pool) {

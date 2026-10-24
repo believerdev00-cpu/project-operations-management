@@ -1384,3 +1384,8 @@ td .operation-checks { display: grid; gap: 0; }
 .progress-items li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; padding: 4px 0; border-bottom: 1px solid var(--line); }
 .trend-cell { display: inline-flex; align-items: center; gap: 8px; min-width: 140px; }
 .trend-cell .progress-bar { flex: 1; margin: 0; }
+
+/* Counting the shelf and the stock-and-profit table. */
+.btq-count input[type="number"] { width: 110px; font-size: 1.05rem; }
+.btq-stock-profit td, .btq-stock-profit th { white-space: nowrap; }
+.btq-total-row td { border-top: 2px solid var(--navy); background: #f7fafc; }

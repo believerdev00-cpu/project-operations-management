@@ -550,6 +550,110 @@ try {
   const ledgerSum = await pool.query('SELECT COALESCE(SUM(quantity), 0)::int AS total FROM boutique_stock_movements WHERE variant_id = $1', [sugarVariant.id]);
   check('two write-offs at once: one lands, one is refused', landed === 1 && refusedOne === 1, both.map((r) => r.status));
   check('  the shelf is 14 and the ledger agrees', await stockOf() === 14 && ledgerSum.rows[0].total === 14, { shelf: await stockOf(), ledger: ledgerSum.rows[0].total });
+
+  section('14. Counting the shelf: sales, cost and profit worked out from what is left');
+  // Every figure below is checked against the rows this section made, or as a
+  // difference from what the day already held, so other trading today cannot
+  // move them.
+  const financeBefore = (await get(admin, `/api/boutique/finance?start=${today}&end=${today}`)).body;
+  const makeProduct = async (name, cost, price, opening) => (await post(manager.token, '/api/boutique/products', {
+    name, productType: 'groceries', variants: [{ costPrice: cost, sellingPrice: price, openingStock: opening }]
+  })).body.variants[0];
+  const onShelfNow = async (id) => (await pool.query('SELECT stock_quantity FROM boutique_variants WHERE id = $1', [id])).rows[0].stock_quantity;
+  const rowFor = (report, id) => report.stockProfit.rows.find((r) => r.variantId === id);
+  const dailyReport = async () => (await get(admin, `/api/boutique/reports?period=daily&date=${today}`)).body;
+
+  // The brief's own example: 40 bottles bought at 200 and sold at 300; 20 left.
+  const water = await makeProduct('ZZTEST Water bottle', 200, 300, 40);
+  const waterCount = await post(manager.token, '/api/boutique/shelf-counts', { lines: [{ variantId: water.id, counted: 20 }] });
+  const waterLine = waterCount.body.lines?.[0];
+  check('40 water bottles, 20 left: 20 sold', waterCount.status === 201 && waterLine?.expected === 40 && waterLine.counted === 20 && waterLine.sold === 20, waterCount.body);
+  check('  6,000 RWF of sales (20 × 300)', near(waterCount.body.revenue, 6000), waterCount.body.revenue);
+  check('  4,000 RWF cost of goods sold (20 × 200)', near(waterCount.body.cost, 4000), waterCount.body.cost);
+  check('  2,000 RWF gross profit', near(waterCount.body.profit, 2000), waterCount.body.profit);
+  check('  the shelf now holds 20', await onShelfNow(water.id) === 20);
+  let day = await dailyReport();
+  let waterRow = rowFor(day, water.id);
+  check('the report: came in 40, sold 20, left 20', waterRow?.opening === 0 && waterRow.received === 40 && waterRow.sold === 20 && waterRow.other === 0 && waterRow.closing === 20, waterRow);
+  check('  sales 6,000, cost 4,000, gross profit 2,000', near(waterRow?.revenue, 6000) && near(waterRow?.cost, 4000) && near(waterRow?.profit, 2000), waterRow);
+  check('  the 20 left are worth 4,000 at the buying price', near(waterRow?.stockValue, 4000), waterRow?.stockValue);
+
+  // Deliveries and losses in between are allowed for, not counted as sales.
+  const rice = await makeProduct('ZZTEST Rice 1 kg', 1000, 1500, 50);
+  await post(admin, '/api/boutique/stock/adjustments', { variantId: rice.id, kind: 'received', quantity: 30 });
+  await post(admin, '/api/boutique/stock/adjustments', { variantId: rice.id, kind: 'damaged', quantity: 5, reason: 'ZZTEST torn bags' });
+  const riceCount = await post(manager.token, '/api/boutique/shelf-counts', { lines: [{ variantId: rice.id, counted: 60 }] });
+  check('rice: 50 + 30 came in − 5 damaged = 75 expected; 60 left, so 15 sold', riceCount.status === 201 && riceCount.body.lines?.[0]?.expected === 75 && riceCount.body.pieces === 15, riceCount.body);
+  check('  15 × 1,500 = 22,500 sales, 7,500 gross profit', near(riceCount.body.revenue, 22500) && near(riceCount.body.profit, 7500), riceCount.body);
+  day = await dailyReport();
+  const riceRow = rowFor(day, rice.id);
+  check('  the report: in 80, sold 15, damaged −5, left 60, and it adds up', riceRow?.received === 80 && riceRow.sold === 15 && riceRow.other === -5 && riceRow.closing === 60
+    && riceRow.opening + riceRow.received - riceRow.sold + riceRow.other === riceRow.closing, riceRow);
+
+  // A price change afterwards rewrites nothing already counted.
+  await put(manager.token, `/api/boutique/variants/${rice.id}`, { sellingPrice: 2000, costPrice: 1200 });
+  const riceAgain = (await get(admin, `/api/boutique/shelf-counts/${riceCount.body.id}`)).body;
+  day = await dailyReport();
+  check('after the price goes up to 2,000 the count still says 1,500 and 1,000', near(riceAgain.lines?.[0]?.unitPrice, 1500) && near(riceAgain.lines?.[0]?.unitCost, 1000), riceAgain.lines);
+  check('  and the report still says 22,500 sales and 7,500 profit', near(rowFor(day, rice.id)?.revenue, 22500) && near(rowFor(day, rice.id)?.profit, 7500), rowFor(day, rice.id));
+
+  // Till sales and counted sales together, never twice.
+  const soap = await makeProduct('ZZTEST Soap bar', 300, 500, 10);
+  const soapSale = await post(cashier.token, '/api/boutique/sales', { items: [{ variantId: soap.id, quantity: 2 }], payments: [{ method: 'Mobile Money', amount: 1000 }] });
+  const soapCount = await post(manager.token, '/api/boutique/shelf-counts', { lines: [{ variantId: soap.id, counted: 5 }] });
+  day = await dailyReport();
+  const soapRow = rowFor(day, soap.id);
+  check('soap: 2 sold at the till, then 5 found left of the 8: 3 more sold by count', soapSale.status === 201 && soapCount.body.lines?.[0]?.expected === 8 && soapCount.body.pieces === 3, soapCount.body);
+  check('  the report: 5 sold, 2,500 sales, 1,000 profit -- not 7 and not 3', soapRow?.sold === 5 && near(soapRow.revenue, 2500) && near(soapRow.profit, 1000), soapRow);
+
+  // The books for the day moved by exactly these counts.
+  const financeAfter = (await get(admin, `/api/boutique/finance?start=${today}&end=${today}`)).body;
+  check('the day’s books: counted sales 6,000 + 22,500 + 1,500 = 30,000', near(delta(financeAfter.countSales.revenue, financeBefore.countSales?.revenue || 0), 30000), financeAfter.countSales);
+  check('  in gross sales and in gross profit (2,000 + 7,500 + 600)', near(delta(financeAfter.sales.counted, financeBefore.sales.counted || 0), 30000)
+    && near(delta(financeAfter.grossProfit, financeBefore.grossProfit), 10100 + 400), { before: financeBefore.grossProfit, after: financeAfter.grossProfit });
+  check('  and not in money received at a till', near(delta(financeAfter.paymentsReceived, financeBefore.paymentsReceived), 1000), { before: financeBefore.paymentsReceived, after: financeAfter.paymentsReceived });
+  check('today’s sales by day include what the counts found', (day.salesByDay.find((d) => d.day === today)?.counted || 0) >= 30000, day.salesByDay);
+  const week = (await get(admin, `/api/boutique/reports?period=weekly&start=${today}`)).body;
+  const month = (await get(admin, `/api/boutique/reports?period=monthly&month=${today.slice(0, 7)}`)).body;
+  check('the weekly and monthly reports carry the same rice figures', near(rowFor(week, rice.id)?.profit, 7500) && near(rowFor(month, rice.id)?.profit, 7500) && rowFor(month, rice.id)?.sold === 15);
+
+  // What is refused.
+  const above = await post(manager.token, '/api/boutique/shelf-counts', { lines: [{ variantId: water.id, counted: 25 }] });
+  check('counting more than the shelf should hold is refused', above.status === 409 && above.body.code === 'COUNT_ABOVE_SHELF' && await onShelfNow(water.id) === 20, above.body);
+  check('  a negative or broken number is refused', (await post(manager.token, '/api/boutique/shelf-counts', { lines: [{ variantId: water.id, counted: -1 }] })).status === 400
+    && (await post(manager.token, '/api/boutique/shelf-counts', { lines: [{ variantId: water.id, counted: 2.5 }] })).status === 400);
+  check('  the same product twice in one count is refused', (await post(manager.token, '/api/boutique/shelf-counts', { lines: [{ variantId: water.id, counted: 1 }, { variantId: water.id, counted: 2 }] })).status === 400);
+  check('  an empty count is refused', (await post(manager.token, '/api/boutique/shelf-counts', { lines: [] })).status === 400);
+  check('a cashier cannot count the shelf', (await post(cashier.token, '/api/boutique/shelf-counts', { lines: [{ variantId: water.id, counted: 19 }] })).status === 403);
+  check('  nor read the counts', (await get(cashier.token, '/api/boutique/shelf-counts')).status === 403);
+  check('the General Manager reads the counts but cannot count', (await get(general.token, '/api/boutique/shelf-counts')).status === 200
+    && (await post(general.token, '/api/boutique/shelf-counts', { lines: [{ variantId: water.id, counted: 19 }] })).status === 403);
+
+  // One press is one count, and two at once cannot both book the same pieces.
+  const countKey = `zz-count-${Date.now()}`;
+  const first = await post(manager.token, '/api/boutique/shelf-counts', { requestKey: countKey, lines: [{ variantId: water.id, counted: 18 }] });
+  const second = await post(manager.token, '/api/boutique/shelf-counts', { requestKey: countKey, lines: [{ variantId: water.id, counted: 18 }] });
+  check('pressing Save twice records the count once', first.status === 201 && second.status === 200 && second.body.id === first.body.id && await onShelfNow(water.id) === 18, { first: first.status, second: second.status, shelf: await onShelfNow(water.id) });
+  const racing = await Promise.all([post(manager.token, '/api/boutique/shelf-counts', { lines: [{ variantId: water.id, counted: 10 }] }), post(admin, '/api/boutique/shelf-counts', { lines: [{ variantId: water.id, counted: 10 }] })]);
+  const racedSold = racing.reduce((sum, r) => sum + (r.body.pieces || 0), 0);
+  check('two counts at the same moment: 8 sold once, not twice', racing.every((r) => r.status === 201) && racedSold === 8 && await onShelfNow(water.id) === 10, racing.map((r) => [r.status, r.body.pieces]));
+
+  // A wrong count is undone by the Director, and only by the Director.
+  check('the manager cannot undo a count', (await post(manager.token, `/api/boutique/shelf-counts/${waterCount.body.id}/void`, { reason: 'ZZTEST wrong count' })).status === 403);
+  check('  the Director must say why', (await post(admin, `/api/boutique/shelf-counts/${waterCount.body.id}/void`, { reason: 'wrong' })).status === 400);
+  const undone = await post(admin, `/api/boutique/shelf-counts/${waterCount.body.id}/void`, { reason: 'ZZTEST counted the wrong shelf' });
+  day = await dailyReport();
+  check('undone: its 20 bottles are back on the shelf (10 + 20)', undone.status === 200 && undone.body.status === 'voided' && await onShelfNow(water.id) === 30, undone.body);
+  check('  and its 6,000 leaves the sales, the count staying in the history', near(rowFor(day, water.id)?.revenue, (8 + 2) * 300) && rowFor(day, water.id)?.sold === 10
+    && (await get(admin, '/api/boutique/shelf-counts')).body.some((c) => c.id === waterCount.body.id && c.status === 'voided'), rowFor(day, water.id));
+  check('  it cannot be undone twice', (await post(admin, `/api/boutique/shelf-counts/${waterCount.body.id}/void`, { reason: 'ZZTEST counted the wrong shelf' })).status === 409);
+  const ledgerOk = await pool.query(
+    `SELECT v.id, v.stock_quantity, COALESCE(SUM(m.quantity), 0)::int AS ledger FROM boutique_variants v LEFT JOIN boutique_stock_movements m ON m.variant_id = v.id
+      WHERE v.id = ANY($1::int[]) GROUP BY v.id HAVING v.stock_quantity <> COALESCE(SUM(m.quantity), 0)`, [[water.id, rice.id, soap.id]]);
+  check('for every product counted, the ledger still equals the shelf', ledgerOk.rowCount === 0, ledgerOk.rows);
+  check('the trail has the counts and the undo', (await pool.query(
+    "SELECT COUNT(*)::int AS n FROM boutique_audit WHERE entity_type = 'shelf_count' AND entity_id = ANY($1::int[])", [[waterCount.body.id, riceCount.body.id]]
+  )).rows[0].n === 3);
 } catch (error) {
   failed += 1;
   console.log(`  FAIL  unexpected error -- ${error.stack || error.message}`);
@@ -574,8 +678,14 @@ try {
     variant: await ids(`SELECT id FROM boutique_variants WHERE id IN ${zzVariants}`),
     supplier: await ids(`SELECT id FROM boutique_suppliers WHERE name LIKE 'ZZTEST %'`),
     purchase: await ids(`SELECT id FROM boutique_purchase_orders WHERE supplier_id IN (SELECT id FROM boutique_suppliers WHERE name LIKE 'ZZTEST %')`),
-    submission: await ids(`SELECT id FROM boutique_submissions WHERE submitted_by IN ${zz}`)
+    submission: await ids(`SELECT id FROM boutique_submissions WHERE submitted_by IN ${zz}`),
+    shelf_count: await ids(`SELECT DISTINCT count_id AS id FROM boutique_shelf_count_lines WHERE variant_id IN ${zzVariants}`)
   };
+  // Shelf counts hold their products by RESTRICT, so they go before them.
+  if (trail.shelf_count.length) {
+    await pool.query('DELETE FROM boutique_shelf_count_lines WHERE count_id = ANY($1::int[])', [trail.shelf_count]);
+    await pool.query('DELETE FROM boutique_shelf_counts WHERE id = ANY($1::int[])', [trail.shelf_count]);
+  }
   for (const [entityType, entityIds] of Object.entries(trail)) {
     if (entityIds.length) await pool.query('DELETE FROM boutique_audit WHERE entity_type = $1 AND entity_id = ANY($2::int[])', [entityType, entityIds]);
   }

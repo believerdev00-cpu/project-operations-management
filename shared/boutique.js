@@ -66,8 +66,17 @@ export const STOCK_MOVEMENT_KINDS = [
   'supplier_return',   // sent back to the supplier (negative)
   'transfer_out',      // moved to another shop or store (negative)
   'transfer_in',       // received from another shop or store
-  'received'           // new stock arrived without a purchase order
+  'received',          // new stock arrived without a purchase order
+  'count_sale',        // sold, as worked out by counting the shelf (negative)
+  'count_sale_void'    // a shelf count undone by the Director: its goods put back
 ];
+
+// How a shop that does not ring every sale at the till still knows what it
+// sold: it counts what is left. Sold = what the shelf should hold (opening
+// stock + stock received − damaged, missing and other adjustments − till
+// sales, all already in the ledger) − what was counted. A count is recorded
+// or voided; it is never deleted.
+export const SHELF_COUNT_STATUSES = ['recorded', 'voided'];
 
 // The adjustments a manager asks for and the Director approves. Each is a
 // stock movement kind above; a sale, a purchase-order receipt and the opening

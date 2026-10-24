@@ -299,7 +299,7 @@ export async function sessionFigures(db, sessionId) {
 // to expenses would count every dress twice.
 export async function financeFigures(db, { start, end }) {
   const range = [start, end];
-  const [sales, returns, payments, refunds, cogs, expenses, inventory, purchases, supplierPayments, owed] = await Promise.all([
+  const [sales, returns, payments, refunds, cogs, expenses, inventory, purchases, supplierPayments, owed, counted] = await Promise.all([
     db.query(
       `SELECT COUNT(*)::int AS count, COALESCE(SUM(total), 0) AS gross, COALESCE(SUM(discount), 0) AS sale_discounts,
               COALESCE(SUM(subtotal), 0) AS subtotal
@@ -335,7 +335,15 @@ export async function financeFigures(db, { start, end }) {
         WHERE r.received_on BETWEEN $1 AND $2`, range),
     db.query(
       `SELECT COALESCE(SUM(amount), 0) AS total FROM boutique_supplier_payments WHERE paid_on BETWEEN $1 AND $2`, range),
-    db.query(`SELECT COALESCE(SUM(owed), 0) AS total FROM (${SUPPLIER_BALANCE_SQL}) b WHERE owed > 0`)
+    db.query(`SELECT COALESCE(SUM(owed), 0) AS total FROM (${SUPPLIER_BALANCE_SQL}) b WHERE owed > 0`),
+    // Sales worked out by counting the shelf (boutique_shelf_counts), at the
+    // prices frozen on each line. No till took this money, so it is in the
+    // sales and the profit but not in payments received by method.
+    db.query(
+      `SELECT COUNT(DISTINCT c.id)::int AS counts, COALESCE(SUM(l.sold), 0)::int AS pieces,
+              COALESCE(SUM(l.revenue), 0) AS revenue, COALESCE(SUM(l.cost), 0) AS cost
+         FROM boutique_shelf_counts c JOIN boutique_shelf_count_lines l ON l.count_id = c.id
+        WHERE c.status = 'recorded' AND c.counted_on BETWEEN $1 AND $2`, range)
   ]);
   const s = sales.rows[0];
   const r = returns.rows[0];
@@ -343,10 +351,14 @@ export async function financeFigures(db, { start, end }) {
   const changeGiven = await db.query(
     `SELECT COALESCE(SUM(change_given), 0) AS total FROM boutique_sales WHERE status <> 'voided' AND sold_on BETWEEN $1 AND $2`, range);
 
-  const gross = toMinor(s.gross);
+  const k = counted.rows[0];
+  // Gross sales are the till's sales plus the counted ones: two ways of
+  // knowing a piece left the shelf for money, never both for the same piece
+  // (a till sale has already left the shelf before the count is taken).
+  const gross = toMinor(s.gross) + toMinor(k.revenue);
   const returned = toMinor(r.value);
   const netSales = gross - returned;
-  const costOfSales = toMinor(c.sold_cost) - toMinor(c.returned_cost);
+  const costOfSales = toMinor(c.sold_cost) - toMinor(c.returned_cost) + toMinor(k.cost);
   const grossProfit = netSales - costOfSales;
   const expenseTotal = toMinor(expenses.rows[0].total);
   const refundedBy = Object.fromEntries(refunds.rows.map((row) => [row.method, toMinor(row.refunded)]));
@@ -361,7 +373,8 @@ export async function financeFigures(db, { start, end }) {
 
   return {
     period: { start, end },
-    sales: { count: s.count, gross: fromMinor(gross), subtotal: Number(s.subtotal) },
+    sales: { count: s.count, gross: fromMinor(gross), till: fromMinor(toMinor(s.gross)), counted: fromMinor(toMinor(k.revenue)), subtotal: Number(s.subtotal) },
+    countSales: { counts: k.counts, pieces: k.pieces, revenue: fromMinor(toMinor(k.revenue)), cost: fromMinor(toMinor(k.cost)) },
     discounts: fromMinor(toMinor(s.sale_discounts) + toMinor(c.line_discounts)),
     returns: { count: r.count, value: fromMinor(returned), refunded: Number(r.refunded) },
     netSales: fromMinor(netSales),
