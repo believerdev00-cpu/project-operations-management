@@ -29,6 +29,7 @@ import { pool, safeRollback } from '../db/database.js';
 import { asyncRoute, contentDisposition, parseId } from '../lib/http.js';
 import { TRIPS_OPERATION, operationById } from '../../shared/businessOperations.js';
 import { round2 } from '../lib/rates.js';
+import { objectiveProgress, planProgress } from '../lib/monthly.js';
 import {
   COMMENT_SUBJECTS, PARTNER_COMMENTS_PER_HOUR, PROJECT_SUBJECTS, commentBody, loadThreads, partnerSeesThreadSql, projectManagerIds, viewerOf
 } from '../lib/partnerComments.js';
@@ -550,7 +551,64 @@ router.get('/projects', asyncRoute(async (req, res) => {
   );
   // latestMonth: the newest month with a plan filed under the project, so the
   // partner's report opens on work rather than on an empty current month.
-  res.json(result.rows.map((row) => ({ id: row.id, name: row.name, operation: row.sector, latestMonth: row.latest_month || null })));
+  const projects = result.rows.map((row) => ({ id: row.id, name: row.name, operation: row.sector, latestMonth: row.latest_month || null }));
+  if (!projects.length) return res.json([]);
+  const ids = projects.map((project) => project.id);
+
+  // What the partner's first page shows for each shared project, from the same
+  // definitions the Director's reports use, so the two never disagree: progress
+  // is planProgress over every objective of every month filed under the
+  // project (as GET /api/reports/projects), and spend is each month's days plus
+  // its activities' expenses (as PLAN_TOTALS). The budget is summed only over
+  // months that have one -- a month with none is "no limit", not zero.
+  const [objectives, money, days, photos] = await Promise.all([
+    pool.query(
+      `SELECT mp.project_id, o.target_quantity, o.weight,
+              COALESCE((SELECT SUM(d.quantity_done) FROM plan_daily_reports d WHERE d.objective_id = o.id), 0) AS done
+         FROM monthly_plans mp JOIN plan_objectives o ON o.plan_id = mp.id
+        WHERE mp.project_id = ANY($1::varchar[])`, [ids]),
+    pool.query(
+      `SELECT mp.project_id, COUNT(*)::int AS months,
+              COALESCE(SUM(mp.approved_budget) FILTER (WHERE mp.approved_budget > 0), 0) AS budget,
+              COALESCE(SUM((SELECT COALESCE(SUM(r.cost), 0) FROM plan_daily_reports r WHERE r.plan_id = mp.id)
+                         + (SELECT COALESCE(SUM(e.amount), 0) FROM activity_expenses e JOIN activities ea ON ea.id = e.activity_id
+                             WHERE ea.monthly_plan_id = mp.id)), 0) AS spent
+         FROM monthly_plans mp WHERE mp.project_id = ANY($1::varchar[]) GROUP BY mp.project_id`, [ids]),
+    pool.query(
+      `SELECT * FROM (
+         SELECT mp.project_id, r.report_date::text AS day, r.quantity_done, r.notes, o.title, o.target_unit,
+                COUNT(*) OVER (PARTITION BY mp.project_id)::int AS total,
+                ROW_NUMBER() OVER (PARTITION BY mp.project_id ORDER BY r.report_date DESC, r.id DESC) AS n
+           FROM plan_daily_reports r JOIN monthly_plans mp ON mp.id = r.plan_id
+           LEFT JOIN plan_objectives o ON o.id = r.objective_id
+          WHERE mp.project_id = ANY($1::varchar[])) x WHERE n <= 3`, [ids]),
+    pool.query(
+      `SELECT mp.project_id, COUNT(*)::int AS files
+         FROM plan_report_evidence e JOIN plan_daily_reports r ON r.id = e.report_id JOIN monthly_plans mp ON mp.id = r.plan_id
+        WHERE mp.project_id = ANY($1::varchar[]) GROUP BY mp.project_id`, [ids])
+  ]);
+  res.json(projects.map((project) => {
+    const own = objectives.rows.filter((row) => row.project_id === project.id)
+      .map((row) => ({ ...objectiveProgress(row.target_quantity, row.done), weight: row.weight }));
+    const sums = money.rows.find((row) => row.project_id === project.id);
+    const recent = days.rows.filter((row) => row.project_id === project.id);
+    return {
+      ...project,
+      summary: {
+        percent: planProgress(own),
+        objectives: own.length,
+        objectivesDone: own.filter((objective) => objective.complete).length,
+        months: sums?.months || 0,
+        budget: round2(sums?.budget || 0),
+        spent: round2(sums?.spent || 0),
+        daysRecorded: recent[0]?.total || 0,
+        files: photos.rows.find((row) => row.project_id === project.id)?.files || 0,
+        latestDays: recent.map((row) => ({
+          day: row.day, title: row.title || '', quantity: Number(row.quantity_done), unit: row.target_unit || '', notes: row.notes || ''
+        }))
+      }
+    };
+  }));
 }));
 
 router.get('/projects/:id/report', asyncRoute(async (req, res) => {

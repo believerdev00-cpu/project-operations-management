@@ -93,6 +93,11 @@ try {
   check('the Director shares the project', share.status === 200, share.body);
   const listed = await get(partner.token, '/api/partner/projects');
   check('  it is the one project listed', listed.body.length === 1 && listed.body[0].id === project && listed.body[0].operation === 'farming', listed.body);
+  // The first page's card: 10 of 40 trees is 25%, one day, its cost, and the day itself.
+  const summary = listed.body[0]?.summary || {};
+  check('  with its progress, from the objectives (10 of 40 = 25%)', summary.percent === 25 && summary.objectives === 1 && summary.objectivesDone === 0, summary);
+  check('  its days and its spend', summary.daysRecorded === 1 && summary.spent === 75, summary);
+  check('  and the latest day', summary.latestDays?.[0]?.day === `${MONTH}-05` && summary.latestDays[0].title === 'ZZTEST Plant 40 fruit trees' && summary.latestDays[0].quantity === 10, summary.latestDays);
   const report = await get(partner.token, `/api/partner/projects/${project}/report?period=monthly&month=${MONTH}`);
   const work = report.body.monthlyWork;
   check('the partner reads the report for it', report.status === 200 && report.body.scope?.projectId === project, report.status);

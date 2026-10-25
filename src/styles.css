@@ -1494,6 +1494,22 @@ td .operation-checks { display: grid; gap: 0; }
 .boutique .decision-card-main strong { grid-column: 1 / -1; }
 .boutique .decision-card-meta { grid-column: 1 / -1; }
 .btq-shelf-after { grid-column: 1 / -1; margin-top: 4px; font-weight: 600; color: var(--navy); }
+.partner-project-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; margin: 16px 0; }
+.partner-project-card { display: flex; flex-direction: column; gap: 12px; margin: 0; }
+.partner-progress { display: grid; grid-template-columns: auto 1fr; align-items: baseline; gap: 4px 12px; }
+.partner-progress strong { font-size: 2.4rem; line-height: 1; color: #17633a; }
+.partner-progress span { color: #4a5c70; }
+.partner-progress-bar { grid-column: 1 / -1; height: 10px; border-radius: 6px; background: #e6edf3; overflow: hidden; }
+.partner-progress-bar i { display: block; height: 100%; background: #2e9d5b; border-radius: 6px; }
+.partner-card-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0; }
+.partner-card-facts div { background: #f5f8fb; border-radius: 8px; padding: 8px 10px; }
+.partner-card-facts dt { font-size: 0.8rem; color: #4a5c70; }
+.partner-card-facts dd { margin: 2px 0 0; font-weight: 700; }
+.partner-card-sub { margin: 4px 0 0; font-size: 0.95rem; }
+.partner-latest { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.partner-latest li { display: grid; gap: 2px; border-left: 3px solid #2e9d5b; padding-left: 10px; }
+.partner-latest span, .partner-latest small { color: #4a5c70; font-size: 0.85rem; }
+@media (max-width: 640px) { .partner-project-cards { grid-template-columns: 1fr; } }
 .btq-pl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .btq-pl-column h3 { margin: 0 0 8px; font-size: 1rem; color: #4a5c70; }
 .btq-pl-column dl { margin: 0; display: grid; gap: 6px; }

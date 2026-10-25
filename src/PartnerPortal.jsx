@@ -60,6 +60,11 @@ export default function PartnerPortal({ user, fetchJson, language, t, tab = 'ove
   const [report, setReport] = useState(null);
   const [updates, setUpdates] = useState([]);
   const [threads, setThreads] = useState([]);
+  // The projects shared with this partner by name, each with its summary:
+  // what the first page is about.
+  const [projects, setProjects] = useState([]);
+  // The project a card on the first page opened, for the report to start on.
+  const [openProject, setOpenProject] = useState('');
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   // '' reads every operation the partner was granted; an id narrows to that
@@ -76,14 +81,16 @@ export default function PartnerPortal({ user, fetchJson, language, t, tab = 'ove
     setLoading(true);
     const narrow = scope ? `&operation=${encodeURIComponent(scope)}` : '';
     try {
-      const [overviewResult, activityResult, movementResult, reportResult, updateResult, threadResult] = await Promise.all([
+      const [overviewResult, activityResult, movementResult, reportResult, updateResult, threadResult, projectResult] = await Promise.all([
         fetchJson(`/api/partner/overview?${narrow.slice(1)}`),
         fetchJson(`/api/partner/activities?limit=100${narrow}`),
         fetchJson(`/api/partner/movements?limit=100${narrow}`),
         fetchJson(`/api/partner/report?months=6${narrow}`),
         fetchJson(`/api/partner/updates?limit=30${narrow}`),
-        fetchJson('/api/partner/comments').catch(() => [])
+        fetchJson('/api/partner/comments').catch(() => []),
+        fetchJson('/api/partner/projects').catch(() => [])
       ]);
+      setProjects(projectResult);
       setOverview(overviewResult);
       setActivities(activityResult);
       setMovements(movementResult);
@@ -128,12 +135,26 @@ export default function PartnerPortal({ user, fetchJson, language, t, tab = 'ove
     </div>;
   }
 
+  // Only the tabs with something in them. The activity, trip and update tabs
+  // read the older activity register; a partner whose projects are run through
+  // monthly plans would otherwise open four tabs of zeros and "nothing yet".
+  const hasRecords = activities.length > 0 || movements.length > 0;
+  const shown = TABS.filter(([id]) => {
+    if (id === 'projects') return projects.length > 0;
+    if (id === 'activities') return activities.length > 0;
+    if (id === 'movements') return movements.length > 0;
+    if (id === 'reports') return hasRecords;
+    if (id === 'updates') return updates.length > 0;
+    return true;
+  });
+  const openReport = (id) => { setOpenProject(id); onTab?.('projects'); };
+
   return <>
     <section className="welcome-strip partner-strip">
       <div>
         <span className="eyebrow">{t('portal.title')}</span>
-        <h2>{t('portal.welcome')}: {operation}</h2>
-        <p>{t('portal.accessNote')}</p>
+        <h2>{fill(t('invite.title'), { name: user.name })}</h2>
+        <p>{projects.length ? projects.map((project) => project.name).join(' · ') : operation}</p>
       </div>
       <div className="partner-access-chip">
         <span>{t('partners.accessLevel')}</span>
@@ -152,12 +173,12 @@ export default function PartnerPortal({ user, fetchJson, language, t, tab = 'ove
 
     {/* The shared projects are read in full, so the "approved records only"
         note belongs to the other tabs. */}
-    {tab !== 'projects' && <p className="partner-notice">
+    {['activities', 'movements', 'reports', 'updates'].includes(tab) && <p className="partner-notice">
       <strong>{t('portal.approvedOnly')}.</strong> {t('portal.approvedOnlyNote')}
     </p>}
 
     <nav className="partner-tabs" aria-label={t('portal.title')}>
-      {TABS.map(([id, labelKey]) => <button
+      {shown.map(([id, labelKey]) => <button
         key={id}
         type="button"
         className={tab === id ? 'partner-tab active' : 'partner-tab'}
@@ -166,7 +187,12 @@ export default function PartnerPortal({ user, fetchJson, language, t, tab = 'ove
       >{t(labelKey)}</button>)}
     </nav>
 
-    {tab === 'overview' && overview && <>
+    {tab === 'overview' && projects.length > 0 && <div className="partner-project-cards">
+      {projects.map((project) => <ProjectCard key={project.id} project={project} language={language} t={t} onOpen={() => openReport(project.id)} />)}
+    </div>}
+
+    {/* The older activity register: only when it has something in it. */}
+    {tab === 'overview' && overview && (hasRecords || !projects.length) && <>
       <div className="metric-grid metric-grid-5">
         <Metric label={t('portal.activities')} value={overview.activities.total} />
         <Metric label={t('portal.inProgress')} value={overview.activities.inProgress} />
@@ -176,12 +202,9 @@ export default function PartnerPortal({ user, fetchJson, language, t, tab = 'ove
       </div>
       {/* The projects the Director shared with this partner one by one. When
           there are none, the partner follows their operations whole. */}
-      {overview.sharedProjects?.length > 0 && <p className="partner-notice">
-        {t('portal.sharedProjects')}: {overview.sharedProjects.map((project) => project.name).join(', ')}
-      </p>}
-      <Panel title={t('portal.approvedBudget')} subtitle={operation}>
+      {Number(overview.activities.approvedBudget) > 0 && <Panel title={t('portal.approvedBudget')} subtitle={operation}>
         <div className="partner-budget">{formatMoney(overview.activities.approvedBudget)}</div>
-      </Panel>
+      </Panel>}
       <Panel title={t('portal.recentUpdates')} subtitle={operation}>
         <ActivityTable rows={overview.recentActivities} language={language} t={t} empty={t('portal.noActivities')} />
       </Panel>
@@ -214,7 +237,7 @@ export default function PartnerPortal({ user, fetchJson, language, t, tab = 'ove
     </Panel>}
 
     {tab === 'projects' && <PartnerProjects fetchJson={fetchJson} download={download} language={language} t={t}
-      onError={onError} onMessage={onMessage} ReportView={ReportView} />}
+      onError={onError} onMessage={onMessage} ReportView={ReportView} initialProject={openProject} />}
 
     {tab === 'reports' && report && <>
       <Panel title={t('portal.byMonth')} subtitle={operation}>
@@ -407,7 +430,7 @@ function ActivityTable({ rows, language, t, empty }) {
 // for dates the partner picks, with the PDF and Excel export. The API refuses a
 // project that was not shared by name (404), so the list below is the whole
 // of what this can reach.
-function PartnerProjects({ fetchJson, download, language, t, onError, onMessage, ReportView }) {
+function PartnerProjects({ fetchJson, download, language, t, onError, onMessage, ReportView, initialProject = '' }) {
   const thisMonth = new Date().toISOString().slice(0, 7);
   const [projects, setProjects] = useState(null);
   const [projectId, setProjectId] = useState('');
@@ -468,7 +491,12 @@ function PartnerProjects({ fetchJson, download, language, t, onError, onMessage,
   useEffect(() => {
     let live = true;
     fetchJson('/api/partner/projects')
-      .then((rows) => { if (live) { setProjects(rows); if (rows[0]) choose(rows[0].id, rows); } })
+      .then((rows) => {
+        if (!live) return;
+        setProjects(rows);
+        const first = rows.find((row) => row.id === initialProject) || rows[0];
+        if (first) choose(first.id, rows);
+      })
       .catch((loadError) => onError(loadError.message));
     return () => { live = false; };
     // Once, on arrival: `choose` reads state that is set here.
@@ -553,6 +581,45 @@ function ProjectFiles({ fetchJson, download, projectId, t, language, onError }) 
       </tr>)}</tbody>
     </table></div> : <EmptyState t={t}>{t('portal.noDocuments')}</EmptyState>}
   </Panel>;
+}
+
+// The days imported from the old spreadsheets end with where each came from
+// ("| [rubaya report.xlsx / Mining Activities row 51]"): kept on the record
+// for the Director, left off the partner's summary card.
+const cleanNote = (text) => String(text || '').replace(/\s*\|?\s*\[[^\]]*\brow \d+\]\s*$/i, '').trim();
+
+// One shared project on the partner's first page: how far it is, the money,
+// how much work has been recorded, and the last few days -- every figure from
+// the API, which reads them the way the Director's reports do.
+function ProjectCard({ project, language, t, onOpen }) {
+  const s = project.summary || {};
+  const percent = s.percent;
+  return <section className="panel partner-project-card">
+    <div className="panel-header"><div>
+      <h2>{project.name}</h2>
+      <span>{operationName(project.operation, language)}</span>
+    </div></div>
+    <div className="partner-progress">
+      <strong>{percent === null || percent === undefined ? '—' : `${percent}%`}</strong>
+      <span>{t('portal.card.progress')}</span>
+      {percent !== null && percent !== undefined && <div className="partner-progress-bar" aria-hidden="true"><i style={{ width: `${Math.min(100, percent)}%` }} /></div>}
+    </div>
+    <dl className="partner-card-facts">
+      <div><dt>{t('portal.card.objectives')}</dt><dd>{fill(t('portal.card.ofCount'), { done: s.objectivesDone || 0, total: s.objectives || 0 })}</dd></div>
+      <div><dt>{t('portal.card.days')}</dt><dd>{s.daysRecorded || 0}</dd></div>
+      <div><dt>{t('portal.card.spent')}</dt><dd>{formatMoney(s.spent)}{Number(s.budget) > 0 ? ` / ${formatMoney(s.budget)}` : ''}</dd></div>
+      <div><dt>{t('portal.card.files')}</dt><dd>{s.files || 0}</dd></div>
+    </dl>
+    {s.latestDays?.length > 0 && <>
+      <h3 className="partner-card-sub">{t('portal.card.latest')}</h3>
+      <ul className="partner-latest">{s.latestDays.map((day, index) => <li key={`${day.day}-${index}`}>
+        <span>{formatDate(day.day, language)}</span>
+        <strong>{day.title || '—'}{day.quantity ? ` · ${new Intl.NumberFormat(language).format(day.quantity)}${day.unit ? ` ${day.unit}` : ''}` : ''}</strong>
+        {cleanNote(day.notes) && <small>{cleanNote(day.notes)}</small>}
+      </li>)}</ul>
+    </>}
+    <button className="primary-btn big-action" type="button" onClick={onOpen}>{t('portal.card.open')}</button>
+  </section>;
 }
 
 function Metric({ label, value }) {
