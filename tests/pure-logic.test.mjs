@@ -5,7 +5,7 @@ import { isSummaryRow, parseDate, parseDeliveryNotes, parseYearArgument, summary
 import { mkdtempSync, readFileSync as readFileForTest, rmSync, writeFileSync as writeFileForTest } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { formatWorkbookNote, parseWorkbookNote } from '../shared/workbookNote.js';
+import { formatWorkbookNote, parseWorkbookNote, readableNote } from '../shared/workbookNote.js';
 // The rules that are pure functions, checked without a database.
 //
 // Every other suite here drives the live API over HTTP, because what they are
@@ -631,6 +631,14 @@ for (const [label, run] of asyncChecks) {
   }
 }
 
+
+check('readableNote leaves the import tail off and every other note alone', () => {
+  const note = formatWorkbookNote({ activity: 'Advance on coltan', quantityText: '9.5', source: '$1188 as recorded', file: 'rubaya report.xlsx', sheet: 'Mining Activities', row: 51 });
+  assert.equal(readableNote(note), 'Advance on coltan | Quantity: 9.5 | $1188 as recorded');
+  assert.equal(readableNote('Planted [row 3 of trees] today'), 'Planted [row 3 of trees] today');
+  assert.equal(readableNote('plain note'), 'plain note');
+  assert.equal(readableNote(null), '');
+});
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

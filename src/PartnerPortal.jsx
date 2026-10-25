@@ -3,6 +3,7 @@ import { operationName } from '../shared/businessOperations.js';
 import { categoryLabel } from './ActivityReview.jsx';
 import { DATE_STYLE, dateLocale } from './format.js';
 import { fill } from './i18n.js';
+import { readableNote } from '../shared/workbookNote.js';
 import { ProjectDiscussion } from './Discussion.jsx';
 
 // External Business Partner / Business Operation Access.
@@ -583,11 +584,6 @@ function ProjectFiles({ fetchJson, download, projectId, t, language, onError }) 
   </Panel>;
 }
 
-// The days imported from the old spreadsheets end with where each came from
-// ("| [rubaya report.xlsx / Mining Activities row 51]"): kept on the record
-// for the Director, left off the partner's summary card.
-const cleanNote = (text) => String(text || '').replace(/\s*\|?\s*\[[^\]]*\brow \d+\]\s*$/i, '').trim();
-
 // One shared project on the partner's first page: how far it is, the money,
 // how much work has been recorded, and the last few days -- every figure from
 // the API, which reads them the way the Director's reports do.
@@ -615,7 +611,7 @@ function ProjectCard({ project, language, t, onOpen }) {
       <ul className="partner-latest">{s.latestDays.map((day, index) => <li key={`${day.day}-${index}`}>
         <span>{formatDate(day.day, language)}</span>
         <strong>{day.title || '—'}{day.quantity ? ` · ${new Intl.NumberFormat(language).format(day.quantity)}${day.unit ? ` ${day.unit}` : ''}` : ''}</strong>
-        {cleanNote(day.notes) && <small>{cleanNote(day.notes)}</small>}
+        {readableNote(day.notes) && <small>{readableNote(day.notes)}</small>}
       </li>)}</ul>
     </>}
     <button className="primary-btn big-action" type="button" onClick={onOpen}>{t('portal.card.open')}</button>

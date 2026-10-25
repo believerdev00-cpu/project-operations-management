@@ -11,11 +11,12 @@
 // other columns live inside that one cell, and a report that wants to show them
 // as columns again has to read them back out.
 //
-// WHO USES IT. Only the import tooling and its tests: plans-from-workbook.mjs
+// WHO USES IT. The import tooling and its tests: plans-from-workbook.mjs
 // writes the note, compare.mjs reads the sheet and row back to recognise a day
 // already imported, and tests/pure-logic.test.mjs checks both. The application
-// itself (server/ and src/) does not import this file; a report shows an
-// imported day's note as the text it is.
+// reads one thing from it, readableNote(): the note without its sheet-and-row
+// tail, which is the import's audit trail and not something a report reader
+// (or a partner) should have to read past.
 //
 // WHY THIS IS ONE FILE. The writer and the reader never call each other, so the
 // format is a contract between them. Two hand-written copies of it would drift
@@ -59,6 +60,16 @@ export function formatWorkbookNote(row = {}, limit = 4000) {
       ? `[${clean(row.file)} / ${clean(row.sheet)} row ${row.row}]`
       : ''
   ].filter(Boolean).join(FIELD).slice(0, limit);
+}
+
+// A note as a reader should see it: an imported day's "[file / sheet row N]"
+// tail taken off -- the saved record keeps it -- and any other note untouched.
+// Used by every report (server/routes/reports.js builds the one payload the
+// screen, the PDF and the spreadsheet render) and the partner's project card.
+export function readableNote(note) {
+  const text = clean(note);
+  const tail = SOURCE.exec(text);
+  return tail ? text.slice(0, tail.index).trim() : text;
 }
 
 // Read one back, or null when it was not written by formatWorkbookNote.

@@ -37,6 +37,7 @@ import { monthStart, objectiveProgress, planProgress } from '../lib/monthly.js';
 import { fill, knownLanguage, translate } from '../../shared/strings.js';
 import { operationName } from '../../shared/businessOperations.js';
 import { DAY_COLUMNS } from '../../shared/dailyReport.js';
+import { readableNote } from '../../shared/workbookNote.js';
 
 const router = express.Router();
 
@@ -747,7 +748,7 @@ async function buildMonthlyWork(user, period, choice = null) {
       quantity: round2(row.quantity_done),
       unit: row.target_unit || '',
       cost: round2(row.cost),
-      notes: row.notes || '',
+      notes: readableNote(row.notes),
       workStatus: row.work_status || '',
       remarks: row.remarks || '',
       evidenceCount: Number(row.evidence_count || 0)
