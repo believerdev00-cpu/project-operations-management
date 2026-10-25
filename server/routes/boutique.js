@@ -258,6 +258,10 @@ function mapAdjustment(row) {
     id: row.id,
     variantId: row.variant_id,
     productName: row.product_name,
+    // What the shelf holds now, and what it is counted in, so the Director
+    // sees "3 bottles now, 27 after you approve" rather than a bare number.
+    productUnit: row.product_unit || '',
+    onShelf: row.on_shelf === undefined || row.on_shelf === null ? null : Number(row.on_shelf),
     sku: row.sku,
     size: row.size || '',
     color: row.color || '',
@@ -1146,7 +1150,8 @@ router.get('/stock/movements', asyncRoute(async (req, res) => {
 }));
 
 const ADJUSTMENT_SQL = `
-  SELECT a.*, v.sku, v.size, v.color, p.name AS product_name, r.name AS requested_by_name, d.name AS decided_by_name
+  SELECT a.*, v.sku, v.size, v.color, v.stock_quantity AS on_shelf, p.name AS product_name, p.unit AS product_unit,
+         r.name AS requested_by_name, d.name AS decided_by_name
     FROM boutique_stock_adjustments a JOIN boutique_variants v ON v.id = a.variant_id JOIN boutique_products p ON p.id = v.product_id
     LEFT JOIN users r ON r.id = a.requested_by LEFT JOIN users d ON d.id = a.decided_by`;
 

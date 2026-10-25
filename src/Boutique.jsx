@@ -30,6 +30,22 @@ const TABS = {
   cashier: ['overview', 'sell', 'sales', 'products', 'stock', 'cash']
 };
 
+// The tabs each person uses every day, in front; everything else is one tap
+// away under "More". Thirteen tabs in a row filled half a phone screen before
+// anything useful appeared, and nobody uses all thirteen in a day: the
+// Director decides and reads, the manager sells and keeps the shelf.
+const MAIN_TABS = {
+  director: ['overview', 'approvals', 'sales', 'stock', 'books'],
+  manager: ['overview', 'sell', 'sales', 'products', 'stock'],
+  reader: ['overview', 'sales', 'stock', 'books'],
+  cashier: ['overview', 'sell', 'sales', 'products', 'stock', 'cash']
+};
+// A picture on every tab, so it can be found without reading.
+const TAB_ICONS = {
+  overview: '🏠', sell: '🛒', sales: '🧾', products: '📦', stock: '📊', count: '🔢', suppliers: '🚚',
+  cash: '💵', expenses: '💸', books: '📒', reports: '📈', approvals: '✅', history: '🕘'
+};
+
 const money = formatRwf;
 const variantLabel = (v) => [v.size, v.color].filter(Boolean).join(' / ');
 // A quantity with what it is counted in -- '20 kg', '12 bottles' -- or the
@@ -128,6 +144,11 @@ export default function Boutique({ user, fetchJson, upload, onMessage, onError, 
   if (!overview) return <div className="loading-state"><span className="spinner" />{t('app.loading')}</div>;
   const can = { manage: role === 'director' || role === 'manager', sell: role !== 'reader', decide: role === 'director', role };
   const common = { fetchJson, upload, onMessage, onError, changed, can, go, query, user, overview };
+  const main = (MAIN_TABS[role] || tabs).filter((id) => tabs.includes(id));
+  const more = tabs.filter((id) => !main.includes(id) && id !== active);
+  const tabButton = (id) => <button key={id} type="button" className={`partner-tab${active === id ? ' active' : ''}`} onClick={() => go(id)}>
+    <span aria-hidden="true">{TAB_ICONS[id]}</span> {t(`btq.tab.${id}`)}{id === 'approvals' && overview.pendingApprovals > 0 && <span className="nav-badge btq-badge">{overview.pendingApprovals}</span>}
+  </button>;
 
   return <div className="boutique">
     <section className="welcome-strip btq-head">
@@ -138,9 +159,11 @@ export default function Boutique({ user, fetchJson, upload, onMessage, onError, 
       </div>
     </section>
     <nav className="partner-tabs btq-tabs" aria-label={t('btq.title')}>
-      {tabs.map((id) => <button key={id} type="button" className={`partner-tab${active === id ? ' active' : ''}`} onClick={() => go(id)}>
-        {t(`btq.tab.${id}`)}{id === 'approvals' && overview.pendingApprovals > 0 && <span className="nav-badge btq-badge">{overview.pendingApprovals}</span>}
-      </button>)}
+      {[...main, ...(main.includes(active) ? [] : [active])].map((id) => tabButton(id))}
+      {more.length > 0 && <details className="btq-more-tabs" key={active}>
+        <summary className="partner-tab">☰ {t('btq.moreTabs')}{more.includes('approvals') && overview.pendingApprovals > 0 && <span className="nav-badge btq-badge">{overview.pendingApprovals}</span>}</summary>
+        <div className="btq-more-list">{more.map((id) => tabButton(id))}</div>
+      </details>}
     </nav>
     {active === 'overview' && <OverviewTab {...common} />}
     {active === 'sell' && <SellTab {...common} />}
@@ -172,11 +195,11 @@ function OverviewTab({ overview, can, go }) {
   if (can.decide && overview.pendingApprovals > 0) {
     attention.push({ key: 'decide', text: fill(t('btq.attn.decide'), { count: overview.pendingApprovals }), action: t('btq.tab.approvals'), to: 'approvals' });
   }
-  if (can.sell && !overview.mySessionId) {
+  if (can.sell && !can.decide && !overview.mySessionId) {
     attention.push({ key: 'till', text: t('btq.attn.openTill'), action: t('btq.openTill'), to: 'cash' });
   }
   if (overview.lowStock > 0) {
-    attention.push({ key: 'low', text: fill(t('btq.attn.lowStock'), { count: overview.lowStock }), action: t('btq.tab.stock'), to: 'stock' });
+    attention.push({ key: 'low', text: fill(t('btq.attn.lowStock'), { count: overview.lowStock }), action: t('btq.seeThem'), to: 'stock' });
   }
   return <>
     <section className={`next-step next-step-${attention.length ? 'warning' : 'done'} btq-attention`} aria-live="polite">
@@ -189,13 +212,13 @@ function OverviewTab({ overview, can, go }) {
       </div>
     </section>
     <div className="metric-grid metric-grid-4">
-      <Metric label={t('btq.todaySales')} value={`${money(overview.todaySales.total)} · ${overview.todaySales.count}`} tone="strong" />
+      <Metric label={t('btq.todaySales')} value={fill(t('btq.todaySalesValue'), { amount: money(overview.todaySales.total), count: overview.todaySales.count })} tone="strong" />
       <Metric label={t('btq.lowStockCount')} value={overview.lowStock} tone={overview.lowStock ? 'warn' : ''} />
       {/* A cashier is not given the shelf's worth at cost, the supplier
           balance or the Director's queue; the API answers null for them. */}
       {cashier
         ? <Metric label={t('btq.openTills')} value={overview.openSessions} />
-        : <Metric label={t('btq.pendingApprovals')} value={overview.pendingApprovals} tone={overview.pendingApprovals ? 'warn' : ''} />}
+        : <Metric label={t(can.decide ? 'btq.waitingForYou' : 'btq.pendingApprovals')} value={overview.pendingApprovals} tone={overview.pendingApprovals ? 'warn' : ''} />}
       {cashier
         ? <Metric label={t('btq.piecesOnShelf')} value={overview.pieces} />
         : <Metric label={t('btq.stockValue')} value={money(overview.stockValue)} />}
@@ -283,7 +306,7 @@ function SellTab({ fetchJson, onMessage, onError, changed, can, go, overview }) 
     <div className="btq-pos-left">
       <Panel title={t('btq.tab.sell')} subtitle={overview.mySessionId ? t('btq.tillOpenHint') : t('btq.noTillHint')}>
         {!overview.mySessionId && can.sell && <div className="button-row"><button className="secondary-btn" type="button" disabled={busy} onClick={openTill}>{t('btq.openTill')}</button></div>}
-        <VariantSearch fetchJson={fetchJson} onPick={add} disabled={busy} />
+        <ProductTiles fetchJson={fetchJson} lines={lines} onPick={add} disabled={busy} onError={onError} />
         {lines.length ? <div className="table-wrap"><table className="card-table btq-cart">
           <thead><tr><th>{t('btq.item')}</th><th>{t('btq.qty')}</th><th>{t('btq.unitPrice')}</th><th>{t('btq.lineDiscount')}</th><th>{t('btq.lineTotal')}</th><th>{t('table.actions')}</th></tr></thead>
           <tbody>{lines.map((l) => <tr key={l.variantId}>
@@ -307,10 +330,6 @@ function SellTab({ fetchJson, onMessage, onError, changed, can, go, overview }) 
     </div>
     <div className="btq-pos-right">
       <Panel title={t('btq.payment')}>
-        <div className="form-grid">
-          {can.manage && <Field label={t('btq.saleDiscount')}><input type="number" min="0" step="1" value={discount} onChange={(e) => setDiscount(e.target.value)} /></Field>}
-          <Field label={t('btq.customer')}><input value={customer} maxLength="150" onChange={(e) => setCustomer(e.target.value)} /></Field>
-        </div>
         <div className="btq-totals">
           <Fact label={t('btq.subtotal')} value={money(fromMinor(totals.subtotal))} />
           <Fact label={t('btq.discount')} value={money(fromMinor(totals.discount))} />
@@ -321,7 +340,8 @@ function SellTab({ fetchJson, onMessage, onError, changed, can, go, overview }) 
             {activeMethods.map((code) => <option key={code} value={code}>{t(`btq.method.${code}`)}</option>)}
           </select></Field>
           <Field label={t('btq.amount')}><input type="number" min="0" step="1" value={p.amount} onChange={(e) => setPayments(payments.map((x, i) => (i === index ? { ...x, amount: e.target.value } : x)))} /></Field>
-          <Field label={t('btq.reference')}><input value={p.reference} maxLength="100" onChange={(e) => setPayments(payments.map((x, i) => (i === index ? { ...x, reference: e.target.value } : x)))} /></Field>
+          {/* Cash has no reference; mobile money, card and bank do. */}
+          {p.method !== 'Cash' && <Field label={t('btq.reference')}><input value={p.reference} maxLength="100" onChange={(e) => setPayments(payments.map((x, i) => (i === index ? { ...x, reference: e.target.value } : x)))} /></Field>}
         </div>)}
         <div className="button-row">
           <button type="button" className="text-btn" onClick={() => setPayments([...payments, { method: activeMethods[0] || 'Cash', amount: '', reference: '' }])}>{t('btq.splitPayment')}</button>
@@ -331,12 +351,55 @@ function SellTab({ fetchJson, onMessage, onError, changed, can, go, overview }) 
           <Fact label={t('btq.paid')} value={money(fromMinor(paid))} />
           <Fact label={t('btq.change')} value={money(fromMinor(change))} />
         </div>
-        <Field label={t('field.notes')}><textarea rows="2" value={note} maxLength="1000" onChange={(e) => setNote(e.target.value)} /></Field>
+        {/* Most sales need none of these: folded, open once something is in them. */}
+        <details className="btq-sale-options" open={Boolean(discount || customer || note) || undefined}>
+          <summary>{t(can.manage ? 'btq.moreOptions' : 'btq.moreOptionsCashier')}</summary>
+          <div className="form-grid">
+            {can.manage && <Field label={t('btq.saleDiscount')}><input type="number" min="0" step="1" value={discount} onChange={(e) => setDiscount(e.target.value)} /></Field>}
+            <Field label={t('btq.customer')}><input value={customer} maxLength="150" onChange={(e) => setCustomer(e.target.value)} /></Field>
+            <Field label={t('field.notes')} wide><textarea rows="2" value={note} maxLength="1000" onChange={(e) => setNote(e.target.value)} /></Field>
+          </div>
+        </details>
         <div className="form-submit-bar">
           <button type="button" className="primary-btn big-action" disabled={busy || !lines.length || paid < totals.total} onClick={complete}>{t('btq.completeSale')}</button>
         </div>
         {lines.length > 0 && paid < totals.total && <p className="field-hint over-budget">{t('btq.notEnoughPaid')}</p>}
       </Panel>
+    </div>
+  </div>;
+}
+
+// The shop's products as buttons: tap one to add it to the sale, tap again
+// for one more. A small shop sells the same few dozen things all day, and
+// typing "sug" for sugar on every sale is slower than one tap. Each button
+// shows the price and how many are left; one with nothing left is greyed out.
+// The search box above still finds anything by name, code or barcode.
+function ProductTiles({ fetchJson, lines, onPick, disabled, onError }) {
+  const { t } = useI18n();
+  const [products] = useLoad(fetchJson, '/api/boutique/products?status=active', 0, onError);
+  const [filter, setFilter] = useState('');
+  if (!products) return null;
+  // Typing a barcode or a code and pressing Enter adds the one product it
+  // matches, the way a scanner works.
+  const exact = (text) => (Array.isArray(products) ? products : []).flatMap((product) => (product.variants || []).map((v) => ({ ...v, productName: product.name, productUnit: product.unit })))
+    .filter((v) => [v.sku, v.barcode].some((code) => code && code.toLowerCase() === text.trim().toLowerCase()));
+  const list = (Array.isArray(products) ? products : products.items || [])
+    .flatMap((product) => (product.variants || []).filter((v) => v.status !== 'archived').map((v) => ({ ...v, productName: product.name, productUnit: product.unit })))
+    .filter((v) => !filter || `${v.productName} ${v.size || ''} ${v.color || ''} ${v.sku || ''} ${v.barcode || ''}`.toLowerCase().includes(filter.toLowerCase()))
+    .sort((a, b) => (a.stockQuantity > 0) === (b.stockQuantity > 0) ? a.productName.localeCompare(b.productName) : (a.stockQuantity > 0 ? -1 : 1))
+    .slice(0, 60);
+  const inSale = (id) => lines.find((l) => l.variantId === id)?.quantity || 0;
+  return <div className="btq-tiles-wrap">
+    <div className="btq-tiles-head"><strong>{t('btq.tapToAdd')}</strong>
+      <input type="search" value={filter} placeholder={t('btq.filterTiles')} aria-label={t('btq.filterTiles')} onChange={(e) => setFilter(e.target.value)}
+        onKeyDown={(e) => { if (e.key !== 'Enter') return; const found = exact(filter); if (found.length === 1) { e.preventDefault(); onPick(found[0]); setFilter(''); } }} /></div>
+    <div className="btq-tiles">
+      {list.map((v) => <button key={v.id} type="button" className={`btq-tile${inSale(v.id) ? ' in-sale' : ''}`} disabled={disabled || v.stockQuantity <= inSale(v.id)} onClick={() => onPick(v)}>
+        <strong>{fullName(v)}</strong>
+        <span className="btq-tile-price">{money(v.sellingPrice)}</span>
+        <small>{v.stockQuantity > 0 ? fill(t('btq.leftCount'), { count: qty(v.stockQuantity, v.productUnit) }) : t('btq.stockState.out')}</small>
+        {inSale(v.id) > 0 && <span className="btq-tile-count" aria-label={fill(t('btq.inSaleCount'), { count: inSale(v.id) })}>{inSale(v.id)}</span>}
+      </button>)}
     </div>
   </div>;
 }
@@ -958,16 +1021,16 @@ function StockTab({ fetchJson, onMessage, onError, changed, can, query }) {
         <label className="check-field"><input type="checkbox" checked={low} onChange={(e) => setLow(e.target.checked)} /><span>{t('btq.lowStockOnly')}</span></label>
       </div>
       {stock?.items?.length ? <div className="table-wrap"><table className="card-table">
-        <thead><tr><th>{t('btq.product')}</th><th>{t('btq.inStock')}</th><th>{t('btq.stockStatus')}</th><th>{t('btq.pricePerUnit')}</th><th>{t('btq.lowStockAt')}</th><th>{t('btq.value')}</th>{can.manage && <th>{t('table.actions')}</th>}</tr></thead>
+        <thead><tr><th>{t('btq.product')}</th><th>{t('btq.inStock')}</th><th>{t('btq.pricePerUnit')}</th>{can.manage && <th>{t('table.actions')}</th>}</tr></thead>
         <tbody>{stock.items.map((v) => {
           const state = stockStatus(v.stockQuantity, v.reorderLevel);
           return <tr key={v.id} className={state.key !== 'ok' ? 'btq-low' : undefined}>
-            <td className="card-title-cell"><strong>{fullName(v)}</strong><small>{t(`btq.type.${v.productType}`)} · {v.sku}</small></td>
-            <td data-label={t('btq.inStock')}>{qty(v.stockQuantity, v.productUnit)}</td>
-            <td data-label={t('btq.stockStatus')}><Badge tone={state.tone}>{t(`btq.stockState.${state.key}`)}</Badge></td>
+            {/* Name, how many, whether that is enough, the price: what a
+                shopkeeper looks for. The rest is small print under the name. */}
+            <td className="card-title-cell"><strong>{fullName(v)}</strong>
+              <small>{t(`btq.type.${v.productType}`)} · {fill(t('btq.warnAt'), { count: v.reorderLevel })}{v.costPrice === undefined ? '' : ` · ${t('btq.value')} ${money(v.stockQuantity * v.costPrice)}`}</small></td>
+            <td data-label={t('btq.inStock')}><span className="btq-stock-qty">{qty(v.stockQuantity, v.productUnit)}</span> <Badge tone={state.tone}>{t(`btq.stockState.${state.key}`)}</Badge></td>
             <td data-label={t('btq.pricePerUnit')}>{money(v.sellingPrice)}</td>
-            <td data-label={t('btq.lowStockAt')}>{v.reorderLevel}</td>
-            <td data-label={t('btq.value')}>{v.costPrice === undefined ? '—' : money(v.stockQuantity * v.costPrice)}</td>
             {can.manage && <td className="card-actions"><button type="button" className="secondary-btn" onClick={() => {
               setForm({ ...emptyStockForm(), variant: v });
               setProblem('');
@@ -1024,7 +1087,7 @@ function StockTab({ fetchJson, onMessage, onError, changed, can, query }) {
         </tr>)}</tbody>
       </table></div>
     </Panel>}
-    <Panel title={t('btq.ledger')}>
+    <Section title={t('btq.ledger')} count={movements?.length || 0}>
       {movements?.length ? <div className="table-wrap"><table className="card-table">
         <thead><tr><th>{t('btq.item')}</th><th>{t('table.date')}</th><th>{t('btq.movementKind')}</th><th>{t('btq.change')}</th><th>{t('btq.balanceAfter')}</th><th>{t('field.notes')}</th><th>{t('expense.recordedBy')}</th></tr></thead>
         <tbody>{movements.map((m) => <tr key={m.id}>
@@ -1037,7 +1100,7 @@ function StockTab({ fetchJson, onMessage, onError, changed, can, query }) {
           <td data-label={t('expense.recordedBy')}>{m.recordedByName || '—'}</td>
         </tr>)}</tbody>
       </table></div> : <Empty>{t('btq.noMovements')}</Empty>}
-    </Panel>
+    </Section>
   </>;
 }
 
@@ -1821,8 +1884,9 @@ function ApprovalsTab({ fetchJson, onMessage, onError, changed, can, go, query }
         <div className="decision-card-main">
           <span className="decision-card-kind">{t(`btq.kind.${a.kind}`)}</span>
           <strong>{a.productName} · {a.sku} {variantLabel(a)}</strong>
-          <span className="decision-card-meta">{a.kind === 'count' ? fill(t('btq.countedTo'), { count: a.quantity, delta: a.delta }) : fill(t('btq.piecesChange'), { count: a.quantity })} · {a.requestedByName} · {formatDate(a.createdAt, language)}</span>
-          <p>{a.reason}</p>
+          <span className="decision-card-meta">{a.kind === 'count' ? fill(t('btq.countedTo'), { count: a.quantity, delta: a.delta }) : `${a.delta > 0 ? '+' : '−'}${qty(Math.abs(a.delta), a.productUnit)}`} · {a.requestedByName} · {formatDate(a.createdAt, language)}</span>
+          {a.onShelf !== null && a.onShelf !== undefined && <span className="btq-shelf-after">{fill(t('btq.shelfAfter'), { now: qty(a.onShelf, a.productUnit), after: qty(a.onShelf + a.delta, a.productUnit) })}</span>}
+          {a.reason && <p>{a.reason}</p>}
         </div>
         {can.decide && <div className="decision-card-actions">
           <button type="button" className="primary-btn" disabled={busy} onClick={() => decide(`/api/boutique/stock/adjustments/${a.id}/decision`, true, t('btq.adjusted'))}>{t('btq.approve')}</button>

@@ -1642,9 +1642,9 @@ const STRINGS = {
   // added to shared/boutique.js without its words fails the build.
   'nav.boutique': { en: 'Boutique', rw: 'Butike', fr: 'Boutique', sw: 'Butiki' },
   'btq.openBoutique': { en: 'Open boutique', rw: 'Fungura butike', fr: 'Ouvrir la boutique', sw: 'Fungua butiki' },
-  'btq.eyebrow': { en: 'Project 5 · Business projects', rw: 'Umushinga wa 5 · Imishinga y’ubucuruzi', fr: 'Projet 5 · Projets commerciaux', sw: 'Mradi wa 5 · Miradi ya biashara' },
+  'btq.eyebrow': { en: 'The shop', rw: 'Iduka', fr: 'La boutique', sw: 'Duka' },
   'btq.title': { en: 'Boutique Management System', rw: 'Sisitemu y’Imicungire ya Butike', fr: 'Système de gestion de la boutique', sw: 'Mfumo wa Usimamizi wa Butiki' },
-  'btq.blurb': { en: 'Clothing, shoes, bags and accessories: what is on the shelf, what was sold, what it cost and what came in.', rw: 'Imyenda, inkweto, amasakoshi n’ibindi: ibiri ku ipantiri, ibyagurishijwe, ibyo byatwaye n’ayinjiye.', fr: 'Vêtements, chaussures, sacs et accessoires : ce qui est en rayon, ce qui a été vendu, ce que cela a coûté et ce qui est entré.', sw: 'Nguo, viatu, mikoba na vifaa: kilicho rafu, kilichouzwa, gharama yake na kilichoingia.' },
+  'btq.blurb': { en: 'Everyday goods: what is on the shelf, what was sold, what it cost and what came in.', rw: 'Ibicuruzwa bya buri munsi: ibiri ku gipangu, ibyagurishijwe, ibyo byatwaye n’ibyinjiye.', fr: 'Produits de tous les jours : ce qui est en rayon, ce qui a été vendu, ce que cela a coûté et ce qui est arrivé.', sw: 'Bidhaa za kila siku: kilicho rafuni, kilichouzwa, gharama yake na kilichoingia.' },
   'btq.overviewHint': { en: 'Every figure here is summed from the sales, deliveries, counts and expenses recorded in the shop. Nothing is typed in by hand.', rw: 'Imibare yose hano iteranywa ivuye ku byagurishijwe, ibyagemuwe, ibyabazwe n’ibyakoreshejwe byanditswe mu iduka. Nta na kimwe cyandikwa n’intoki.', fr: 'Chaque chiffre ici est la somme des ventes, livraisons, comptages et dépenses enregistrés dans la boutique. Rien n’est saisi à la main.', sw: 'Kila tarakimu hapa ni jumla ya mauzo, uwasilishaji, hesabu na matumizi yaliyorekodiwa dukani. Hakuna kinachoandikwa kwa mkono.' },
 
   'btq.tab.overview': { en: 'Overview', rw: 'Incamake', fr: 'Aperçu', sw: 'Muhtasari' },
@@ -1725,6 +1725,18 @@ const STRINGS = {
   'btq.tab.reports': { en: 'Reports', rw: 'Raporo', fr: 'Rapports', sw: 'Ripoti' },
   'btq.tab.approvals': { en: 'Approvals', rw: 'Kwemeza', fr: 'Approbations', sw: 'Idhini' },
   'btq.tab.history': { en: 'History', rw: 'Amateka', fr: 'Historique', sw: 'Historia' },
+  'btq.warnAt': { en: 'warn at {count}', rw: 'umuburo kuri {count}', fr: 'alerte à {count}', sw: 'onya kwenye {count}' },
+  'btq.moreOptionsCashier': { en: 'More: customer’s name, note', rw: 'Ibindi: izina ry’umukiriya, icyitonderwa', fr: 'Plus : nom du client, note', sw: 'Zaidi: jina la mteja, maelezo' },
+  'btq.moreOptions': { en: 'More: discount, customer’s name, note', rw: 'Ibindi: igabanyirizwa, izina ry’umukiriya, icyitonderwa', fr: 'Plus : remise, nom du client, note', sw: 'Zaidi: punguzo, jina la mteja, maelezo' },
+  'btq.inSaleCount': { en: '{count} in this sale', rw: '{count} muri iri gurisha', fr: '{count} dans cette vente', sw: '{count} katika mauzo haya' },
+  'btq.leftCount': { en: '{count} left', rw: 'hasigaye {count}', fr: 'il en reste {count}', sw: 'zimebaki {count}' },
+  'btq.filterTiles': { en: 'Find a product, or scan a barcode…', rw: 'Shaka igicuruzwa, cyangwa usikane barcode…', fr: 'Trouver un produit ou scanner un code-barres…', sw: 'Tafuta bidhaa, au changanua msimbo pau…' },
+  'btq.tapToAdd': { en: 'Tap a product to add it to the sale', rw: 'Kanda ku gicuruzwa kugira ngo ukongere ku igurisha', fr: 'Touchez un produit pour l’ajouter à la vente', sw: 'Gusa bidhaa ili kuiongeza kwenye mauzo' },
+  'btq.seeThem': { en: 'See them', rw: 'Bireba', fr: 'Les voir', sw: 'Viangalie' },
+  'btq.shelfAfter': { en: 'On the shelf now: {now} → after you approve: {after}', rw: 'Ibiri ku gipangu ubu: {now} → numara kwemeza: {after}', fr: 'En rayon maintenant : {now} → après votre accord : {after}', sw: 'Rafuni sasa: {now} → ukiidhinisha: {after}' },
+  'btq.waitingForYou': { en: 'Waiting for you', rw: 'Bigutegereje', fr: 'En attente de vous', sw: 'Inakusubiri' },
+  'btq.todaySalesValue': { en: '{amount} ({count} sales)', rw: '{amount} (igurisha {count})', fr: '{amount} ({count} ventes)', sw: '{amount} (mauzo {count})' },
+  'btq.moreTabs': { en: 'More', rw: 'Ibindi', fr: 'Plus', sw: 'Zaidi' },
 
   'btq.type.clothing': { en: 'Clothing', rw: 'Imyenda', fr: 'Vêtements', sw: 'Nguo' },
   'btq.type.shoes': { en: 'Shoes', rw: 'Inkweto', fr: 'Chaussures', sw: 'Viatu' },
@@ -1820,7 +1832,7 @@ const STRINGS = {
   'btq.nothingInPeriod': { en: 'Nothing recorded in these dates.', rw: 'Nta kintu cyanditswe muri aya matariki.', fr: 'Rien d’enregistré sur ces dates.', sw: 'Hakuna kilichorekodiwa katika tarehe hizi.' },
 
   // Overview
-  'btq.todaySales': { en: 'Today’s sales · count', rw: 'Ibyagurishijwe uyu munsi · umubare', fr: 'Ventes du jour · nombre', sw: 'Mauzo ya leo · idadi' },
+  'btq.todaySales': { en: 'Sold today', rw: 'Byagurishijwe uyu munsi', fr: 'Vendu aujourd’hui', sw: 'Imeuzwa leo' },
   'btq.stockValue': { en: 'Stock on the shelf, at cost', rw: 'Agaciro k’ububiko ku kiguzi', fr: 'Stock en rayon, au coût', sw: 'Akiba rafu, kwa gharama' },
   'btq.piecesOnShelf': { en: 'Pieces on the shelf', rw: 'Ibice biri ku ipantiri', fr: 'Pièces en rayon', sw: 'Vipande rafu' },
   'btq.lowStockCount': { en: 'Low stock lines', rw: 'Ibicuruzwa bigiye gushira', fr: 'Lignes en stock bas', sw: 'Bidhaa zinazokaribia kuisha' },
@@ -1839,7 +1851,7 @@ const STRINGS = {
   'btq.openingCash': { en: 'Opening cash (RWF)', rw: 'Amafaranga yo gutangira (RWF)', fr: 'Fonds de caisse (RWF)', sw: 'Pesa za kuanzia (RWF)' },
   'btq.tillOpened': { en: 'Till opened.', rw: 'Ikasi yafunguwe.', fr: 'Caisse ouverte.', sw: 'Kasha limefunguliwa.' },
   'btq.myTill': { en: 'My till', rw: 'Ikasi yanjye', fr: 'Ma caisse', sw: 'Kasha langu' },
-  'btq.cartEmpty': { en: 'Search for a product to start a sale.', rw: 'Shakisha igicuruzwa kugira ngo utangire kugurisha.', fr: 'Recherchez un produit pour commencer une vente.', sw: 'Tafuta bidhaa ili kuanza mauzo.' },
+  'btq.cartEmpty': { en: 'Tap a product above to start a sale.', rw: 'Kanda ku gicuruzwa kiri hejuru kugira ngo utangire kugurisha.', fr: 'Touchez un produit ci-dessus pour commencer une vente.', sw: 'Gusa bidhaa iliyo juu ili kuanza mauzo.' },
   'btq.unitPrice': { en: 'Unit price', rw: 'Igiciro cya kimwe', fr: 'Prix unitaire', sw: 'Bei ya kipande' },
   'btq.lineDiscount': { en: 'Line discount', rw: 'Igabanyirizwa ku murongo', fr: 'Remise ligne', sw: 'Punguzo la mstari' },
   'btq.lineTotal': { en: 'Line total', rw: 'Igiteranyo cy’umurongo', fr: 'Total ligne', sw: 'Jumla ya mstari' },
@@ -2103,7 +2115,6 @@ const STRINGS = {
   // Approvals
   'btq.voidRequests': { en: 'Void requests', rw: 'Ubusabe bwo gukuraho', fr: 'Demandes d’annulation', sw: 'Maombi ya kubatilisha' },
   'btq.countedTo': { en: 'counted {count} ({delta})', rw: 'byabazwe {count} ({delta})', fr: 'compté {count} ({delta})', sw: 'imehesabiwa {count} ({delta})' },
-  'btq.piecesChange': { en: '{count} piece(s)', rw: 'ibice {count}', fr: '{count} pièce(s)', sw: 'vipande {count}' },
 
   // The trail's actions, as the API writes them.
   'btq.trail.Product created': { en: 'Product created', rw: 'Igicuruzwa cyashyizweho', fr: 'Produit créé', sw: 'Bidhaa imeundwa' },

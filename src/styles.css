@@ -1467,3 +1467,30 @@ td .operation-checks { display: grid; gap: 0; }
 .farm-herd-changes > summary::before { content: '▸ '; }
 .farm-herd-changes[open] > summary::before { content: '▾ '; }
 .farm-herd-changes[open] > summary { margin-bottom: 10px; }
+
+/* ---- the shop, made easier (Boutique.jsx) ------------------------------------- */
+.btq-more-tabs { position: relative; display: inline-block; }
+.btq-more-tabs > summary { list-style: none; cursor: pointer; }
+.btq-more-tabs > summary::-webkit-details-marker { display: none; }
+.btq-more-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); }
+@media (min-width: 641px) { .btq-more-list { position: absolute; z-index: 20; min-width: 320px; } }
+.btq-tiles-wrap { margin-top: 14px; }
+.btq-tiles-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+.btq-tiles-head input { flex: 1 1 220px; max-width: 360px; font-size: 16px; }
+.btq-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+.btq-tile { position: relative; display: grid; gap: 4px; text-align: left; padding: 12px; min-height: 92px; border: 2px solid var(--line); border-radius: 12px; background: var(--surface); cursor: pointer; }
+.btq-tile:hover:not(:disabled) { border-color: var(--blue); }
+.btq-tile strong { font-size: 15px; line-height: 1.25; }
+.btq-tile-price { font-size: 17px; font-weight: 700; color: var(--navy); }
+.btq-tile small { color: var(--muted); }
+.btq-tile.in-sale { border-color: var(--green); background: #eef8f2; }
+.btq-tile:disabled { opacity: .45; cursor: not-allowed; }
+.btq-tile-count { position: absolute; top: -8px; right: -8px; min-width: 26px; height: 26px; border-radius: 13px; background: var(--green); color: #fff; font-weight: 700; display: grid; place-items: center; font-size: 14px; }
+.btq-sale-options { margin: 10px 0; }
+.btq-sale-options > summary { cursor: pointer; color: var(--blue); font-weight: 600; padding: 8px 0; }
+.btq-stock-qty { font-size: 18px; font-weight: 700; margin-right: 6px; }
+@media (max-width: 640px) { .btq-tiles { grid-template-columns: repeat(2, 1fr); } }
+.boutique .decision-card-main p { grid-column: 1 / -1; margin: 6px 0 0; }
+.boutique .decision-card-main strong { grid-column: 1 / -1; }
+.boutique .decision-card-meta { grid-column: 1 / -1; }
+.btq-shelf-after { grid-column: 1 / -1; margin-top: 4px; font-weight: 600; color: var(--navy); }
