@@ -415,6 +415,7 @@ export async function buildReport(user, period, choice = null) {
       id: row.id,
       activity: row.activity,
       description: row.description || '',
+      quantity: Number(row.quantity || 0),
       category: row.category,
       projectId: row.project_id,
       projectName: row.project_name || row.project_id,
@@ -1259,16 +1260,17 @@ async function buildWorkbook(report, language = 'en') {
     }
   }
 
+  // The day form's columns and widths, shared by every table in the file.
+  const SHEET_COLUMN = {
+    date: { width: 22 }, activity: { width: 38 }, description: { width: 60 }, quantity: { width: 16 },
+    cost: { width: 14 }, status: { width: 24 }, remarks: { width: 60 }, photos: { width: 9 }
+  };
   if (work.days.length) {
     const daily = workbook.addWorksheet(sheetName(t('report.dayByDay')));
     // The columns of the day form, in its order and under its headers
     // (DAY_COLUMNS, `day.*`), so the sheet reads like the form the manager
     // typed into. Quantity stays a number -- the unit is in its cell format,
     // not in the value -- so the column can still be summed.
-    const SHEET_COLUMN = {
-      date: { width: 22 }, activity: { width: 38 }, description: { width: 60 }, quantity: { width: 16 },
-      cost: { width: 14 }, status: { width: 24 }, remarks: { width: 40 }, photos: { width: 9 }
-    };
     daily.columns = DAY_COLUMNS.map((column) => ({ header: t(`day.${column}`), key: column, ...SHEET_COLUMN[column] }));
     headerRow(daily, 1);
     const many = work.months.length > 1;
@@ -1292,49 +1294,20 @@ async function buildWorkbook(report, language = 'en') {
     }
   }
 
-  // And the register, last, only when it has anything in it.
+  // And the register, last, only when it has anything in it -- in the same
+  // eight columns as the day sheet, so every table in the file reads alike.
   if (hasActivities) {
     const details = workbook.addWorksheet(sheetName(t('nav.activities')));
-    details.columns = [
-      { header: t('table.activity'), key: 'activity', width: 32 },
-      { header: t('report.project'), key: 'project', width: 26 },
-      { header: t('report.operation'), key: 'sector', width: 20 },
-      { header: t('export.budgetGiven'), key: 'original', width: 16 },
-      { header: t('export.afterReview'), key: 'revised', width: 18 },
-      { header: t('field.spent'), key: 'spent', width: 16 },
-      { header: t('report.moneyLeft'), key: 'remaining', width: 14 },
-      { header: t('export.whereItStands'), key: 'status', width: 22 },
-      { header: t('export.pastItsDate'), key: 'overdue', width: 13 },
-      { header: t('export.startedOn'), key: 'assignedOn', width: 18 },
-      { header: t('export.due'), key: 'deadline', width: 18 },
-      { header: t('export.finishedOn'), key: 'completed', width: 18 },
-      { header: t('report.adminNotes'), key: 'note', width: 46 },
-      { header: t('export.whyBudgetChanged'), key: 'reason', width: 46 }
-    ];
+    details.columns = DAY_COLUMNS.map((column) => ({ header: t(`day.${column}`), key: column, ...SHEET_COLUMN[column] }));
     headerRow(details, 1);
+    const many = work.months.length > 1 || report.scope.sector === null;
     for (const item of report.activities) {
-      details.addRow({
-        activity: item.activity,
-        project: item.projectName,
-        sector: operation(item.sector),
-        original: item.originalBudget,
-        // An undecided budget is left blank rather than shown as a nought, which
-        // would read as "the Director released nothing".
-        revised: item.revisedBudget === null ? t('export.notDecidedYet') : item.revisedBudget,
-        spent: item.actualSpending,
-        remaining: item.remainingBudget,
-        status: item.assigned
-          ? t(`status.${item.status}`)
-          : `${t(`status.${item.status}`)} — ${t('report.nobodyGivenIt')}`,
-        overdue: item.overdue ? t('export.yes') : t('export.no'),
-        assignedOn: dayInWords(item.dateAssigned, language),
-        deadline: dayInWords(item.deadline, language),
-        completed: dayInWords(item.completionDate, language),
-        note: item.adminNote,
-        reason: budgetReasonText(item, language)
-      });
+      const row = details.addRow(activityAsDay(item, language, { operation, many }));
+      row.getCell('cost').numFmt = MONEY;
+      for (const key of ['activity', 'description', 'remarks']) {
+        row.getCell(key).alignment = { wrapText: true, vertical: 'top' };
+      }
     }
-    money(details, ['original', 'revised', 'spent', 'remaining']);
   }
 
   return workbook;
@@ -1646,54 +1619,69 @@ function writePdf(report, stream, language = 'en') {
   // clipped or ellipsed, because these sentences are what a report exists to
   // carry. A row too tall for what is left of the page starts a new page, and
   // the header row is drawn again at the top of it.
-  if (work.days.length) {
-    section(t('report.dayByDay'));
-    const share = { date: 60, activity: 74, description: 104, quantity: 46, cost: 50, status: 52, remarks: 77, photos: 40 };
-    const scale = width / DAY_COLUMNS.reduce((sum, column) => sum + share[column], 0);
-    const columns = DAY_COLUMNS.map((column) => ({ column, width: share[column] * scale }));
-    const PAD = 3;
-    const many = work.months.length > 1;
-    const drawRow = (cells, { bold = false, fill = null } = {}) => {
-      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(7.5);
-      const height = Math.max(...columns.map(({ column, width: cellWidth }) =>
-        doc.heightOfString(cells[column] || ' ', { width: cellWidth - PAD * 2 }))) + PAD * 2;
-      const top = doc.y;
-      if (fill) doc.rect(left, top, width, height).fillColor(fill).fill();
-      let x = left;
-      for (const { column, width: cellWidth } of columns) {
-        doc.fillColor(INK)
-          .text(cells[column] || '', x + PAD, top + PAD, { width: cellWidth - PAD * 2 });
-        x += cellWidth;
-      }
-      doc.moveTo(left, top + height).lineTo(left + width, top + height).strokeColor('#dfe7ef').lineWidth(0.5).stroke();
-      doc.y = top + height;
-      return height;
-    };
-    const headers = Object.fromEntries(DAY_COLUMNS.map((column) => [column, t(`day.${column}`)]));
+  // One table, in the day form's columns, for every table on paper: the days
+  // and, when there are any, the activities. Every cell wraps -- nothing is
+  // clipped, because these sentences are what a report exists to carry -- and a
+  // row too tall for the rest of the page starts a new one under the header.
+  const share = { date: 60, activity: 74, description: 104, quantity: 46, cost: 50, status: 52, remarks: 77, photos: 40 };
+  const scale = width / DAY_COLUMNS.reduce((sum, column) => sum + share[column], 0);
+  const columns = DAY_COLUMNS.map((column) => ({ column, width: share[column] * scale }));
+  const PAD = 3;
+  const rowHeight = (cells) => {
+    doc.font('Helvetica').fontSize(7.5);
+    return Math.max(...columns.map(({ column, width: cellWidth }) =>
+      doc.heightOfString(cells[column] || ' ', { width: cellWidth - PAD * 2 }))) + PAD * 2;
+  };
+  const drawRow = (cells, { bold = false, fill = null } = {}) => {
+    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(7.5);
+    const height = Math.max(...columns.map(({ column, width: cellWidth }) =>
+      doc.heightOfString(cells[column] || ' ', { width: cellWidth - PAD * 2 }))) + PAD * 2;
+    const top = doc.y;
+    if (fill) doc.rect(left, top, width, height).fillColor(fill).fill();
+    let x = left;
+    for (const { column, width: cellWidth } of columns) {
+      doc.fillColor(INK)
+        .text(cells[column] || '', x + PAD, top + PAD, { width: cellWidth - PAD * 2 });
+      x += cellWidth;
+    }
+    doc.moveTo(left, top + height).lineTo(left + width, top + height).strokeColor('#dfe7ef').lineWidth(0.5).stroke();
+    doc.y = top + height;
+    return height;
+  };
+  const headers = Object.fromEntries(DAY_COLUMNS.map((column) => [column, t(`day.${column}`)]));
+  const dayTable = (rows) => {
     const header = () => drawRow(headers, { bold: true, fill: '#eef3f8' });
     header();
-    for (const entry of work.days) {
-      const cells = {
-        date: day(entry.date),
-        activity: `${many ? `${operation(entry.operation)} — ` : ''}${entry.objective || t('report.notLinked')}`,
-        description: entry.notes,
-        quantity: `${entry.quantity} ${entry.unit}`.trim(),
-        cost: entry.cost > 0 ? usd(entry.cost) : '—',
-        status: entry.workStatus,
-        remarks: entry.remarks,
-        photos: String(entry.evidenceCount || 0)
-      };
-      doc.font('Helvetica').fontSize(7.5);
-      const needed = Math.max(...columns.map(({ column, width: cellWidth }) =>
-        doc.heightOfString(cells[column] || ' ', { width: cellWidth - PAD * 2 }))) + PAD * 2;
-      if (doc.y + needed > bottom) { doc.addPage(); header(); }
+    for (const cells of rows) {
+      if (doc.y + rowHeight(cells) > bottom) { doc.addPage(); header(); }
       drawRow(cells);
     }
     doc.font('Helvetica').fontSize(9.5).fillColor(INK);
     doc.x = left;
+  };
+
+  // ---- the day-by-day record ----------------------------------------------
+  //
+  // What the managers actually wrote down, in date order, under the day form's
+  // own columns and headers (DAY_COLUMNS).
+  if (work.days.length) {
+    section(t('report.dayByDay'));
+    const many = work.months.length > 1;
+    dayTable(work.days.map((entry) => ({
+      date: day(entry.date),
+      activity: `${many ? `${operation(entry.operation)} — ` : ''}${entry.objective || t('report.notLinked')}`,
+      description: entry.notes,
+      quantity: `${entry.quantity} ${entry.unit}`.trim(),
+      cost: entry.cost > 0 ? usd(entry.cost) : '—',
+      status: entry.workStatus,
+      remarks: entry.remarks,
+      photos: String(entry.evidenceCount || 0)
+    })));
   }
 
   // ---- the activity register, when there is one ---------------------------
+  //
+  // The counts, then the activities in the same eight columns as the days.
   if (report.activities.length) {
     section(t('report.activitiesInDates'));
     fact(t('report.totalActivities'), report.activitySummary.total);
@@ -1703,38 +1691,11 @@ function writePdf(report, stream, language = 'en') {
     if (report.activitySummary.overdue) fact(t('report.overdue'), report.activitySummary.overdue);
     if (report.activitySummary.cancelled) fact(t('status.Cancelled'), report.activitySummary.cancelled);
     doc.moveDown(0.5);
-
-    // One block per activity rather than a row in a nine-column table. The
-    // table was drawn with line breaks switched off and an ellipsis, so every
-    // activity name and every note longer than its share of the page width was
-    // silently cut -- in a document whose whole purpose is to be read later.
-    for (const item of report.activities) {
-      room(54);
-      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK).text(item.activity, left, doc.y, { width });
-      const facts = [activityStanding(item, language)];
-      if (item.projectName) facts.push(item.projectName);
-      if (work.months.length > 1 || report.scope.sector === null) facts.push(operation(item.sector));
-      facts.push(w('export.givenSpent', {
-        given: usd(item.effectiveBudget), spent: usd(item.actualSpending)
-      }));
-      if (item.dateAssigned) facts.push(`${t('export.startedOn')} ${day(item.dateAssigned)}`);
-      if (item.deadline) facts.push(`${t('export.due')} ${day(item.deadline)}`);
-      if (item.completionDate) facts.push(`${t('export.finishedOn')} ${day(item.completionDate)}`);
-      doc.font('Helvetica').fontSize(8.5).fillColor(QUIET).text(facts.join('   ·   '), left, doc.y, { width });
-      const reason = budgetReasonText(item, language);
-      if (reason) {
-        doc.font('Helvetica-Oblique').fontSize(8.5).text(reason, left, doc.y, { width });
-      }
-      // Only when the note is not already inside the reason line above: the
-      // Director's note IS usually the reason they changed the figure, and
-      // printing it twice under one activity reads as two separate remarks.
-      if (item.adminNote && !reason.includes(item.adminNote.replace(/\s*\.\s*$/, ''))) {
-        doc.font('Helvetica-Oblique').fontSize(8.5)
-          .text(w('export.directorsNoteLine', { note: item.adminNote }), left, doc.y, { width });
-      }
-      doc.fillColor(INK);
-      doc.moveDown(0.6);
-    }
+    const many = work.months.length > 1 || report.scope.sector === null;
+    dayTable(report.activities.map((item) => {
+      const row = activityAsDay(item, language, { operation, many });
+      return { ...row, quantity: row.quantity === null ? '—' : String(row.quantity), cost: row.cost > 0 ? usd(row.cost) : '—', photos: String(row.photos) };
+    }));
   }
 
   // Only truly empty when BOTH registers are empty. Saying "no activities" on a
@@ -1751,6 +1712,36 @@ function writePdf(report, stream, language = 'en') {
 
 // Where an activity stands, including the one thing worth saying about who has
 // it: whether anybody has it at all.
+// An activity as one row of the day table (DAY_COLUMNS), so every exported
+// table reads Date · Activity · Description · Quantity · Cost (USD) · Status ·
+// Remarks · Photos. What an activity has and a day does not -- its budget and
+// what is left of it, its dates, why the budget moved, the Director's note --
+// goes into Remarks, so nothing the old fourteen-column register carried is
+// lost. Cost is what was spent on it, as a day's cost is.
+function activityAsDay(item, language, { operation, many }) {
+  const { t, w } = wordsFor(language);
+  const day = (value) => dayInWords(value, language);
+  const reason = budgetReasonText(item, language);
+  const remarks = [
+    w('export.givenSpent', { given: usd(item.effectiveBudget), spent: usd(item.actualSpending) }),
+    `${t('report.moneyLeft')}: ${usd(item.remainingBudget)}`,
+    item.deadline ? `${t('export.due')} ${day(item.deadline)}` : '',
+    item.completionDate ? `${t('export.finishedOn')} ${day(item.completionDate)}` : '',
+    reason,
+    item.adminNote && !reason.includes(item.adminNote.replace(/\s*\.\s*$/, '')) ? w('export.directorsNoteLine', { note: item.adminNote }) : ''
+  ].filter(Boolean);
+  return {
+    date: day(item.dateAssigned),
+    activity: `${many ? `${operation(item.sector)} — ` : ''}${item.activity}`,
+    description: item.description,
+    quantity: item.quantity > 0 ? item.quantity : null,
+    cost: item.actualSpending,
+    status: activityStanding(item, language),
+    remarks: remarks.join(' · '),
+    photos: item.evidenceCount || 0
+  };
+}
+
 function activityStanding(item, language = 'en') {
   const { t } = wordsFor(language);
   const standing = t(`status.${item.status}`) + (item.overdue ? ` (${t('export.pastItsDate').toLowerCase()})` : '');
