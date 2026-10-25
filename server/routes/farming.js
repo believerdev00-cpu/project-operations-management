@@ -187,10 +187,12 @@ router.get('/overview', asyncRoute(async (req, res) => {
        FROM farm_measures m WHERE m.kind = 'product'`
   )).rows.map((row) => ({ measureId: row.measure_id, onHand: Number(row.on_hand) }));
   const herd = (await pool.query(
-    `SELECT m.id AS measure_id, COALESCE(SUM(e.delta), 0)::int AS head
+    `SELECT m.id AS measure_id, COALESCE(SUM(e.delta), 0)::int AS head, COUNT(e.id)::int AS events
        FROM farm_measures m LEFT JOIN farm_herd_events e ON e.measure_id = m.id AND e.status = 'recorded'
       WHERE m.kind = 'herd' GROUP BY m.id`
-  )).rows.map((row) => ({ measureId: row.measure_id, head: row.head }));
+  // A herd nobody has ever counted or recorded a change for is unknown, not
+  // empty: null, so the screen says "Not counted yet" rather than "0 head".
+  )).rows.map((row) => ({ measureId: row.measure_id, head: row.events ? row.head : null }));
 
   const todayRows = production.filter((row) => row.date === today);
   const todayProduction = measures.filter((measure) => measure.kind === 'product').map((measure) => {

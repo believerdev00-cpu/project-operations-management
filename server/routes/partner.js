@@ -540,13 +540,17 @@ function projectChoice(project) {
 
 router.get('/projects', asyncRoute(async (req, res) => {
   const result = await pool.query(
-    `SELECT p.id, p.name, p.sector FROM projects p
+    `SELECT p.id, p.name, p.sector,
+            (SELECT to_char(MAX(mp.month), 'YYYY-MM') FROM monthly_plans mp WHERE mp.project_id = p.id) AS latest_month
+       FROM projects p
        JOIN partner_projects pp ON pp.project_id = p.id AND pp.partner_id = $1
       WHERE p.sector = ANY($2::text[])
       ORDER BY p.sector, p.name`,
     [req.user.id, req.user.operations]
   );
-  res.json(result.rows.map((row) => ({ id: row.id, name: row.name, operation: row.sector })));
+  // latestMonth: the newest month with a plan filed under the project, so the
+  // partner's report opens on work rather than on an empty current month.
+  res.json(result.rows.map((row) => ({ id: row.id, name: row.name, operation: row.sector, latestMonth: row.latest_month || null })));
 }));
 
 router.get('/projects/:id/report', asyncRoute(async (req, res) => {

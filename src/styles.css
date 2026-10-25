@@ -1418,6 +1418,7 @@ td .operation-checks { display: grid; gap: 0; }
 .farm-trend { margin: 10px 0 16px; }
 .farm-spark { display: flex; align-items: flex-end; gap: 2px; height: 56px; margin-top: 6px; border-bottom: 1px solid var(--line); }
 .farm-spark span { flex: 1 1 0; min-width: 3px; background: var(--green); border-radius: 2px 2px 0 0; }
+.farm-spark .farm-spark-gap { height: 3px; background: repeating-linear-gradient(90deg, var(--line) 0 3px, transparent 3px 6px); border-radius: 0; }
 .farm-type { padding: 12px 0; border-bottom: 1px solid var(--line); }
 .farm-type-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
 .farm-type-head h3 { margin: 0; }

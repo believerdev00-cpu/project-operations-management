@@ -21,7 +21,7 @@ import { fill, useI18n } from './i18n.js';
 import { useBusy, useDialog } from './ui.jsx';
 import { formatDate, formatUsd, todayLocal } from './format.js';
 import {
-  FARM_CURRENCIES, FARM_ERROR_CODES, FARM_EXPENSE_CATEGORIES, FARM_PERIODS, HERD_EVENT_KINDS, ISSUE_KINDS, SHARED_SCOPE,
+  FARM_CURRENCIES, addDays, FARM_ERROR_CODES, FARM_EXPENSE_CATEGORIES, FARM_PERIODS, HERD_EVENT_KINDS, ISSUE_KINDS, SHARED_SCOPE,
   THRESHOLD_LIMITS, selectableTypes, validateExpense, validateHerdEvent, validateIssue, validateProduction, validateSale
 } from '../shared/farming.js';
 
@@ -207,7 +207,8 @@ function TodayTab({ overview, can, catalogue, range, setRange, go }) {
         })}
         {overview.herd.filter((line) => measureOf(line.measureId).active).map((line) => {
           const measure = measureOf(line.measureId);
-          return <Metric key={`h${line.measureId}`} label={`${typeName(measure.animalTypeId)} · ${measure.name}`} value={quantityText(line.head, measure.unit)} />;
+          return <Metric key={`h${line.measureId}`} label={`${typeName(measure.animalTypeId)} · ${measure.name}`}
+            value={line.head === null ? t('farm.notCountedYet') : quantityText(line.head, measure.unit)} tone={line.head === null ? 'quiet' : null} />;
         })}
       </div>
     </Panel>
@@ -244,11 +245,19 @@ function TodayTab({ overview, can, catalogue, range, setRange, go }) {
       {overview.trend.filter((line) => line.points.length).map((line) => {
         const measure = measureOf(line.measureId);
         const peak = Math.max(...line.points.map((point) => point.produced), 1);
+        const byDay = new Map(line.points.map((point) => [point.period, point]));
+        // One slot per day of the 30, so a day nobody recorded is a visible
+        // gap -- not a bar that silently disappears and closes up the line.
+        const days = Array.from({ length: 30 }, (_, index) => addDays(overview.today, index - 29));
         return <div key={line.measureId} className="farm-trend">
           <span>{typeName(measure.animalTypeId)} · {measure.name} ({measure.unit})</span>
           <div className="farm-spark" role="img" aria-label={`${measure.name}`}>
-            {line.points.map((point) => <span key={point.period} title={`${formatDate(point.period, language)}: ${quantityText(point.produced, measure.unit)}`}
-              style={{ height: `${Math.max(4, (point.produced / peak) * 100)}%` }} />)}
+            {days.map((day) => {
+              const point = byDay.get(day);
+              return point
+                ? <span key={day} title={`${formatDate(day, language)}: ${quantityText(point.produced, measure.unit)}`} style={{ height: `${Math.max(4, (point.produced / peak) * 100)}%` }} />
+                : <span key={day} className="farm-spark-gap" title={`${formatDate(day, language)}: ${t('farm.noRecord')}`} />;
+            })}
           </div>
         </div>;
       })}
@@ -278,6 +287,18 @@ function alertParams(alert, measureOf, typeName, t, language) {
   };
 }
 
+// Only what happened: "+3 born, −1 died (head)", never "+0 bought, −0 sold".
+function herdText(herd, unit, t) {
+  const parts = [
+    herd.births && fill(t('farm.herdBorn'), { count: herd.births }),
+    herd.purchases && fill(t('farm.herdBought'), { count: herd.purchases }),
+    herd.deaths && fill(t('farm.herdDied'), { count: herd.deaths }),
+    herd.sales && fill(t('farm.herdSold'), { count: herd.sales }),
+    herd.otherChange && fill(t('farm.herdOther'), { count: herd.otherChange > 0 ? `+${herd.otherChange}` : `−${Math.abs(herd.otherChange)}` })
+  ].filter(Boolean);
+  return parts.length ? `${parts.join(', ')}${unit ? ` (${unit})` : ''}` : t('farm.herdNoChange');
+}
+
 function categoryName(category, t) {
   return FARM_EXPENSE_CATEGORIES.includes(category) ? t(`farm.cat.${category}`) : category;
 }
@@ -302,9 +323,7 @@ function TypeTable({ summary, catalogue, money }) {
       </div>)}</td>
       <td data-label={t('farm.sold')}>{line.products.map((product) => <div key={product.measureId}>{quantityText(product.sold, product.unit)}</div>)}</td>
       <td data-label={t('farm.lost')}>{line.products.map((product) => <div key={product.measureId}>{quantityText(product.lost, product.unit)}</div>)}</td>
-      <td data-label={t('farm.herdChange')}>{line.herd.map((herd) => <div key={herd.measureId}>
-        {fill(t('farm.herdLine'), { births: herd.births, purchases: herd.purchases, deaths: herd.deaths, sales: herd.sales, unit: measureOf(herd.measureId).unit || '' })}
-      </div>)}</td>
+      <td data-label={t('farm.herdChange')}>{line.herd.map((herd) => <div key={herd.measureId}>{herdText(herd, measureOf(herd.measureId).unit, t)}</div>)}</td>
       {money && <>
         <td data-label={t('farm.revenue')}>{formatUsd(line.revenueUsd)}</td>
         <td data-label={t('farm.directCosts')}>{formatUsd(line.directExpensesUsd)}</td>

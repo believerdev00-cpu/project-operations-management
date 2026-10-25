@@ -417,23 +417,16 @@ function PartnerProjects({ fetchJson, download, language, t, onError, onMessage,
   const [report, setReport] = useState(null);
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    let live = true;
-    fetchJson('/api/partner/projects')
-      .then((rows) => { if (live) { setProjects(rows); setProjectId((current) => current || rows[0]?.id || ''); } })
-      .catch((loadError) => onError(loadError.message));
-    return () => { live = false; };
-  }, [fetchJson, onError]);
+  const queryFor = (asked) => (asked.mode === 'monthly'
+    ? `period=monthly&month=${encodeURIComponent(asked.month)}`
+    : `period=custom&start=${encodeURIComponent(asked.range.start)}&end=${encodeURIComponent(asked.range.end)}`);
+  const query = queryFor({ mode, month, range });
 
-  const query = mode === 'monthly'
-    ? `period=monthly&month=${encodeURIComponent(month)}`
-    : `period=custom&start=${encodeURIComponent(range.start)}&end=${encodeURIComponent(range.end)}`;
-
-  const generate = async () => {
-    if (!projectId) return;
+  const generate = async (asked = { id: projectId, mode, month, range }) => {
+    if (!asked.id) return;
     setBusy(true);
     try {
-      setReport(await fetchJson(`/api/partner/projects/${encodeURIComponent(projectId)}/report?${query}`));
+      setReport(await fetchJson(`/api/partner/projects/${encodeURIComponent(asked.id)}/report?${queryFor(asked)}`));
     } catch (loadError) {
       setReport(null);
       onError(loadError.message);
@@ -459,6 +452,28 @@ function PartnerProjects({ fetchJson, download, language, t, onError, onMessage,
     }
   };
 
+  // Choosing a project opens its newest month with work, already shown: the
+  // current month is usually still empty, and an empty report on arrival
+  // reads as "nothing has been done".
+  const choose = (id, list = projects) => {
+    const chosen = list.find((project) => project.id === id);
+    const opening = chosen?.latestMonth || thisMonth;
+    setProjectId(id);
+    setMode('monthly');
+    setMonth(opening);
+    setReport(null);
+    if (id) generate({ id, mode: 'monthly', month: opening, range });
+  };
+
+  useEffect(() => {
+    let live = true;
+    fetchJson('/api/partner/projects')
+      .then((rows) => { if (live) { setProjects(rows); if (rows[0]) choose(rows[0].id, rows); } })
+      .catch((loadError) => onError(loadError.message));
+    return () => { live = false; };
+    // Once, on arrival: `choose` reads state that is set here.
+  }, [fetchJson, onError]);
+
   if (!projects) return <div className="loading-state"><span className="spinner" />{t('app.loading')}</div>;
   if (!projects.length) return <EmptyState t={t}>{t('portal.noSharedProjects')}</EmptyState>;
 
@@ -466,7 +481,7 @@ function PartnerProjects({ fetchJson, download, language, t, onError, onMessage,
     <Panel title={t('portal.myProjects')} subtitle={t('portal.myProjectsNote')}>
       <div className="form-grid">
         <label className="form-field"><span>{t('report.project')}</span>
-          <select value={projectId} onChange={(event) => { setProjectId(event.target.value); setReport(null); }}>
+          <select value={projectId} onChange={(event) => choose(event.target.value)}>
             {projects.map((project) => <option key={project.id} value={project.id}>{project.name} · {operationName(project.operation, language)}</option>)}
           </select>
         </label>
@@ -487,7 +502,7 @@ function PartnerProjects({ fetchJson, download, language, t, onError, onMessage,
           </>}
       </div>
       <div className="report-actions">
-        <button className="primary-btn" type="button" disabled={busy || !projectId} onClick={generate}>{t('portal.showReport')}</button>
+        <button className="primary-btn" type="button" disabled={busy || !projectId} onClick={() => generate()}>{t('portal.showReport')}</button>
       </div>
     </Panel>
     {report && ReportView && <section className="panel report-result">

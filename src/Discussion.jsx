@@ -18,13 +18,21 @@
 import { useCallback, useEffect, useState } from 'react';
 import { fill, useI18n } from './i18n.js';
 import { useBusy } from './ui.jsx';
+import { dateLocale } from './format.js';
 
 function when(value, language) {
   return value ? new Date(value).toLocaleString(language) : '';
 }
 
-function subjectLabel(thread, t) {
-  if (thread.subjectType === 'plan') return fill(t('discussion.aboutMonth'), { month: thread.subjectTitle || '' });
+// '2026-09' as "September 2026" in the reader's language; anything else as it is.
+function monthWords(value, language) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(value || ''));
+  if (!match) return value || '';
+  return new Date(Number(match[1]), Number(match[2]) - 1, 1).toLocaleDateString(dateLocale(language), { month: 'long', year: 'numeric' });
+}
+
+function subjectLabel(thread, t, language) {
+  if (thread.subjectType === 'plan') return fill(t('discussion.aboutMonth'), { month: monthWords(thread.subjectTitle, language) });
   if (thread.subjectType === 'activity') return fill(t('discussion.aboutActivity'), { title: thread.subjectTitle || '' });
   return t('discussion.aboutProject');
 }
@@ -39,7 +47,7 @@ function ThreadCard({ thread, language, t, canReply, busy, onReply, onResolve, s
   };
   return <article className={`message-thread${thread.needsReply ? ' unread' : ''}`}>
     <header>
-      <strong>{showProject && thread.projectName ? `${thread.projectName} · ` : ''}{subjectLabel(thread, t)}</strong>
+      <strong>{showProject && thread.projectName ? `${thread.projectName} · ` : ''}{subjectLabel(thread, t, language)}</strong>
       <span className={`status-badge ${thread.resolvedAt ? 'tone-done' : thread.needsReply ? 'tone-waiting' : 'tone-active'}`}>
         {thread.resolvedAt ? t('discussion.answered') : thread.needsReply ? t('discussion.waiting') : t('discussion.inProgress')}
       </span>
@@ -108,7 +116,7 @@ export function ProjectDiscussion({ fetchJson, projectId, onError, onMessage }) 
       <label className="form-field"><span>{t('discussion.about')}</span>
         <select value={subject} onChange={(event) => setSubject(event.target.value)}>
           <option value="project">{t('discussion.aboutProject')}</option>
-          {data.subjects.plans.map((plan) => <option key={`p${plan.id}`} value={`plan:${plan.id}`}>{fill(t('discussion.aboutMonth'), { month: plan.month })}</option>)}
+          {data.subjects.plans.map((plan) => <option key={`p${plan.id}`} value={`plan:${plan.id}`}>{fill(t('discussion.aboutMonth'), { month: monthWords(plan.month, language) })}</option>)}
           {data.subjects.activities.map((activity) => <option key={`a${activity.id}`} value={`activity:${activity.id}`}>{fill(t('discussion.aboutActivity'), { title: activity.title })}</option>)}
         </select>
       </label>
