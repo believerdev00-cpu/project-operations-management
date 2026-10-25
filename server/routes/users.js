@@ -748,13 +748,10 @@ router.patch('/:id/assignment', adminOnly('Only the Director can change an assig
     );
     const { activities, approvals, plans } = held.rows[0];
     if (activities || approvals || plans) {
-      const parts = [
-        activities && `${activities} open ${activities === 1 ? 'activity' : 'activities'}`,
-        approvals && `${approvals} pending ${approvals === 1 ? 'approval' : 'approvals'}`,
-        plans && `${plans} open monthly ${plans === 1 ? 'plan' : 'plans'}`
-      ].filter(Boolean);
+      // One whole sentence with the three counts as numbers, so it can be shown
+      // in the reader's language; it used to be glued from English pieces.
       return res.status(409).json({
-        message: `Hand this manager's work in their current area to someone else first: ${parts.join(', ')}.`
+        message: `Hand this manager's work in their current area to someone else first. Open activities: ${activities}. Approvals waiting: ${approvals}. Open monthly plans: ${plans}.`
       });
     }
   }

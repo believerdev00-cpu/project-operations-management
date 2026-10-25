@@ -1,3 +1,4 @@
+import { serverText } from './serverText.js';
 import { API_ERROR_CODES, MONEY_ERROR_CODES } from '../shared/apiErrors.js';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -184,7 +185,7 @@ function authRefusal(payload, t) {
     case 'PASSWORD_CHANGE_REQUIRED': return t('auth.choosePasswordFirst');
     case 'CURRENT_PASSWORD_WRONG': return t('auth.currentPasswordWrong');
     case 'PASSWORD_SAME': return t('auth.passwordSame');
-    default: return payload?.message || t('auth.sessionExpired');
+    default: return serverText(payload?.message, t) || t('auth.sessionExpired');
   }
 }
 
@@ -242,7 +243,7 @@ function useApi(token, onExpired) {
     // (choose who takes over) and not only print it.
     const failure = new Error(API_ERROR_CODES.includes(payload.code)
       ? apiErrorText(payload, translator.current)
-      : payload.code ? authRefusal(payload, translator.current) : (payload.message || translator.current('app.requestFailed')));
+      : payload.code ? authRefusal(payload, translator.current) : (serverText(payload.message, translator.current) || translator.current('app.requestFailed')));
     failure.code = payload.code || null;
     failure.payload = payload;
     throw failure;
@@ -1483,7 +1484,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     setError('');
     try {
       const result = await fetchJson(`/api/users/${account.id}/assignment`, { method: 'PATCH', body: JSON.stringify(changes) });
-      notify(`${account.name}: ${result.message || t('msg.saved')}`);
+      notify(`${account.name}: ${serverText(result.message, t) || t('msg.saved')}`);
     } catch (assignmentError) {
       fail(assignmentError.message);
     }
@@ -1606,7 +1607,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     setError('');
     try {
       const result = await fetchJson(`/api/activities/${encodeURIComponent(activity.id)}/expenses/${expense.id}`, { method: 'DELETE' });
-      notify(result.message || t('msg.saved'));
+      notify(serverText(result.message, t) || t('msg.saved'));
       await refreshActivity(activity.id);
     } catch (removeError) { fail(removeError.message); }
   });
@@ -2044,7 +2045,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     setError('');
     try {
       const result = await fetchJson(`/api/partners/${partner.id}/operations`, { method: 'PATCH', body: JSON.stringify({ operations }) });
-      notify(result.message);
+      notify(serverText(result.message, t));
     } catch (changeError) { fail(changeError.message); }
     await loadData();
   });
@@ -2085,7 +2086,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     setError('');
     try {
       const result = await fetchJson(`/api/partners/${partner.id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
-      notify(result.message);
+      notify(serverText(result.message, t));
       await loadData();
     } catch (statusError) { fail(statusError.message); }
   });
@@ -2100,7 +2101,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     setError('');
     try {
       const result = await fetchJson(`/api/partners/${partner.id}/password`, { method: 'PATCH', body: JSON.stringify({ password: next }) });
-      notify(result.message);
+      notify(serverText(result.message, t));
     } catch (resetError) { fail(resetError.message); }
   });
 
@@ -2115,7 +2116,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     setError('');
     try {
       const result = await fetchJson(`/api/partners/${partner.id}`, { method: 'DELETE' });
-      notify(result.message);
+      notify(serverText(result.message, t));
       await loadData();
     } catch (removeError) { fail(removeError.message); }
   });

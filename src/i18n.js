@@ -13,10 +13,10 @@
 
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import {
-  LANGUAGES, LANGUAGE_CODES, fill, knownLanguage, missingTranslations, translate, translationKeys
+  LANGUAGES, LANGUAGE_CODES, fill, knownLanguage, missingTranslations, translate, translationKeys, englishEntries
 } from '../shared/strings.js';
 
-export { LANGUAGES, LANGUAGE_CODES, fill, knownLanguage, missingTranslations, translate, translationKeys };
+export { LANGUAGES, LANGUAGE_CODES, englishEntries, fill, knownLanguage, missingTranslations, translate, translationKeys };
 
 const STORAGE_KEY = 'ops-language';
 

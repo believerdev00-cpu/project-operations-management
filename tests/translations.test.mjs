@@ -7,6 +7,7 @@
 //   4. No user-visible English is left hard-coded in the JSX.
 
 import { API_ERROR_CODES } from '../shared/apiErrors.js';
+import { serverSentences } from './serverSentences.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -159,8 +160,12 @@ for (const [prefix, values] of Object.entries(FAMILIES)) {
 }
 
 console.log('\n=== 3. every defined key is used ===');
+const liveServerSentences = new Set(serverSentences(root).map((item) => item.en));
 const usedSomewhere = (key) => {
   if (allSource.includes(`'${key}'`)) return true;
+  // The server's sentences are found by their English (src/serverText.js);
+  // section 7 checks each of them is a sentence the server really sends.
+  if (key.startsWith('apiMessage.') || key.startsWith('apiPattern.')) return liveServerSentences.has(i18n.translate('en', key));
   // Reached through a template: t(`status.${...}`) covers every status.* key.
   const prefix = key.slice(0, key.lastIndexOf('.') + 1);
   if (templates.some((template) => `${template}.` === prefix)) return true;
@@ -208,6 +213,23 @@ for (const code of i18n.LANGUAGE_CODES) {
     .map((key) => i18n.translate(code, key));
   check(`  ${code}: ${sample.join(' | ')}`, sample.every((text) => text && !text.includes('.')));
 }
+
+console.log('\n=== 7. every sentence the server sends has its translation ===');
+// A refusal or confirmation the API sends is shown in the reader's language by
+// finding its English among apiMessage.* (word for word) and apiPattern.* (with
+// {0}, {1}... where the server puts values). A new or reworded sentence on the
+// server with no entry here would reach a Kinyarwanda reader in English.
+const sentences = serverSentences(root);
+const fixedEnglish = new Set(i18n.englishEntries('apiMessage.').map(([, en]) => en));
+const patternEnglish = new Set(i18n.englishEntries('apiPattern.').map(([, en]) => en));
+const untranslated = sentences.filter((item) => !(item.dynamic ? patternEnglish : fixedEnglish).has(item.en));
+check(`all ${sentences.length} server sentences are in the dictionary`, untranslated.length === 0,
+  untranslated.slice(0, 8).map((item) => `${item.file}: ${item.en}`).join(' | '));
+// Every {0}, {1}... a pattern carries is in each language, or a value would be lost.
+const holes = (text) => [...new Set(String(text).match(/\{\d+\}/g) || [])].sort().join(',');
+const lostValues = i18n.englishEntries('apiPattern.').filter(([key, en]) =>
+  i18n.LANGUAGE_CODES.some((code) => holes(i18n.translate(code, key)) !== holes(en))).map(([key]) => key);
+check('  every value a server sentence carries is kept in all four languages', lostValues.length === 0, lostValues.join(', '));
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

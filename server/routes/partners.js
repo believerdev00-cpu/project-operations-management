@@ -400,12 +400,13 @@ router.patch('/:id/status', asyncRoute(async (req, res) => {
   if (!result.rowCount) return res.status(404).json({ message: 'External partner not found.' });
 
   const partner = await loadPartner(req.params.id);
+  // Whole sentences, one per outcome, so each reads in the Director's language.
   const wording = {
-    active: 'Access restored.',
-    suspended: 'Access suspended. They cannot sign in or read anything until it is restored.',
-    revoked: 'Access revoked.'
+    active: `${partner.name}: Access restored.`,
+    suspended: `${partner.name}: Access suspended. They cannot sign in or read anything until it is restored.`,
+    revoked: `${partner.name}: Access revoked.`
   };
-  res.json({ ...partner, message: `${partner.name}: ${wording[status]}` });
+  res.json({ ...partner, message: wording[status] });
 }));
 
 router.patch('/:id/password', asyncRoute(async (req, res) => {

@@ -93,7 +93,11 @@ export function text(value, limit, { required = false, label = 'This field' } = 
 export function amount(value, { label = 'Amount', minimum = 0 } = {}) {
   const number = value === '' || value === null || value === undefined ? 0 : Number(value);
   if (!validNumber(number, { minimum })) {
-    throw new BoutiqueError(400, `${label} must be a number${minimum > 0 ? ' above zero' : ', zero or more'}. Please check it and try again.`);
+    // Two whole sentences rather than one with a fragment glued in, so each
+    // can be shown in the reader's language (shared/serverMessages).
+    throw new BoutiqueError(400, minimum > 0
+      ? `${label} must be a number above zero. Please check it and try again.`
+      : `${label} must be a number, zero or more. Please check it and try again.`);
   }
   return fromMinor(toMinor(number));
 }
@@ -101,7 +105,9 @@ export function amount(value, { label = 'Amount', minimum = 0 } = {}) {
 export function wholeNumber(value, { label = 'Quantity', minimum = 1 } = {}) {
   const number = Number(value);
   if (!Number.isInteger(number) || number < minimum || number > 1e9) {
-    throw new BoutiqueError(400, `${label} must be a whole number${minimum > 0 ? ` of at least ${minimum}` : ', zero or more'}. Please check the number and try again.`);
+    throw new BoutiqueError(400, minimum > 0
+      ? `${label} must be a whole number of at least ${minimum}. Please check the number and try again.`
+      : `${label} must be a whole number, zero or more. Please check the number and try again.`);
   }
   return number;
 }
