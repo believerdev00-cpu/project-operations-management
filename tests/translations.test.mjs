@@ -41,7 +41,7 @@ const sources = Object.fromEntries(FILES.map((file) => [path.basename(file), fs.
 // checks -- a key only the exports use would otherwise be reported as unused,
 // and a typo in one would be caught by nobody -- but NOT for the hard-coded
 // English check below, which is about JSX.
-const SERVER_FILES = ['routes/reports.js'].map((name) => path.join(root, 'server', name));
+const SERVER_FILES = ['routes/reports.js', 'lib/invitations.js'].map((name) => path.join(root, 'server', name));
 const serverSources = Object.fromEntries(
   SERVER_FILES.map((file) => [path.basename(file), fs.readFileSync(file, 'utf8')])
 );

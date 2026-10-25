@@ -6,7 +6,7 @@ import jwt from 'jsonwebtoken';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { initDatabase, pool } from './db/database.js';
+import { initDatabase, pool, safeRollback } from './db/database.js';
 import { sectors } from './data/seedData.js';
 import { authMiddleware, jwtSecret, FILE_PATH, FILE_TOKEN_PURPOSE } from './lib/auth.js';
 import { hashPassword, passwordMatches, passwordProblem } from './lib/passwords.js';
@@ -16,6 +16,7 @@ import { pendingForMeSql } from './lib/approvals.js';
 import { getCurrentRate } from './lib/rates.js';
 import { FINAL_CHECK_SQL, MANAGER_CHECK_SQL, myChecksSql, openWorkSql } from './lib/monthly.js';
 import { deleteFile } from './lib/storage.js';
+import { invitationHash, looksLikeToken } from './lib/invitations.js';
 import movementRouter, { mapMovement } from './routes/movements.js';
 import rateRouter from './routes/rates.js';
 import userRouter from './routes/users.js';
@@ -325,6 +326,56 @@ app.post('/api/auth/password', authMiddleware, passwordChangeLimiter, asyncRoute
     user: publicAccount(updated),
     message: 'Your password has been changed.'
   });
+}));
+
+// An invited partner opening the link in their invitation email: who it is
+// for, then the password they choose, which signs them straight in. Outside
+// authMiddleware because they have no session yet; the token is the only key,
+// is single-use and expires (server/lib/invitations.js), and both routes are
+// limited per address like the sign-in, so links cannot be guessed at speed.
+// Every refusal is the same 410 -- unknown, used, expired or revoked read
+// alike, so the answer says nothing about which accounts exist.
+const INVITATION_GONE = { code: 'INVITATION_INVALID', message: 'This invitation link has expired or was already used. Ask the Director for a new one.' };
+const LIVE_INVITATION_SQL = `
+  SELECT ai.id, u.id AS user_id, u.name, u.username
+    FROM account_invitations ai JOIN users u ON u.id = ai.user_id
+   WHERE ai.token_hash = $1 AND ai.used_at IS NULL AND ai.expires_at > NOW() AND u.status = 'active'`;
+
+app.get('/api/auth/invitation/:token', addressLimiter, asyncRoute(async (req, res) => {
+  if (!looksLikeToken(req.params.token)) return res.status(410).json(INVITATION_GONE);
+  const found = await pool.query(LIVE_INVITATION_SQL, [invitationHash(req.params.token)]);
+  if (!found.rowCount) return res.status(410).json(INVITATION_GONE);
+  res.json({ name: found.rows[0].name, username: found.rows[0].username });
+}));
+
+app.post('/api/auth/invitation/:token', addressLimiter, asyncRoute(async (req, res) => {
+  if (!looksLikeToken(req.params.token)) return res.status(410).json(INVITATION_GONE);
+  const { password } = req.body || {};
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Locked, so two presses of the button (or two tabs) cannot both use it.
+    const found = await client.query(`${LIVE_INVITATION_SQL} FOR UPDATE OF ai`, [invitationHash(req.params.token)]);
+    if (!found.rowCount) { await client.query('ROLLBACK'); return res.status(410).json(INVITATION_GONE); }
+    const invite = found.rows[0];
+    const problem = passwordProblem(password, { username: invite.username });
+    if (problem) { await client.query('ROLLBACK'); return res.status(400).json({ code: 'PASSWORD_WEAK', message: problem }); }
+    const changedAt = new Date();
+    await client.query(
+      'UPDATE users SET password_hash = $2, password_changed_at = $3, must_change_password = FALSE WHERE id = $1',
+      [invite.user_id, await hashPassword(password), changedAt]
+    );
+    await client.query('UPDATE account_invitations SET used_at = NOW() WHERE id = $1', [invite.id]);
+    const account = await client.query(`SELECT ${ACCOUNT_COLUMNS} FROM users WHERE id = $1`, [invite.user_id]);
+    await client.query('COMMIT');
+    const user = account.rows[0];
+    res.json({ token: sessionToken(user, Math.ceil(changedAt.getTime() / 1000)), user: publicAccount(user) });
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
 }));
 
 // A short-lived link to one evidence file, for opening it in a new tab. See

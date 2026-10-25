@@ -11,7 +11,9 @@ import { fill } from './i18n.js';
 // not a choice: an external partner never gets approval authority, so the field
 // is shown as a fixed value rather than a dropdown that could be set wrong.
 
-const emptyForm = { name: '', email: '', username: '', password: '', operations: [BUSINESS_OPERATIONS[0].id] };
+// No password: the partner chooses their own from the invitation emailed to
+// the address typed here.
+const emptyForm = { name: '', email: '', username: '', operations: [BUSINESS_OPERATIONS[0].id] };
 
 // The operation checkboxes live in ui.jsx (OperationChecks): a manager's
 // operations are ticked with the same control. The last one cannot be unticked
@@ -20,7 +22,7 @@ const emptyForm = { name: '', email: '', username: '', password: '', operations:
 const STATUS_TONE = { active: 'tone-done', suspended: 'tone-waiting', revoked: 'tone-stopped' };
 
 export default function ExternalPartners({
-  register, language, t, busy = false, onInvite, onChangeOperation, onChangeStatus, onResetPassword, onRemove,
+  register, language, t, busy = false, onInvite, onReinvite, onChangeOperation, onChangeStatus, onResetPassword, onRemove,
   inbox = { unread: 0, threads: [] }, onReply, onMarkRead,
   projects = [], contacts = [], onSaveSharing
 }) {
@@ -77,7 +79,8 @@ export default function ExternalPartners({
         </tr></thead>
         <tbody>{register.partners.map((partner) => <Fragment key={partner.id}><tr>
           <td className="card-title-cell"><strong>{partner.name}</strong><small>{partner.organization || partner.username}</small></td>
-          <td data-label={t('partners.email')}>{partner.email || <span className="muted-cell">—</span>}</td>
+          <td data-label={t('partners.email')}>{partner.email || <span className="muted-cell">—</span>}
+            {partner.invitation && <small>{t(partner.invitation.accepted ? 'partners.inviteAccepted' : partner.invitation.expired ? 'partners.inviteExpired' : 'partners.inviteWaiting')}</small>}</td>
           {/* Changing this one cell changes everything the partner can read, on
               their very next request -- which is why the change is confirmed. */}
           <td data-label={t('app.businessOperation')}>
@@ -113,6 +116,7 @@ export default function ExternalPartners({
             {onSaveSharing && <button className="text-btn" type="button" disabled={busy}
               aria-expanded={sharing === partner.id}
               onClick={() => setSharing(sharing === partner.id ? null : partner.id)}>{t('partners.editSharing')}</button>}
+            {partner.status !== 'revoked' && !partner.invitation?.accepted && onReinvite && <button className="secondary-btn compact" type="button" disabled={busy} onClick={() => onReinvite(partner)}>{t('partners.inviteAgain')}</button>}
             <button className="text-btn" type="button" disabled={busy} onClick={() => onResetPassword(partner)}>{t('partners.resetPassword')}</button>
             <button className="danger-btn" type="button" disabled={busy} onClick={() => onRemove(partner)}>{t('partners.remove')}</button>
           </td>
@@ -183,9 +187,6 @@ export default function ExternalPartners({
         <label className="form-field"><span>{t('partners.username')}</span>
           <input required maxLength="100" autoCapitalize="none" autoComplete="off" spellCheck="false" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} />
         </label>
-        <label className="form-field"><span>{t('partners.password')}</span>
-          <input required type="password" autoComplete="new-password" minLength={6} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} />
-        </label>
         {/* One or more of the four, each ticked deliberately. A partner sees
             exactly the operations ticked here and nothing else. */}
         <div className="form-field form-field-wide"><span>{t('partners.operationsGranted')}</span>
@@ -198,6 +199,7 @@ export default function ExternalPartners({
           <input readOnly tabIndex={-1} value={t('partners.viewOnly')} />
         </label>
       </div>
+      <p className="field-hint">{t('partners.inviteHint')}</p>
       <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('partners.invite')}</button></div>
     </form>
   </>;

@@ -17,6 +17,8 @@ import { hashPassword, passwordProblem } from '../lib/passwords.js';
 import { TRIPS_OPERATION, operationById } from '../../shared/businessOperations.js';
 import { partnerProjectSql, recordOrganization } from '../lib/organization.js';
 import { notify } from '../lib/notifications.js';
+import { sendInvitation } from '../lib/invitations.js';
+import crypto from 'node:crypto';
 
 const router = express.Router();
 
@@ -64,6 +66,15 @@ function mapPartner(row) {
     status: row.status || 'active',
     createdAt: row.created_at,
     passwordChangedAt: row.password_changed_at ?? null,
+    // The newest invitation: when it was made, whether it was emailed, and
+    // whether the partner has used it. A partner who never accepted one shows
+    // "Invited" until they do.
+    invitation: row.invited_at ? {
+      sentAt: row.invited_at,
+      emailed: Boolean(row.invite_emailed_at),
+      accepted: Boolean(row.invite_used_at),
+      expired: !row.invite_used_at && new Date(row.invite_expires_at) < new Date()
+    } : null,
     // What the partner can actually see right now, which is the figure that
     // tells the Director whether the access is doing anything.
     visibleActivities: row.visible_activities ?? 0,
@@ -85,6 +96,7 @@ const PARTNER_SELECT = `
   SELECT u.id, u.username, u.name, u.email, u.sector, u.status, u.access_level,
          u.created_at, u.password_changed_at, u.organization, u.partner_contact_id,
          (SELECT c.name FROM users c WHERE c.id = u.partner_contact_id) AS contact_name,
+         i.created_at AS invited_at, i.emailed_at AS invite_emailed_at, i.used_at AS invite_used_at, i.expires_at AS invite_expires_at,
          ${PARTNER_GRANTS} AS operations,
          COALESCE((SELECT json_agg(json_build_object('id', p.id, 'name', p.name, 'sector', p.sector) ORDER BY p.name)
                      FROM partner_projects pp JOIN projects p ON p.id = pp.project_id WHERE pp.partner_id = u.id), '[]'::json) AS projects,
@@ -100,6 +112,7 @@ const PARTNER_SELECT = `
              AND m.approval_status = 'approved' AND m.externally_visible = TRUE
              AND m.status NOT IN ('Draft', 'Cancelled', 'Rejected'))::int AS visible_movements
   FROM users u
+  LEFT JOIN LATERAL (SELECT * FROM account_invitations ai WHERE ai.user_id = u.id ORDER BY ai.created_at DESC, ai.id DESC LIMIT 1) i ON TRUE
   WHERE u.role = 'partner'
 `;
 
@@ -177,9 +190,13 @@ router.get('/', asyncRoute(async (req, res) => {
 }));
 
 // Invite a partner: an account, the business operations they may follow,
-// view-only.
+// view-only, and an invitation email to the address the Director typed. The
+// partner chooses their own password from the link in it, so the Director no
+// longer types one; a password sent anyway is still taken, as a temporary one,
+// for a caller that has not moved on.
 router.post('/', asyncRoute(async (req, res) => {
-  const { name, email, username, password } = req.body || {};
+  const { name, email, username } = req.body || {};
+  const password = requiredText(req.body?.password) ? req.body.password : null;
   const operations = requestedOperations(req.body);
 
   if (!requiredText(name)) return res.status(400).json({ message: 'The partner\'s name is required.' });
@@ -187,8 +204,10 @@ router.post('/', asyncRoute(async (req, res) => {
   if (!requiredText(email) || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) {
     return res.status(400).json({ message: 'A valid email address is required.' });
   }
-  const weak = passwordProblem(password, { username });
-  if (weak) return res.status(400).json({ message: weak });
+  if (password) {
+    const weak = passwordProblem(password, { username });
+    if (weak) return res.status(400).json({ message: weak });
+  }
   if (!operations) return res.status(400).json({ message: OPERATIONS_MESSAGE });
   // View-only is the only level an external partner is given. Anything else in
   // the request is refused outright rather than quietly downgraded, so a
@@ -198,7 +217,9 @@ router.post('/', asyncRoute(async (req, res) => {
     return res.status(400).json({ message: 'An external partner can only be given View Only access.' });
   }
 
-  const passwordHash = await hashPassword(password);
+  // With no password, the account holds the hash of 48 random bytes nobody
+  // ever sees: it cannot be signed into until the invitation is accepted.
+  const passwordHash = await hashPassword(password || crypto.randomBytes(48).toString('base64url').slice(0, 64));
   const client = await pool.connect();
   let partnerId;
   try {
@@ -221,8 +242,25 @@ router.post('/', asyncRoute(async (req, res) => {
     client.release();
   }
   // Read back once the connection is in the pool again: on Vercel the pool
-  // holds exactly one.
-  res.status(201).json(await loadPartner(partnerId));
+  // holds exactly one. The email goes after the commit, so a slow or refusing
+  // mail service never holds a transaction open or undoes the account.
+  const partner = await loadPartner(partnerId);
+  const invitation = await sendInvitation(pool, req, partner, req.body?.language);
+  res.status(201).json({ ...(await loadPartner(partnerId)), invitationResult: invitation });
+}));
+
+// A new invitation for a partner who lost the email, let it expire, or never
+// got it: the old link stops working and a fresh one is sent. Refused for a
+// revoked partner, whose access the Director has closed.
+router.post('/:id/invite', asyncRoute(async (req, res) => {
+  const partner = await loadPartner(req.params.id);
+  if (!partner) return res.status(404).json({ message: 'External partner not found.' });
+  if (partner.status === 'revoked') {
+    return res.status(409).json({ code: 'PARTNER_REVOKED', message: 'This partner’s access was revoked. Restore it before inviting them again.' });
+  }
+  if (!partner.email) return res.status(400).json({ message: 'This partner has no email address.' });
+  const invitation = await sendInvitation(pool, req, partner, req.body?.language);
+  res.json({ ...(await loadPartner(partner.id)), invitationResult: invitation });
 }));
 
 // Change which business operations a partner may see: the whole set at once.

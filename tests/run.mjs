@@ -45,7 +45,8 @@ const SUITES = [
   ['farming', 'farming.test.mjs', { needsApi: true }],
   ['partner projects', 'partner-projects.test.mjs', { needsApi: true }],
   ['project discussion', 'project-discussion.test.mjs', { needsApi: true }],
-  ['notifications', 'notifications.test.mjs', { needsApi: true }]
+  ['notifications', 'notifications.test.mjs', { needsApi: true }],
+  ['partner invitation', 'partner-invitation.test.mjs', { needsApi: true }]
 ];
 
 const only = process.argv[2];

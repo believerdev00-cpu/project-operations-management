@@ -370,6 +370,20 @@ function App() {
   }, []);
   const clearWelcome = useCallback(() => setWelcome(''), []);
 
+  // An invitation link (#/invite/<token>) opens its own screen, signed in or
+  // not: it is somebody being let in for the first time.
+  const [hash, setHash] = useState(() => window.location.hash);
+  useEffect(() => {
+    const follow = () => setHash(window.location.hash);
+    window.addEventListener('hashchange', follow);
+    return () => window.removeEventListener('hashchange', follow);
+  }, []);
+  const inviteToken = hash.startsWith('#/invite/') ? hash.slice('#/invite/'.length) : '';
+  const leaveInvitation = useCallback(() => {
+    window.history.replaceState(null, '', '#/');
+    setHash('#/');
+  }, []);
+
   // The stored account is a snapshot. It is confirmed against the API on every
   // start, and replaced with what the API says -- a manager moved to another
   // area gets the new area now, not at the next sign-in. Only a real refusal
@@ -403,7 +417,10 @@ function App() {
   }, [token, endSession]);
 
   let screen;
-  if (!token || !user) {
+  if (inviteToken) {
+    screen = <AcceptInvitationScreen inviteToken={inviteToken} onCancel={leaveInvitation}
+      onSignedIn={(nextToken, nextUser) => { leaveInvitation(); startSession(nextToken, nextUser, t('invite.welcome')); }} />;
+  } else if (!token || !user) {
     screen = <LoginScreen notice={notice} onSignedIn={startSession} />;
   } else if (user.mustChangePassword) {
     // The API refuses everything else until this is done, so nothing else is
@@ -458,6 +475,72 @@ function LoginScreen({ notice, onSignedIn }) {
     <label>{t('auth.password')}<input required type="password" autoComplete="current-password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label>
     <button className="primary-btn full-width" type="submit" disabled={busy}>{busy ? t('auth.signingIn') : t('auth.signIn')}</button>
     {error && <div className="error-state" role="alert">{error}</div>}
+  </form></div>;
+}
+
+// The page an invitation email links to: who it is for, their username, and
+// two boxes for the password they choose. Saving it signs them straight in.
+function AcceptInvitationScreen({ inviteToken, onSignedIn, onCancel }) {
+  const { language, setLanguage, t } = useI18n();
+  const [invite, setInvite] = useState(null);
+  const [gone, setGone] = useState('');
+  const [form, setForm] = useState({ next: '', repeat: '' });
+  const [error, setError] = useState('');
+  const [busy, run] = useBusy();
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/auth/invitation/${encodeURIComponent(inviteToken)}`)
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (cancelled) return;
+        if (response.ok) setInvite(payload);
+        else setGone(response.status === 410 ? t('invite.gone') : (payload.message || t('app.requestFailed')));
+      })
+      .catch(() => { if (!cancelled) setGone(t('app.offline')); });
+    return () => { cancelled = true; };
+    // Read once per link; a language change must not ask again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inviteToken]);
+
+  const submit = (event) => {
+    event.preventDefault();
+    if (form.next.trim().length < MINIMUM_PASSWORD_LENGTH) { setError(t('dialog.passwordTooShort')); return; }
+    if (form.next !== form.repeat) { setError(t('dialog.passwordMismatch')); return; }
+    run(async () => {
+      setError('');
+      try {
+        const response = await fetch(`/api/auth/invitation/${encodeURIComponent(inviteToken)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: form.next })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (response.status === 410) { setGone(t('invite.gone')); return; }
+        if (!response.ok) throw new Error(payload.message || t('app.requestFailed'));
+        onSignedIn(payload.token, payload.user);
+      } catch (acceptError) {
+        setError(acceptError.name === 'TypeError' ? t('app.offline') : acceptError.message);
+      }
+    });
+  };
+
+  return <div className="login-shell"><form className="login-card" onSubmit={submit}>
+    <div className="login-brand"><img className="login-logo" src="/logo-mark.png" alt="" /><strong>{t('app.name')}</strong></div>
+    <LanguagePicker buttons language={language} setLanguage={setLanguage} label={t('app.language')} />
+    {gone ? <>
+      <h1>{t('invite.goneTitle')}</h1>
+      <div className="error-state" role="alert">{gone}</div>
+      <button className="primary-btn full-width" type="button" onClick={onCancel}>{t('auth.signIn')}</button>
+    </> : !invite ? <div className="loading-state"><span className="spinner" />{t('app.loading')}</div> : <>
+      <h1>{fill(t('invite.title'), { name: invite.name })}</h1>
+      <p>{fill(t('invite.blurb'), { username: invite.username })}</p>
+      <label>{t('dialog.newPassword')}<input required type="password" autoComplete="new-password" minLength={MINIMUM_PASSWORD_LENGTH} value={form.next} onChange={(event) => setForm({ ...form, next: event.target.value })} /></label>
+      <label>{t('dialog.repeatPassword')}<input required type="password" autoComplete="new-password" value={form.repeat} onChange={(event) => setForm({ ...form, repeat: event.target.value })} /></label>
+      <p className="field-hint">{t('dialog.passwordTooShort')}</p>
+      <button className="primary-btn full-width" type="submit" disabled={busy}>{busy ? t('report.working') : t('invite.start')}</button>
+      {error && <div className="error-state" role="alert">{error}</div>}
+    </>}
   </form></div>;
 }
 
@@ -1904,17 +1987,37 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     } catch (readError) { fail(readError.message); }
   });
 
+  // Where the invitation went: emailed, or -- when email is not set up or the
+  // mail service refused it -- the link itself, for the Director to send on.
+  const showInvitation = (partner, sent) => dialog.notice({
+    title: t(sent.emailed ? 'msg.inviteEmailedTitle' : 'msg.inviteLinkTitle'),
+    message: sent.emailed
+      ? fill(t('msg.inviteEmailed'), { name: partner.name, email: sent.email })
+      : fill(t('msg.inviteLink'), { name: partner.name, email: sent.email, link: sent.link }),
+    confirmLabel: t('dialog.ok')
+  });
+
   const invitePartner = (form) => runAction(async () => {
     setError('');
     try {
-      const result = await fetchJson('/api/partners', { method: 'POST', body: JSON.stringify(form) });
+      const result = await fetchJson('/api/partners', { method: 'POST', body: JSON.stringify({ ...form, language }) });
       notify(fill(t('msg.partnerInvited'), { name: result.name, operation: (result.operations || [result.operation]).map((id) => operationName(id, language)).join(', ') }));
       await loadData();
+      if (result.invitationResult) await showInvitation(result, result.invitationResult);
       return true;
     } catch (inviteError) {
       fail(inviteError.message);
       return false;
     }
+  });
+
+  const reinvitePartner = act(async (partner) => {
+    setError('');
+    try {
+      const result = await fetchJson(`/api/partners/${partner.id}/invite`, { method: 'POST', body: JSON.stringify({ language }) });
+      await loadData();
+      await showInvitation(result, result.invitationResult);
+    } catch (inviteError) { fail(inviteError.message); }
   });
 
   // Moving the operation moves everything they can read, on their next request,
@@ -2567,6 +2670,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         t={t}
         busy={actionBusy}
         onInvite={invitePartner}
+        onReinvite={reinvitePartner}
         onChangeOperation={changePartnerOperation}
         projects={projects}
         contacts={register.users.filter((account) => account.status === 'active'
