@@ -1529,7 +1529,7 @@ const STRINGS = {
   'org.memberCount': { en: 'People: {count}', rw: 'Abantu: {count}', fr: 'Personnes : {count}', sw: 'Watu: {count}' },
   'org.teamCount': { en: 'Active teams: {count}', rw: 'Amatsinda akora: {count}', fr: 'Équipes actives : {count}', sw: 'Timu zinazofanya kazi: {count}' },
   'org.sharedProjects': { en: 'Shared projects', rw: 'Imishinga basangijwe', fr: 'Projets partagés', sw: 'Miradi iliyoshirikishwa' },
-  'org.wholeOperations': { en: 'Whole projects shared', rw: 'Basangijwe imishinga yose', fr: 'Projets entiers partagés', sw: 'Miradi mizima imeshirikishwa' },
+  'org.wholeOperations': { en: 'No project opened in full yet', rw: 'Nta mushinga urafungurwa wose', fr: 'Aucun projet encore ouvert en entier', sw: 'Hakuna mradi uliofunguliwa kikamilifu bado' },
   'org.contact': { en: 'Contact: {name}', rw: 'Ubahuza: {name}', fr: 'Contact : {name}', sw: 'Mhusika: {name}' },
   'org.you': { en: 'you', rw: 'wowe', fr: 'vous', sw: 'wewe' },
   'org.noProjects': { en: 'No project assigned', rw: 'Nta mushinga yahawe', fr: 'Aucun projet attribué', sw: 'Hakuna mradi aliokabidhiwa' },

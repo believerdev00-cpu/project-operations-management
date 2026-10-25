@@ -113,6 +113,10 @@ try {
   const wool = sheepRow?.measures.find((measure) => measure.kind === 'product');
   const flock = sheepRow?.measures.find((measure) => measure.kind === 'herd');
   check('  and it appears in the catalogue with both measures', Boolean(wool && flock), sheepRow);
+  const blank = (await get(manager.token, '/api/farming/overview')).body;
+  check('nothing recorded yet reads as unknown, not 0: no stock, no head count',
+    blank.stock.find((line) => line.measureId === wool.id)?.onHand === null && blank.herd.find((line) => line.measureId === flock.id)?.head === null,
+    { stock: blank.stock.find((line) => line.measureId === wool.id), herd: blank.herd.find((line) => line.measureId === flock.id) });
   const twin = await post(manager.token, '/api/farming/animal-types', { name: '  zztest   SHEEP ' });
   check('the same name again is refused, whatever its spacing or capitals', twin.status === 400 && twin.body.code === 'NAME_EXISTS', twin.body);
   const staffAdds = await post(staff.token, '/api/farming/animal-types', { name: 'ZZTEST Rabbits' });
@@ -175,6 +179,11 @@ try {
   const tooMany = await post(staff.token, '/api/farming/sales', { measureId: flock.id, date: TODAY, quantity: 3, amount: 450, currency: 'USD' });
   check('selling more animals than are there is refused', tooMany.status === 409 && tooMany.body.code === 'STOCK_BELOW_ZERO', tooMany.body);
   const unlink = await post(manager.token, `/api/farming/herd/${linked.rows[0].id}/void`, { reason: 'ZZTEST void the herd half only' });
+  const counted = (await get(manager.token, '/api/farming/overview')).body;
+  // 21 kg (20 corrected to 21) + 5 kg produced - 22 kg sold; 5 born - 1 died - 2 sold.
+  check('once recorded, the figures are real: 4 kg of wool left, 2 head',
+    counted.stock.find((line) => line.measureId === wool.id)?.onHand === 4 && counted.herd.find((line) => line.measureId === flock.id)?.head === 2,
+    { stock: counted.stock.find((line) => line.measureId === wool.id), herd: counted.herd.find((line) => line.measureId === flock.id) });
   check('the herd half of a sale cannot be voided on its own', unlink.status === 409 && unlink.body.code === 'NOT_EDITABLE', unlink.body);
   const voidSale = await post(manager.token, `/api/farming/sales/${animalSale.body.id}/void`, { reason: 'ZZTEST buyer did not take them' });
   const relinked = await pool.query('SELECT status FROM farm_herd_events WHERE sale_id = $1', [animalSale.body.id]);

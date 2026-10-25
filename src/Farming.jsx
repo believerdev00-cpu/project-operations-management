@@ -203,7 +203,8 @@ function TodayTab({ overview, can, catalogue, range, setRange, go }) {
       <div className="metric-grid">
         {overview.stock.filter((line) => measureOf(line.measureId).active).map((line) => {
           const measure = measureOf(line.measureId);
-          return <Metric key={`s${line.measureId}`} label={`${typeName(measure.animalTypeId)} · ${measure.name}`} value={quantityText(line.onHand, measure.unit)} />;
+          return <Metric key={`s${line.measureId}`} label={`${typeName(measure.animalTypeId)} · ${measure.name}`}
+            value={line.onHand === null ? t('farm.notRecordedYet') : quantityText(line.onHand, measure.unit)} tone={line.onHand === null ? 'quiet' : null} />;
         })}
         {overview.herd.filter((line) => measureOf(line.measureId).active).map((line) => {
           const measure = measureOf(line.measureId);

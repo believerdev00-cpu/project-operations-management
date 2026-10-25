@@ -183,9 +183,13 @@ router.get('/overview', asyncRoute(async (req, res) => {
   const stock = (await pool.query(
     `SELECT m.id AS measure_id,
             COALESCE((SELECT SUM(produced - lost) FROM farm_production p WHERE p.measure_id = m.id AND p.status = 'recorded'), 0)
-          - COALESCE((SELECT SUM(quantity) FROM farm_sales s WHERE s.measure_id = m.id AND s.status = 'recorded'), 0) AS on_hand
+          - COALESCE((SELECT SUM(quantity) FROM farm_sales s WHERE s.measure_id = m.id AND s.status = 'recorded'), 0) AS on_hand,
+            (SELECT COUNT(*) FROM farm_production p WHERE p.measure_id = m.id AND p.status = 'recorded')
+          + (SELECT COUNT(*) FROM farm_sales s WHERE s.measure_id = m.id AND s.status = 'recorded') AS records
        FROM farm_measures m WHERE m.kind = 'product'`
-  )).rows.map((row) => ({ measureId: row.measure_id, onHand: Number(row.on_hand) }));
+  // Like a herd nobody counted: a product with nothing recorded is unknown,
+  // null, so the screen says "Not recorded yet" rather than "0 litres".
+  )).rows.map((row) => ({ measureId: row.measure_id, onHand: Number(row.records) ? Number(row.on_hand) : null }));
   const herd = (await pool.query(
     `SELECT m.id AS measure_id, COALESCE(SUM(e.delta), 0)::int AS head, COUNT(e.id)::int AS events
        FROM farm_measures m LEFT JOIN farm_herd_events e ON e.measure_id = m.id AND e.status = 'recorded'
