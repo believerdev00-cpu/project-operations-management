@@ -103,7 +103,7 @@ const PENDING_STATUSES = [
 // A deadline only matters while the work can still be done.
 const CLOSED_STATUSES = [...COMPLETED_STATUSES, ...CANCELLED_STATUSES];
 
-class ReportError extends Error {
+export class ReportError extends Error {
   constructor(status, message) {
     super(message);
     this.status = status;
@@ -920,6 +920,14 @@ router.get('/activities/export', asyncRoute(async (req, res) => {
   const period = resolvePeriod(req.query);
   const choice = await resolveFilters(req.user, req.query);
   const report = await buildReport(req.user, period, choice);
+  return sendReportFile(req, res, report, { format, period, choice });
+}));
+
+// Writes a built report as the file asked for. One function, used by the
+// Director's export above and by a partner's export of a project shared with
+// them (server/routes/partner.js), so the two files can never differ in
+// anything but the rows the caller was allowed to read.
+export async function sendReportFile(req, res, report, { format, period, choice }) {
   // WHICH LANGUAGE THE FILE IS WRITTEN IN.
   //
   // The reader's own, sent by the browser from the language they picked (the
@@ -951,7 +959,7 @@ router.get('/activities/export', asyncRoute(async (req, res) => {
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${stem}.pdf"`);
   return writePdf(report, res, language);
-}));
+}
 
 router.use((error, req, res, next) => {
   if (error instanceof ReportError) return res.status(error.status).json({ message: error.message });

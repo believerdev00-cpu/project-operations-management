@@ -764,12 +764,12 @@ function Banners({ message, error, onDismissMessage, onDismissError }) {
 
 // ---- the external partner's application ---------------------------------------
 
-const PARTNER_TABS = ['overview', 'activities', 'movements', 'reports', 'updates', 'messages'];
+const PARTNER_TABS = ['overview', 'projects', 'activities', 'movements', 'reports', 'updates', 'messages'];
 
 function PartnerWorkspace({ token, user, onLogout, onExpired, onSessionRenewed, welcome, onWelcomeShown }) {
   const { language, t } = useI18n();
   const [route, navigate] = useHashRoute();
-  const { fetchJson, online } = useApi(token, onExpired);
+  const { fetchJson, download, online } = useApi(token, onExpired);
   const [error, setError] = useState('');
   const [message, setMessage] = useState(welcome || '');
   useEffect(() => { if (welcome) onWelcomeShown(); }, [welcome, onWelcomeShown]);
@@ -844,6 +844,9 @@ function PartnerWorkspace({ token, user, onLogout, onExpired, onSessionRenewed, 
           tab={tab}
           onTab={(id) => navigate(buildHash(id))}
           onError={setError}
+          onMessage={setMessage}
+          download={download}
+          ReportView={ReportBody}
         />
       </Suspense>
     </ErrorBoundary>

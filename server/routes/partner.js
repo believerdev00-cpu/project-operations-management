@@ -32,6 +32,7 @@ import { round2 } from '../lib/rates.js';
 import { COMMENT_SUBJECTS, PARTNER_COMMENTS_PER_HOUR, commentBody, loadThreads } from '../lib/partnerComments.js';
 import { notifyDirectors } from '../lib/notifications.js';
 import { partnerProjectSql } from '../lib/organization.js';
+import { ReportError, buildReport, resolvePeriod, sectorName, sendReportFile } from './reports.js';
 
 const router = express.Router();
 
@@ -496,10 +497,76 @@ router.post('/comments/:id/replies', asyncRoute(async (req, res) => {
   res.status(201).json(updated);
 }));
 
+// ---- the projects shared with this partner: the full report, and its export ----
+//
+// THE ONE PLACE A PARTNER READS AS THE DIRECTOR DOES. The Director decided that
+// a partner should see a project they are a partner to the way the Director
+// sees it -- every monthly plan filed under it, every objective, every recorded
+// day, the progress and the money -- and take the report away as a PDF or a
+// spreadsheet. Read only: nothing here writes, and the comment to the Director
+// is still a partner's only write.
+//
+// "Their project" means a row in partner_projects, which only the Director
+// creates (PUT /api/partners/:id/projects). It does NOT fall back to every
+// project in a granted operation the way the activity lists above do: nothing
+// is opened in full until the Director has shared it by name. And the project
+// must still be in one of the partner's operations, read on this request --
+// dropping an operation drops its shares, but the check does not rely on that.
+//
+// The report is buildReport itself -- the function behind the Director's own
+// report screen and export -- asked for that one project, so what the partner
+// reads and downloads is exactly what the Director would for the same dates,
+// and can never be a second, drifting copy. A report names nobody, so no
+// internal person is exposed by it.
+async function sharedProject(req, projectId) {
+  const found = await pool.query(
+    `SELECT p.id, p.name, p.sector FROM projects p
+       JOIN partner_projects pp ON pp.project_id = p.id AND pp.partner_id = $1
+      WHERE p.id = $2 AND p.sector = ANY($3::text[])`,
+    [req.user.id, String(projectId || '').slice(0, 50), req.user.operations]
+  );
+  // 404 rather than 403, so a partner cannot learn which project ids exist.
+  return found.rowCount ? found.rows[0] : null;
+}
+
+function projectChoice(project) {
+  return { operation: project.sector, operationName: sectorName(project.sector), projectId: project.id, projectName: project.name };
+}
+
+router.get('/projects', asyncRoute(async (req, res) => {
+  const result = await pool.query(
+    `SELECT p.id, p.name, p.sector FROM projects p
+       JOIN partner_projects pp ON pp.project_id = p.id AND pp.partner_id = $1
+      WHERE p.sector = ANY($2::text[])
+      ORDER BY p.sector, p.name`,
+    [req.user.id, req.user.operations]
+  );
+  res.json(result.rows.map((row) => ({ id: row.id, name: row.name, operation: row.sector })));
+}));
+
+router.get('/projects/:id/report', asyncRoute(async (req, res) => {
+  const project = await sharedProject(req, req.params.id);
+  if (!project) return res.status(404).json({ message: 'Project not found.' });
+  const period = resolvePeriod(req.query);
+  res.json(await buildReport(req.user, period, projectChoice(project)));
+}));
+
+router.get('/projects/:id/report/export', asyncRoute(async (req, res) => {
+  const project = await sharedProject(req, req.params.id);
+  if (!project) return res.status(404).json({ message: 'Project not found.' });
+  const format = String(req.query.format || '').toLowerCase();
+  if (!['xlsx', 'pdf'].includes(format)) return res.status(400).json({ message: 'The export format must be xlsx or pdf.' });
+  const period = resolvePeriod(req.query);
+  const choice = projectChoice(project);
+  const report = await buildReport(req.user, period, choice);
+  return sendReportFile(req, res, report, { format, period, choice });
+}));
+
 // Handed on to the application's error handler, which tells bad input apart
 // from a genuine server fault.
 router.use((error, req, res, next) => {
   if (error instanceof PartnerScopeError) return res.status(403).json({ message: error.message });
+  if (error instanceof ReportError) return res.status(error.status).json({ message: error.message });
   return next(error);
 });
 

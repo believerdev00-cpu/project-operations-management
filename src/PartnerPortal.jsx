@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { operationName } from '../shared/businessOperations.js';
 import { categoryLabel } from './ActivityReview.jsx';
 import { DATE_STYLE, dateLocale } from './format.js';
+import { fill } from './i18n.js';
 
 // External Business Partner / Business Operation Access.
 //
@@ -19,6 +20,7 @@ import { DATE_STYLE, dateLocale } from './format.js';
 
 const TABS = [
   ['overview', 'nav.overview'],
+  ['projects', 'portal.myProjects'],
   ['activities', 'nav.activities'],
   ['movements', 'nav.movements'],
   ['reports', 'nav.reports'],
@@ -50,7 +52,7 @@ function statusTone(status) {
 
 // The tab is carried in the address (#/activities, #/reports ...) by the shell,
 // so the back button steps between tabs and a refresh keeps the one open.
-export default function PartnerPortal({ user, fetchJson, language, t, tab = 'overview', onTab, onError }) {
+export default function PartnerPortal({ user, fetchJson, language, t, tab = 'overview', onTab, onError, onMessage, download, ReportView }) {
   const [overview, setOverview] = useState(null);
   const [activities, setActivities] = useState([]);
   const [movements, setMovements] = useState([]);
@@ -147,9 +149,11 @@ export default function PartnerPortal({ user, fetchJson, language, t, tab = 'ove
       </select>
     </div></section>}
 
-    <p className="partner-notice">
+    {/* The shared projects are read in full, so the "approved records only"
+        note belongs to the other tabs. */}
+    {tab !== 'projects' && <p className="partner-notice">
       <strong>{t('portal.approvedOnly')}.</strong> {t('portal.approvedOnlyNote')}
-    </p>
+    </p>}
 
     <nav className="partner-tabs" aria-label={t('portal.title')}>
       {TABS.map(([id, labelKey]) => <button
@@ -207,6 +211,9 @@ export default function PartnerPortal({ user, fetchJson, language, t, tab = 'ove
         </tr>)}</tbody>
       </table></div> : <EmptyState t={t}>{t('portal.noMovements')}</EmptyState>}
     </Panel>}
+
+    {tab === 'projects' && <PartnerProjects fetchJson={fetchJson} download={download} language={language} t={t}
+      onError={onError} onMessage={onMessage} ReportView={ReportView} />}
 
     {tab === 'reports' && report && <>
       <Panel title={t('portal.byMonth')} subtitle={operation}>
@@ -391,6 +398,102 @@ function ActivityTable({ rows, language, t, empty }) {
       <td data-label={t('table.status')}><span className={`status-badge ${statusTone(row.status)}`}>{t(`status.${row.status}`)}</span></td>
     </tr>)}</tbody>
   </table></div>;
+}
+
+// The projects the Director shared with this partner, each read in full: the
+// Director's own report (ReportView is App.jsx's ReportBody, handed down so the
+// partner's screen is the Director's screen, not a copy of it), for a month or
+// for dates the partner picks, with the PDF and Excel export. The API refuses a
+// project that was not shared by name (404), so the list below is the whole
+// of what this can reach.
+function PartnerProjects({ fetchJson, download, language, t, onError, onMessage, ReportView }) {
+  const thisMonth = new Date().toISOString().slice(0, 7);
+  const [projects, setProjects] = useState(null);
+  const [projectId, setProjectId] = useState('');
+  const [mode, setMode] = useState('monthly');
+  const [month, setMonth] = useState(thisMonth);
+  const [range, setRange] = useState({ start: `${thisMonth}-01`, end: new Date().toISOString().slice(0, 10) });
+  const [report, setReport] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    fetchJson('/api/partner/projects')
+      .then((rows) => { if (live) { setProjects(rows); setProjectId((current) => current || rows[0]?.id || ''); } })
+      .catch((loadError) => onError(loadError.message));
+    return () => { live = false; };
+  }, [fetchJson, onError]);
+
+  const query = mode === 'monthly'
+    ? `period=monthly&month=${encodeURIComponent(month)}`
+    : `period=custom&start=${encodeURIComponent(range.start)}&end=${encodeURIComponent(range.end)}`;
+
+  const generate = async () => {
+    if (!projectId) return;
+    setBusy(true);
+    try {
+      setReport(await fetchJson(`/api/partner/projects/${encodeURIComponent(projectId)}/report?${query}`));
+    } catch (loadError) {
+      setReport(null);
+      onError(loadError.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const exportReport = async (format) => {
+    if (!report) return;
+    setBusy(true);
+    try {
+      const slug = (text) => String(text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+      await download(
+        `/api/partner/projects/${encodeURIComponent(projectId)}/report/export?format=${format}&${query}&language=${encodeURIComponent(language)}`,
+        `report-${slug(report.scope?.projectName || projectId)}-${report.period.start}-to-${report.period.end}.${format}`
+      );
+      onMessage?.(fill(t('msg.reportDownloaded'), { format: format === 'xlsx' ? 'Excel' : 'PDF' }));
+    } catch (exportError) {
+      onError(exportError.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!projects) return <div className="loading-state"><span className="spinner" />{t('app.loading')}</div>;
+  if (!projects.length) return <EmptyState t={t}>{t('portal.noSharedProjects')}</EmptyState>;
+
+  return <>
+    <Panel title={t('portal.myProjects')} subtitle={t('portal.myProjectsNote')}>
+      <div className="form-grid">
+        <label className="form-field"><span>{t('report.project')}</span>
+          <select value={projectId} onChange={(event) => { setProjectId(event.target.value); setReport(null); }}>
+            {projects.map((project) => <option key={project.id} value={project.id}>{project.name} · {operationName(project.operation, language)}</option>)}
+          </select>
+        </label>
+        <label className="form-field"><span>{t('portal.reportFor')}</span>
+          <select value={mode} onChange={(event) => setMode(event.target.value)}>
+            <option value="monthly">{t('report.monthly')}</option>
+            <option value="custom">{t('report.custom')}</option>
+          </select>
+        </label>
+        {mode === 'monthly'
+          ? <label className="form-field"><span>{t('report.month')}</span>
+            <input type="month" value={month} onChange={(event) => setMonth(event.target.value)} /></label>
+          : <>
+            <label className="form-field"><span>{t('report.startDate')}</span>
+              <input type="date" value={range.start} max={range.end} onChange={(event) => setRange({ ...range, start: event.target.value })} /></label>
+            <label className="form-field"><span>{t('report.endDate')}</span>
+              <input type="date" value={range.end} min={range.start} onChange={(event) => setRange({ ...range, end: event.target.value })} /></label>
+          </>}
+      </div>
+      <div className="report-actions">
+        <button className="primary-btn" type="button" disabled={busy || !projectId} onClick={generate}>{t('portal.showReport')}</button>
+      </div>
+    </Panel>
+    {report && ReportView && <section className="panel report-result">
+      <ReportView report={report} busy={busy} sectorLabel={(id) => operationName(id, language)}
+        onExport={exportReport} onPrint={() => window.print()} onClose={() => setReport(null)} />
+    </section>}
+  </>;
 }
 
 function Metric({ label, value }) {
