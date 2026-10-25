@@ -1494,6 +1494,17 @@ td .operation-checks { display: grid; gap: 0; }
 .boutique .decision-card-main strong { grid-column: 1 / -1; }
 .boutique .decision-card-meta { grid-column: 1 / -1; }
 .btq-shelf-after { grid-column: 1 / -1; margin-top: 4px; font-weight: 600; color: var(--navy); }
+.btq-pl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.btq-pl-column h3 { margin: 0 0 8px; font-size: 1rem; color: #4a5c70; }
+.btq-pl-column dl { margin: 0; display: grid; gap: 6px; }
+.btq-pl-column dl div { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px dashed #dbe3ec; padding-bottom: 4px; }
+.btq-pl-column dt { color: #4a5c70; }
+.btq-pl-column dd { margin: 0; font-weight: 600; white-space: nowrap; }
+.btq-pl-result { display: flex; justify-content: space-between; align-items: baseline; margin: 10px 0 0; padding: 10px 12px; border-radius: 10px; font-size: 1.05rem; }
+.btq-pl-result strong { font-size: 1.35rem; }
+.btq-pl-result.gain { background: #e6f6ec; color: #17633a; }
+.btq-pl-result.loss { background: #fdecec; color: #a12a2a; }
+@media (max-width: 640px) { .btq-pl-grid { grid-template-columns: 1fr; } }
 .btq-big-actions { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin: 16px 0; }
 .btq-big-action { position: relative; display: grid; justify-items: center; gap: 8px; padding: 22px 12px; min-height: 130px; border: 2px solid var(--line); border-radius: 16px; background: var(--surface); font-size: 18px; font-weight: 700; color: var(--navy); cursor: pointer; box-shadow: var(--shadow); }
 .btq-big-action:hover { border-color: var(--blue); }

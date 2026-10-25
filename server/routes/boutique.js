@@ -438,6 +438,19 @@ router.get('/overview', asyncRoute(async (req, res) => {
   // A cashier's overview is the shelf and their own till: the shelf's worth
   // at cost, the supplier balance and the Director's queue are not theirs.
   const cashier = req.boutique === 'cashier';
+  // Profit and loss for today and for the month so far, on the first screen,
+  // so the Director reads it as the shop works (the screen re-reads this every
+  // half minute) instead of waiting for a report. The same financeFigures the
+  // Books and Reports read, so the three can never disagree. Not a cashier's.
+  let profit = null;
+  if (!cashier) {
+    const [day, month] = await Promise.all([
+      financeFigures(pool, { start: today, end: today }),
+      financeFigures(pool, { start: `${today.slice(0, 8)}01`, end: today })
+    ]);
+    const lines = (f) => ({ sales: f.netSales, cost: f.costOfSales, grossProfit: f.grossProfit, expenses: f.expenses.total, net: f.netProfit });
+    profit = { today: lines(day), month: lines(month) };
+  }
   send(res, {
     role: req.boutique,
     operation: RETAIL_OPERATION,
@@ -455,7 +468,8 @@ router.get('/overview', asyncRoute(async (req, res) => {
     pendingAdjustments: cashier ? 0 : approvals.rows[0].adjustments,
     pendingVoids: cashier ? 0 : approvals.rows[0].voids,
     pendingSubmissions: cashier ? 0 : approvals.rows[0].submissions,
-    supplierBalance: cashier ? null : money(owed.rows[0].total)
+    supplierBalance: cashier ? null : money(owed.rows[0].total),
+    profit
   });
 }));
 

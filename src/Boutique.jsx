@@ -37,7 +37,9 @@ const TABS = {
 // Director decides and reads, the manager sells and keeps the shelf.
 const MAIN_TABS = {
   director: ['overview', 'approvals', 'reports'],
-  manager: ['overview', 'sell', 'stock', 'expenses'],
+  // The manager's day, as the Director put it: add a product with its buying
+  // and selling price, report what sold, and the shop shows the profit.
+  manager: ['overview', 'products', 'count', 'expenses'],
   reader: ['overview', 'reports'],
   cashier: ['overview', 'sell', 'stock']
 };
@@ -141,6 +143,15 @@ export default function Boutique({ user, fetchJson, upload, onMessage, onError, 
   const active = tabs.includes(tab) ? tab : 'overview';
   const changed = useCallback(() => { reloadOverview(); onChanged?.(); }, [reloadOverview, onChanged]);
   const go = useCallback((next, params) => onNavigate(next, params), [onNavigate]);
+  // Today's page is read live: while it is open and the window is in front,
+  // the figures are read again every half minute, so a count the manager
+  // saves shows up on the Director's profit without anybody pressing refresh.
+  const onToday = !tab || tab === 'overview';
+  useEffect(() => {
+    if (!onToday) return undefined;
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') reloadOverview(); }, 30000);
+    return () => clearInterval(timer);
+  }, [onToday, reloadOverview]);
 
   if (!overview) return <div className="loading-state"><span className="spinner" />{t('app.loading')}</div>;
   const can = { manage: role === 'director' || role === 'manager', sell: role !== 'reader', decide: role === 'director', role };
@@ -210,11 +221,14 @@ function OverviewTab({ overview, can, go }) {
       ['reports', '📈', t('btq.big.reports')],
       ['sales', '🧾', t('btq.big.sales')]
     ]
-    : [
-      ['sell', '🛒', t('btq.big.sell')],
-      ['stock', '📦', t(cashier ? 'btq.big.stockLook' : 'btq.big.stockIn'), 0, cashier ? null : { update: '1' }],
-      ...(cashier ? [] : [['expenses', '💸', t('btq.big.spent')], ['reports', '📤', t('btq.big.reportUp')]])
-    ];
+    : cashier
+      ? [['sell', '🛒', t('btq.big.sell')], ['stock', '📦', t('btq.big.stockLook')]]
+      : [
+        ['products', '➕', t('btq.big.addProduct'), 0, { add: '1' }],
+        ['count', '📝', t('btq.big.reportSold')],
+        ['stock', '📦', t('btq.big.stockIn'), 0, { update: '1' }],
+        ['expenses', '💸', t('btq.big.spent')]
+      ];
   return <>
     {attention.length > 0 && <section className="next-step next-step-warning btq-attention" aria-live="polite">
       <div className="next-step-text">
@@ -225,6 +239,9 @@ function OverviewTab({ overview, can, go }) {
         </li>)}</ul>
       </div>
     </section>}
+    {/* The Director reads first and acts second; the shop's people act first,
+        so their buttons come before the figures. */}
+    {deciding && overview.profit && <ProfitPanel profit={overview.profit} />}
     <div className="btq-big-actions">
       {actions.map(([to, picture, label, badge, params]) => <button key={to} type="button" className="btq-big-action" onClick={() => go(to, params)}>
         <span className="btq-big-picture" aria-hidden="true">{picture}</span>
@@ -232,12 +249,41 @@ function OverviewTab({ overview, can, go }) {
         {badge > 0 && <span className="nav-badge btq-badge">{badge}</span>}
       </button>)}
     </div>
+    {!deciding && overview.profit && <ProfitPanel profit={overview.profit} />}
     <div className="metric-grid btq-today-figures">
-      <Metric label={t('btq.todaySales')} value={fill(t('btq.todaySalesValue'), { amount: money(overview.todaySales.total), count: overview.todaySales.count })} tone="strong" />
+      {/* Today's sales are already the first line of the profit panel. */}
+      {!overview.profit && <Metric label={t('btq.todaySales')} value={fill(t('btq.todaySalesValue'), { amount: money(overview.todaySales.total), count: overview.todaySales.count })} tone="strong" />}
       <Metric label={t('btq.lowStockCount')} value={overview.lowStock} tone={overview.lowStock ? 'warn' : ''} />
       {!cashier && <Metric label={t(can.decide ? 'btq.waitingForYou' : 'btq.pendingApprovals')} value={overview.pendingApprovals} tone={overview.pendingApprovals ? 'warn' : ''} />}
     </div>
   </>;
+}
+
+// Profit and loss in five lines, today beside the month so far: what was sold,
+// what those goods cost to buy, what that leaves, what was spent, and the
+// result -- called a profit or a loss in words, not only by its sign.
+function ProfitPanel({ profit }) {
+  const { t } = useI18n();
+  const column = (label, p) => <div className="btq-pl-column">
+    <h3>{label}</h3>
+    <dl>
+      <div><dt>{t('btq.pl.sold')}</dt><dd>{money(p.sales)}</dd></div>
+      <div><dt>{t('btq.pl.boughtFor')}</dt><dd>− {money(p.cost)}</dd></div>
+      <div><dt>{t('btq.pl.fromGoods')}</dt><dd>{money(p.grossProfit)}</dd></div>
+      <div><dt>{t('btq.pl.spent')}</dt><dd>− {money(p.expenses)}</dd></div>
+    </dl>
+    <p className={`btq-pl-result ${p.net < 0 ? 'loss' : 'gain'}`}>
+      <span>{t(p.net < 0 ? 'btq.pl.loss' : 'btq.pl.profit')}</span>
+      <strong>{money(Math.abs(p.net))}</strong>
+    </p>
+  </div>;
+  return <section className="panel btq-pl" aria-live="polite">
+    <div className="panel-header"><div><h2>{t('btq.pl.title')}</h2><span>{t('btq.pl.live')}</span></div></div>
+    <div className="btq-pl-grid">
+      {column(t('btq.pl.today'), profit.today)}
+      {column(t('btq.pl.month'), profit.month)}
+    </div>
+  </section>;
 }
 
 // ---- the till ------------------------------------------------------------------------
