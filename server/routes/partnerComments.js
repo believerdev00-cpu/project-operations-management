@@ -47,7 +47,9 @@ router.patch('/:id/read', asyncRoute(async (req, res) => {
 router.post('/:id/replies', asyncRoute(async (req, res) => {
   const id = parseId(req.params.id);
   const thread = id
-    ? await pool.query('SELECT id FROM partner_comments WHERE id = $1 AND parent_id IS NULL', [id])
+    // Project discussions are answered through /api/project-discussions,
+    // which tells the right partners; this inbox is the private messages.
+    ? await pool.query('SELECT id FROM partner_comments WHERE id = $1 AND parent_id IS NULL AND project_id IS NULL', [id])
     : { rowCount: 0 };
   if (!thread.rowCount) return res.status(404).json({ message: 'Comment not found.' });
   const text = commentBody(req.body?.body);

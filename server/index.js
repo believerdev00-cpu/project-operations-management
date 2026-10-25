@@ -24,6 +24,7 @@ import reportRouter from './routes/reports.js';
 import partnerRouter from './routes/partner.js';
 import partnersRouter from './routes/partners.js';
 import partnerCommentsRouter from './routes/partnerComments.js';
+import projectDiscussionsRouter from './routes/projectDiscussions.js';
 import monthlyPlanRouter from './routes/monthlyPlans.js';
 import notificationRouter from './routes/notifications.js';
 import organizationRouter from './routes/organization.js';
@@ -914,6 +915,10 @@ app.use('/api/partners', authMiddleware, partnersRouter);
 // Comments external partners address to the Director, and the Director's
 // answers. Director only, and outside the partner allowlist by its path.
 app.use('/api/partner-comments', authMiddleware, partnerCommentsRouter);
+// A project's discussion with its partners, read by the Director, the General
+// Manager and the managers responsible for each project. Not on the partner
+// allowlist: partners take part through /api/partner/projects/:id/discussion.
+app.use('/api/project-discussions', authMiddleware, projectDiscussionsRouter);
 
 // Monthly planning: the Director plans and confirms a month per business
 // operation, the manager works it and records what was spent, and the month is

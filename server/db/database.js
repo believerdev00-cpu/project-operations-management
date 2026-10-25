@@ -474,6 +474,34 @@ export async function initDatabase() {
     await pool.query(`CREATE INDEX IF NOT EXISTS partner_comments_unread_idx ON partner_comments(read_by_director_at)
       WHERE author_role = 'partner' AND read_by_director_at IS NULL`);
 
+    // ---- a project's discussion ----------------------------------------------
+    //
+    // The same table, extended rather than doubled: a thread may now belong to
+    // a PROJECT shared with the partner (project_id), about the project as a
+    // whole, one of its monthly plans, or one of its activities. Those threads
+    // are the project's discussion: every partner the project is shared with
+    // and the internal people responsible for it read them, and the project's
+    // manager answers as well as the Director (author_role 'manager'). A
+    // thread is open until somebody internal marks it answered (resolved_*).
+    // Older threads -- project_id NULL -- stay exactly what they were: a
+    // partner's message to the Director about an operation.
+    //
+    // Additive only: three columns and wider CHECKs. No existing row changes.
+    await pool.query('ALTER TABLE partner_comments ADD COLUMN IF NOT EXISTS project_id VARCHAR(50) REFERENCES projects(id) ON DELETE SET NULL');
+    await pool.query('ALTER TABLE partner_comments ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ');
+    await pool.query('ALTER TABLE partner_comments ADD COLUMN IF NOT EXISTS resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL');
+    await pool.query("ALTER TABLE partner_comments ADD COLUMN IF NOT EXISTS resolved_by_name VARCHAR(150) NOT NULL DEFAULT ''");
+    await pool.query('ALTER TABLE partner_comments DROP CONSTRAINT IF EXISTS partner_comments_subject_check');
+    await pool.query(`ALTER TABLE partner_comments ADD CONSTRAINT partner_comments_subject_check
+      CHECK (subject_type IN ('operation', 'activity', 'movement', 'project', 'plan'))`);
+    await pool.query('ALTER TABLE partner_comments DROP CONSTRAINT IF EXISTS partner_comments_subject_id_check');
+    await pool.query(`ALTER TABLE partner_comments ADD CONSTRAINT partner_comments_subject_id_check
+      CHECK ((subject_type IN ('operation', 'project')) = (subject_id IS NULL))`);
+    await pool.query('ALTER TABLE partner_comments DROP CONSTRAINT IF EXISTS partner_comments_author_check');
+    await pool.query(`ALTER TABLE partner_comments ADD CONSTRAINT partner_comments_author_check
+      CHECK (author_role IN ('partner', 'super-admin', 'manager'))`);
+    await pool.query('CREATE INDEX IF NOT EXISTS partner_comments_project_idx ON partner_comments(project_id, created_at DESC) WHERE project_id IS NOT NULL');
+
     // The organisation -- reporting lines, teams, the work check and what each
     // partner is shown project by project -- hangs off users, projects,
     // activities and the partner grants above, so it migrates after all of them.

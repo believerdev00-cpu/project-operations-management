@@ -43,7 +43,8 @@ const SUITES = [
   ['user delete', 'user-delete.test.mjs', { needsApi: true }],
   ['plan money', 'plan-money.test.mjs', { needsApi: true }],
   ['farming', 'farming.test.mjs', { needsApi: true }],
-  ['partner projects', 'partner-projects.test.mjs', { needsApi: true }]
+  ['partner projects', 'partner-projects.test.mjs', { needsApi: true }],
+  ['project discussion', 'project-discussion.test.mjs', { needsApi: true }]
 ];
 
 const only = process.argv[2];

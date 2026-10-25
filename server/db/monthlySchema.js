@@ -522,7 +522,12 @@ export const NOTIFICATION_KINDS = [
   'boutique_report_submitted',
   'boutique_issue_raised',
   'boutique_submission_decided',
-  'boutique_low_stock'
+  'boutique_low_stock',
+  // A project's discussion (server/routes/projectDiscussions.js, partner.js):
+  // a partner wrote on a project, to the people responsible for it; an
+  // internal answer, to the partners in that conversation.
+  'project_comment',
+  'partner_reply'
 ];
 
 export async function migrateMonthlyModule(pool) {

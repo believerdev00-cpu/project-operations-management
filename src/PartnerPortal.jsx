@@ -3,6 +3,7 @@ import { operationName } from '../shared/businessOperations.js';
 import { categoryLabel } from './ActivityReview.jsx';
 import { DATE_STYLE, dateLocale } from './format.js';
 import { fill } from './i18n.js';
+import { ProjectDiscussion } from './Discussion.jsx';
 
 // External Business Partner / Business Operation Access.
 //
@@ -493,7 +494,50 @@ function PartnerProjects({ fetchJson, download, language, t, onError, onMessage,
       <ReportView report={report} busy={busy} sectorLabel={(id) => operationName(id, language)}
         onExport={exportReport} onPrint={() => window.print()} onClose={() => setReport(null)} />
     </section>}
+    {projectId && <ProjectFiles key={`f${projectId}`} fetchJson={fetchJson} download={download} projectId={projectId} t={t} language={language} onError={onError} />}
+    {projectId && <ProjectDiscussion key={`d${projectId}`} fetchJson={fetchJson} projectId={projectId} onError={onError} onMessage={onMessage} />}
   </>;
+}
+
+// The documents behind a shared project -- photos and papers on its recorded
+// days, receipts on its activities -- each downloaded with the partner's own
+// session (never a link that could be forwarded).
+function ProjectFiles({ fetchJson, download, projectId, t, language, onError }) {
+  const [files, setFiles] = useState(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let live = true;
+    fetchJson(`/api/partner/projects/${encodeURIComponent(projectId)}/files`)
+      .then((rows) => { if (live) setFiles(rows); })
+      .catch((loadError) => onError(loadError.message));
+    return () => { live = false; };
+  }, [fetchJson, projectId, onError]);
+
+  const take = async (file) => {
+    setBusy(true);
+    try {
+      await download(`/api/partner/projects/${encodeURIComponent(projectId)}/files/${file.source}/${file.id}`, file.name);
+    } catch (downloadError) {
+      onError(downloadError.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!files) return null;
+  return <Panel title={t('portal.documents')} subtitle={t('portal.documentsNote')}>
+    {files.length ? <div className="table-wrap"><table className="card-table">
+      <thead><tr><th>{t('portal.document')}</th><th>{t('portal.documentFor')}</th><th>{t('portal.documentDate')}</th><th>{t('portal.documentAction')}</th></tr></thead>
+      <tbody>{files.map((file) => <tr key={`${file.source}${file.id}`}>
+        <td className="card-title-cell" data-label={t('portal.document')}><strong>{file.name}</strong></td>
+        <td data-label={t('portal.documentFor')}>{file.recordTitle}</td>
+        <td data-label={t('portal.documentDate')}>{formatDate(file.recordDate, language)}</td>
+        <td className="card-actions" data-label={t('portal.documentAction')}>
+          <button className="secondary-btn" type="button" disabled={busy} onClick={() => take(file)}>{t('portal.download')}</button>
+        </td>
+      </tr>)}</tbody>
+    </table></div> : <EmptyState t={t}>{t('portal.noDocuments')}</EmptyState>}
+  </Panel>;
 }
 
 function Metric({ label, value }) {

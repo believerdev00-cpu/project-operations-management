@@ -21,6 +21,7 @@ const MonthlyPlans = lazy(() => import('./MonthlyPlans.jsx'));
 const Boutique = lazy(() => import('./Boutique.jsx'));
 // Farming Management: its own workspace at #/farming.
 const Farming = lazy(() => import('./Farming.jsx'));
+import { DiscussionInbox } from './Discussion.jsx';
 // The organisation is not a page: its two pieces sit where the work is (the
 // teams on Projects and on Home, the chart on People and the GM's Home).
 const TeamsSection = lazy(() => import('./Organization.jsx').then((module) => ({ default: module.TeamsSection })));
@@ -2245,7 +2246,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       <button className="primary-btn" type="button" onClick={() => { setLoadState('loading'); loadData(); }}>{t('action.retry')}</button>
     </div>;
   } else if (view === 'dashboard' && isGeneral) {
-    content = <GeneralManagerHome
+    content = <><GeneralManagerHome
       user={user}
       summary={summary.summary}
       sectorRows={summary.sectorBreakdown}
@@ -2255,7 +2256,11 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       onMessage={notify}
       onError={fail}
       onChanged={onModuleChanged}
-    />;
+    />
+    {/* The General Manager reads the partners' discussions (answering them
+        is the Director's and the project managers'). */}
+    <DiscussionInbox fetchJson={fetchJson} onMessage={notify} onError={fail} hideWhenEmpty />
+    </>;
   } else if (view === 'dashboard') {
     content = <><Home
       user={user}
@@ -2285,6 +2290,10 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         to. The Director's teams are on Projects. */}
     {!isDirector && <TeamsSection user={user} fetchJson={fetchJson} onMessage={notify} onError={fail}
       onChanged={onModuleChanged} reloadKey={summary} />}
+    {/* A project manager answers the partners of their projects from Home.
+        Shown only when there is a conversation, so a manager with no partner
+        has nothing new on their page. */}
+    {isManager && <DiscussionInbox fetchJson={fetchJson} onMessage={notify} onError={fail} hideWhenEmpty />}
     </>;
   } else if (view === 'approval-queue') {
     content = <>
@@ -2542,7 +2551,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   } else if (view === 'partners') {
     content = issues.partners
       ? <Panel title={t('nav.partners')}><LoadIssue onRetry={loadData} /></Panel>
-      : <ExternalPartners
+      : <><DiscussionInbox fetchJson={fetchJson} onMessage={notify} onError={fail} /><ExternalPartners
         register={partnerRegister}
         language={language}
         t={t}
@@ -2559,7 +2568,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         inbox={partnerInbox}
         onReply={replyToPartner}
         onMarkRead={markPartnerThreadRead}
-      />;
+      /></>;
   } else if (view === 'movements') {
     content = <MovementModule
       user={user}

@@ -30,7 +30,7 @@ const check = (label, ok, detail = '') => {
 
 // ui.jsx holds the shared error boundary and dialogs; left off this list, every
 // key only they use was reported as unused, and their JSX went unchecked.
-const FILES = ['App.jsx', 'ui.jsx', 'journey.jsx', 'Home.jsx', 'MovementModule.jsx', 'ActivityReview.jsx', 'PartnerPortal.jsx', 'ExternalPartners.jsx', 'MonthlyPlans.jsx', 'ExpensePanel.jsx', 'Organization.jsx', 'Boutique.jsx', 'Progress.jsx', 'Farming.jsx']
+const FILES = ['App.jsx', 'ui.jsx', 'journey.jsx', 'Home.jsx', 'MovementModule.jsx', 'ActivityReview.jsx', 'PartnerPortal.jsx', 'ExternalPartners.jsx', 'MonthlyPlans.jsx', 'ExpensePanel.jsx', 'Organization.jsx', 'Boutique.jsx', 'Progress.jsx', 'Farming.jsx', 'Discussion.jsx']
   .map((name) => path.join(root, 'src', name));
 
 const sources = Object.fromEntries(FILES.map((file) => [path.basename(file), fs.readFileSync(file, 'utf8')]));
@@ -95,7 +95,11 @@ const FAMILIES = {
   'notice.kind.': ['plan_assigned', 'plan_changed', 'change_requested', 'report_submitted', 'report_accepted',
     'report_returned', 'work_submitted', 'work_to_check', 'work_approved', 'work_returned', 'partner_comment',
     'team_added', 'partner_shared', 'work_handed_over', 'boutique_approval_requested', 'boutique_approval_decided',
-    'boutique_report_submitted', 'boutique_issue_raised', 'boutique_submission_decided', 'boutique_low_stock'],
+    'boutique_report_submitted', 'boutique_issue_raised', 'boutique_submission_decided', 'boutique_low_stock',
+    'project_comment', 'partner_reply'],
+  // A project's discussion (src/Discussion.jsx): who wrote, and the filters.
+  'discussion.role.': ['partner', 'manager', 'super-admin'],
+  'discussion.filter.': ['open', 'resolved', 'all'],
   // The Boutique Manager's submissions to the Director.
   'btq.subKind.': ['report', 'incident'],
   'btq.subStatus.': ['submitted', 'accepted', 'returned'],

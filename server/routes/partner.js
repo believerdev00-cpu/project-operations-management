@@ -26,11 +26,14 @@
 
 import express from 'express';
 import { pool, safeRollback } from '../db/database.js';
-import { asyncRoute, parseId } from '../lib/http.js';
+import { asyncRoute, contentDisposition, parseId } from '../lib/http.js';
 import { TRIPS_OPERATION, operationById } from '../../shared/businessOperations.js';
 import { round2 } from '../lib/rates.js';
-import { COMMENT_SUBJECTS, PARTNER_COMMENTS_PER_HOUR, commentBody, loadThreads } from '../lib/partnerComments.js';
-import { notifyDirectors } from '../lib/notifications.js';
+import {
+  COMMENT_SUBJECTS, PARTNER_COMMENTS_PER_HOUR, PROJECT_SUBJECTS, commentBody, loadThreads, partnerSeesThreadSql, projectManagerIds, viewerOf
+} from '../lib/partnerComments.js';
+import { activeDirectorIds, notifyDirectors, notifyMany } from '../lib/notifications.js';
+import { readFile } from '../lib/storage.js';
 import { partnerProjectSql } from '../lib/organization.js';
 import { ReportError, buildReport, resolvePeriod, sectorName, sendReportFile } from './reports.js';
 
@@ -478,7 +481,9 @@ router.post('/comments/:id/replies', asyncRoute(async (req, res) => {
   // Only a thread this partner opened, and only while they still follow the
   // operation it is about.
   const thread = await pool.query(
-    'SELECT id, sector, subject_type, subject_id FROM partner_comments WHERE id = $1 AND partner_id = $2 AND parent_id IS NULL',
+    // A project's discussion is answered under the project, where the share
+    // is checked; this door is for messages to the Director only.
+    'SELECT id, sector, subject_type, subject_id FROM partner_comments WHERE id = $1 AND partner_id = $2 AND parent_id IS NULL AND project_id IS NULL',
     [id, req.user.id]
   );
   if (!thread.rowCount) return res.status(404).json({ message: 'Comment not found.' });
@@ -560,6 +565,207 @@ router.get('/projects/:id/report/export', asyncRoute(async (req, res) => {
   const choice = projectChoice(project);
   const report = await buildReport(req.user, period, choice);
   return sendReportFile(req, res, report, { format, period, choice });
+}));
+
+// ---- the project's documents ---------------------------------------------------
+//
+// The files behind a shared project: the photos and papers attached to its
+// recorded days, and the receipts and evidence on its activities. Listed and
+// streamed through here only -- with the partner's own session, never a link
+// that could be passed on -- and only for a project sharedProject() lets
+// through. A file is found by its id AND the project it belongs to, so an id
+// from another project is "not found", not somebody else's file.
+const DOCUMENT_SOURCES = {
+  day: {
+    folder: 'plan-reports',
+    list: `SELECT e.id, e.kind, e.original_name, e.mime_type, e.size_bytes, e.created_at,
+                  r.report_date::text AS record_date, o.title AS record_title
+             FROM plan_report_evidence e
+             JOIN plan_daily_reports r ON r.id = e.report_id
+             JOIN monthly_plans p ON p.id = r.plan_id
+             LEFT JOIN plan_objectives o ON o.id = r.objective_id
+            WHERE p.project_id = $1`,
+    one: `SELECT e.* FROM plan_report_evidence e
+            JOIN plan_daily_reports r ON r.id = e.report_id
+            JOIN monthly_plans p ON p.id = r.plan_id
+           WHERE e.id = $2 AND p.project_id = $1`
+  },
+  activity: {
+    folder: 'activities',
+    list: `SELECT e.id, e.kind, e.original_name, e.mime_type, e.size_bytes, e.created_at,
+                  a.created_at::date::text AS record_date, a.activity AS record_title
+             FROM activity_evidence e
+             JOIN activities a ON a.id = e.activity_id
+            WHERE a.project_id = $1`,
+    one: `SELECT e.* FROM activity_evidence e
+            JOIN activities a ON a.id = e.activity_id
+           WHERE e.id = $2 AND a.project_id = $1`
+  }
+};
+
+router.get('/projects/:id/files', asyncRoute(async (req, res) => {
+  const project = await sharedProject(req, req.params.id);
+  if (!project) return res.status(404).json({ message: 'Project not found.' });
+  const lists = await Promise.all(Object.entries(DOCUMENT_SOURCES).map(async ([source, spec]) => {
+    const rows = (await pool.query(`${spec.list} ORDER BY e.created_at DESC LIMIT 500`, [project.id])).rows;
+    return rows.map((row) => ({
+      source,
+      id: row.id,
+      kind: row.kind,
+      name: row.original_name,
+      mimeType: row.mime_type,
+      size: row.size_bytes,
+      recordDate: row.record_date,
+      recordTitle: row.record_title || '',
+      uploadedAt: row.created_at
+    }));
+  }));
+  res.json(lists.flat().sort((a, b) => (a.uploadedAt < b.uploadedAt ? 1 : -1)));
+}));
+
+router.get('/projects/:id/files/:source/:fileId', asyncRoute(async (req, res) => {
+  const project = await sharedProject(req, req.params.id);
+  const spec = DOCUMENT_SOURCES[req.params.source];
+  const fileId = parseId(req.params.fileId);
+  if (!project || !spec || !fileId) return res.status(404).json({ message: 'That file was not found.' });
+  const found = await pool.query(spec.one, [project.id, fileId]);
+  if (!found.rowCount) return res.status(404).json({ message: 'That file was not found.' });
+  const record = found.rows[0];
+  const file = await readFile(spec.folder, record.stored_name);
+  if (!file) return res.status(404).json({ message: 'The stored file is missing from the server.' });
+  res.type(record.mime_type);
+  res.setHeader('Content-Disposition', contentDisposition(record.original_name, 'attachment'));
+  res.setHeader('Cache-Control', 'private, no-store');
+  file.once('error', () => (res.headersSent ? res.destroy() : res.status(500).json({ message: 'The stored file could not be read.' })));
+  return file.pipe(res);
+}));
+
+// ---- the project's discussion ----------------------------------------------------
+//
+// Comments on a shared project -- the project as a whole, one of its monthly
+// plans (the month's report) or one of its activities -- and the replies to
+// them. A partner reads, and may take part in, the conversations they or a
+// colleague from their own organisation opened (partnerSeesThreadSql) -- two
+// organisations sharing a project never read each other; the internal side
+// reads them all and answers through /api/project-discussions. What
+// a comment is about is checked against the project itself, so a partner
+// cannot attach a comment to a record of another project by naming its id.
+async function projectSubject(projectId, subjectType, subjectId) {
+  if (!PROJECT_SUBJECTS.includes(subjectType)) return { error: 400 };
+  if (subjectType === 'project') return { subjectId: null };
+  const id = String(subjectId || '').slice(0, 50);
+  if (!id) return { error: 404 };
+  const found = subjectType === 'plan'
+    ? await pool.query('SELECT 1 FROM monthly_plans WHERE id::text = $1 AND project_id = $2', [id, projectId])
+    : await pool.query('SELECT 1 FROM activities WHERE id = $1 AND project_id = $2', [id, projectId]);
+  return found.rowCount ? { subjectId: id } : { error: 404 };
+}
+
+// The people told that a partner wrote: the project's manager(s) and every
+// Director, once each, never the writer.
+async function tellProjectSide(client, req, project, threadId, body) {
+  const managers = await projectManagerIds(client, project.id);
+  const directors = await activeDirectorIds(client);
+  const params = { project: project.name, reason: body.slice(0, 140) };
+  await notifyMany(client, managers.filter((id) => !directors.includes(id)), {
+    kind: 'project_comment', params, link: '#/dashboard', actor: req.user
+  });
+  await notifyMany(client, directors, {
+    kind: 'partner_comment', params: { operation: project.sector, reason: params.reason }, link: '#/partners', actor: req.user
+  });
+  return threadId;
+}
+
+router.get('/projects/:id/discussion', asyncRoute(async (req, res) => {
+  const project = await sharedProject(req, req.params.id);
+  if (!project) return res.status(404).json({ message: 'Project not found.' });
+  const [threads, plans, activities] = await Promise.all([
+    loadThreads({ projectIds: [project.id], discussions: 'only', viewer: await viewerOf(pool, req.user.id), limit: 200 }),
+    pool.query("SELECT id, to_char(month, 'YYYY-MM') AS month FROM monthly_plans WHERE project_id = $1 ORDER BY month DESC LIMIT 60", [project.id]),
+    pool.query('SELECT id, activity FROM activities WHERE project_id = $1 ORDER BY created_at DESC LIMIT 200', [project.id])
+  ]);
+  res.json({
+    threads,
+    // What a new comment may be about, so the form offers only real choices.
+    subjects: {
+      plans: plans.rows.map((row) => ({ id: String(row.id), month: row.month })),
+      activities: activities.rows.map((row) => ({ id: row.id, title: row.activity }))
+    }
+  });
+}));
+
+router.post('/projects/:id/discussion', asyncRoute(async (req, res) => {
+  const project = await sharedProject(req, req.params.id);
+  if (!project) return res.status(404).json({ message: 'Project not found.' });
+  const subject = await projectSubject(project.id, req.body?.subjectType || 'project', req.body?.subjectId);
+  if (subject.error === 400) return res.status(400).json({ message: 'A comment is about the project, a month or an activity.' });
+  if (subject.error) return res.status(404).json({ message: 'That record is not part of this project.' });
+  const text = commentBody(req.body?.body);
+  if (text.error) return res.status(400).json({ message: text.error });
+  if (!(await underHourlyLimit(req.user.id))) return res.status(429).json({ message: TOO_MANY });
+
+  const client = await pool.connect();
+  let threadId;
+  try {
+    await client.query('BEGIN');
+    const inserted = await client.query(
+      `INSERT INTO partner_comments (partner_id, sector, project_id, subject_type, subject_id, author_id, author_name, author_role, body)
+       VALUES ($1, $2, $3, $4, $5, $1, $6, 'partner', $7) RETURNING id`,
+      [req.user.id, project.sector, project.id, req.body?.subjectType || 'project', subject.subjectId, req.user.name, text.body]
+    );
+    threadId = await tellProjectSide(client, req, project, inserted.rows[0].id, text.body);
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+  const [thread] = await loadThreads({ threadId, discussions: 'only' });
+  res.status(201).json(thread);
+}));
+
+router.post('/projects/:id/discussion/:threadId/replies', asyncRoute(async (req, res) => {
+  const project = await sharedProject(req, req.params.id);
+  const threadId = parseId(req.params.threadId);
+  if (!project || !threadId) return res.status(404).json({ message: 'Comment not found.' });
+  // Only a conversation this partner can read (partnerSeesThreadSql): one
+  // they opened, or one opened by their own organisation.
+  const values = [threadId, project.id];
+  const sees = partnerSeesThreadSql(values, await viewerOf(pool, req.user.id), 't', 'u');
+  const thread = await pool.query(
+    `SELECT t.id, t.partner_id, t.sector, t.subject_type, t.subject_id
+       FROM partner_comments t JOIN users u ON u.id = t.partner_id
+      WHERE t.id = $1 AND t.parent_id IS NULL AND t.project_id = $2 AND ${sees}`,
+    values
+  );
+  if (!thread.rowCount) return res.status(404).json({ message: 'Comment not found.' });
+  const text = commentBody(req.body?.body);
+  if (text.error) return res.status(400).json({ message: text.error });
+  if (!(await underHourlyLimit(req.user.id))) return res.status(429).json({ message: TOO_MANY });
+
+  const row = thread.rows[0];
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `INSERT INTO partner_comments (partner_id, sector, project_id, subject_type, subject_id, parent_id, author_id, author_name, author_role, body)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'partner', $9)`,
+      [row.partner_id, row.sector, project.id, row.subject_type, row.subject_id, row.id, req.user.id, req.user.name, text.body]
+    );
+    // A partner writing again re-opens a conversation marked answered: there
+    // is a new question in it.
+    await client.query('UPDATE partner_comments SET resolved_at = NULL, resolved_by = NULL, resolved_by_name = \'\' WHERE id = $1', [row.id]);
+    await tellProjectSide(client, req, project, row.id, text.body);
+    await client.query('COMMIT');
+  } catch (error) {
+    await safeRollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
+  const [updated] = await loadThreads({ threadId: row.id, discussions: 'only' });
+  res.status(201).json(updated);
 }));
 
 // Handed on to the application's error handler, which tells bad input apart
