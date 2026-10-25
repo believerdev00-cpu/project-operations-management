@@ -1494,3 +1494,10 @@ td .operation-checks { display: grid; gap: 0; }
 .boutique .decision-card-main strong { grid-column: 1 / -1; }
 .boutique .decision-card-meta { grid-column: 1 / -1; }
 .btq-shelf-after { grid-column: 1 / -1; margin-top: 4px; font-weight: 600; color: var(--navy); }
+.btq-big-actions { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin: 16px 0; }
+.btq-big-action { position: relative; display: grid; justify-items: center; gap: 8px; padding: 22px 12px; min-height: 130px; border: 2px solid var(--line); border-radius: 16px; background: var(--surface); font-size: 18px; font-weight: 700; color: var(--navy); cursor: pointer; box-shadow: var(--shadow); }
+.btq-big-action:hover { border-color: var(--blue); }
+.btq-big-picture { font-size: 44px; line-height: 1; }
+.btq-big-action .btq-badge { position: absolute; top: 10px; right: 10px; }
+.btq-today-figures { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+@media (max-width: 640px) { .btq-big-actions { grid-template-columns: repeat(2, 1fr); } .btq-big-action { min-height: 120px; font-size: 16px; } }
