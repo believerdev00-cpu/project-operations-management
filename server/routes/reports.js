@@ -51,7 +51,13 @@ const router = express.Router();
 //
 // null when neither exists -- the report then prints exactly as it did before,
 // which is the right failure for a decoration.
-const LOGO_CANDIDATES = ['../../public/logo-mark.png', '../../dist/logo-mark.png'];
+//
+// The full logo first -- the mark with "GISUMA PROJECT OPERATIONS MANAGEMENT"
+// under it -- because a report a partner downloads should say whose it is; the
+// square mark alone said nothing to somebody who had not seen it before, and
+// was stretched into the spreadsheet's wide box. The mark is the fallback.
+const LOGO_FILES = ['logo.png', 'logo-mark.png'];
+const LOGO_CANDIDATES = LOGO_FILES.flatMap((name) => [`../../public/${name}`, `../../dist/${name}`]);
 let resolvedLogo;
 function logoPath() {
   if (resolvedLogo !== undefined) return resolvedLogo;
@@ -69,7 +75,7 @@ function logoPath() {
   // Vercel's file tracing cannot follow, so without that entry the logo is
   // simply absent from the deployment and every printed report loses its mark.
   if (!resolvedLogo) {
-    for (const candidate of ['public/logo-mark.png', 'dist/logo-mark.png']) {
+    for (const candidate of LOGO_FILES.flatMap((name) => [`public/${name}`, `dist/${name}`])) {
       const file = resolve(process.cwd(), candidate);
       if (existsSync(file)) { resolvedLogo = file; break; }
     }
@@ -1016,6 +1022,22 @@ function dayInWords(value, language) {
     .format(new Date(year, month - 1, day));
 }
 
+// When a file was made, as its reader says it -- "26 October 2026, 01:05" --
+// and in the company's own time: the API runs on a UTC clock, so a report
+// printed at one in the morning in Kigali said 11 at night the day before.
+// toLocaleString() also printed "10/26/2026, 1:05:09 AM", a computer's format.
+const REPORT_TIMEZONE = process.env.REPORT_TIMEZONE || process.env.BOUTIQUE_TIMEZONE || 'Africa/Kigali';
+function momentInWords(value, language) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const options = { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
+  try {
+    return new Intl.DateTimeFormat(language, { ...options, timeZone: REPORT_TIMEZONE }).format(date);
+  } catch {
+    return new Intl.DateTimeFormat(language, options).format(date);
+  }
+}
+
 // 'YYYY-MM' as a month and a year: "September 2026", "septembre 2026".
 function monthInWords(value, language) {
   const [year, month] = String(value || '').split('-').map(Number);
@@ -1094,7 +1116,7 @@ async function buildWorkbook(report, language = 'en') {
   summary.addRow([t('export.datesCovered'),
     `${dayInWords(report.period.start, language)} ${t('report.to')} ${dayInWords(report.period.end, language)}`]);
   if (report.scope.projectName) summary.addRow([t('report.project'), report.scope.projectName]);
-  summary.addRow([t('export.printed'), new Date(report.generatedAt).toLocaleString(language)]);
+  summary.addRow([t('export.printed'), momentInWords(report.generatedAt, language)]);
 
   // The same mark as the PDF, floated over the first rows so it brands the
   // sheet without occupying a cell anybody reads. Added after those rows so it
@@ -1379,6 +1401,10 @@ function localPair(amount, rate) {
 // as a report; landscape reads as a spreadsheet somebody printed.
 //
 // Nothing here names a person (see SELECT_ROWS).
+// The logo's box on the PDF's first page: the full logo is 640 x 375, so this
+// keeps its shape and the name under the mark stays readable on paper.
+const LOGO_BOX = { width: 150, height: 88 };
+
 function writePdf(report, stream, language = 'en') {
   const { t, w } = wordsFor(language);
   const operation = (id) => operationLabel(id, language);
@@ -1447,8 +1473,8 @@ function writePdf(report, stream, language = 'en') {
   let headerX = left;
   const logo = logoPath();
   if (logo) {
-    doc.image(logo, left, headerTop, { fit: [84, 50] });
-    headerX = left + 96;
+    doc.image(logo, left, headerTop, { fit: [LOGO_BOX.width, LOGO_BOX.height] });
+    headerX = left + LOGO_BOX.width + 14;
   }
 
   // The title says what this is a report ON, not the word "Activity report"
@@ -1461,10 +1487,10 @@ function writePdf(report, stream, language = 'en') {
   doc.fontSize(8.5).text(
     `${day(report.period.start)} ${t('report.to')} ${day(report.period.end)}`
     + (report.scope.projectName ? `   ·   ${report.scope.projectName}` : '')
-    + `   ·   ${t('export.printed').toLowerCase()} ${new Date(report.generatedAt).toLocaleString(language)}`,
+    + `   ·   ${t('export.printed').toLowerCase()} ${momentInWords(report.generatedAt, language)}`,
     { width: width - (headerX - left) }
   );
-  if (logo) doc.y = Math.max(doc.y, headerTop + 50);
+  if (logo) doc.y = Math.max(doc.y, headerTop + LOGO_BOX.height);
   doc.x = left;
   doc.fillColor(INK);
 
