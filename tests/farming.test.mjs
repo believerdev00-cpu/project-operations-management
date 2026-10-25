@@ -87,6 +87,19 @@ try {
   check('the migration made the farm tables and seeded three animal types',
     (await pool.query("SELECT COUNT(*)::int AS n FROM farm_animal_types WHERE seed_key IN ('cows', 'chickens', 'goats')")).rows[0].n === 3);
 
+  const seeded = Object.fromEntries((await pool.query('SELECT seed_key, name, unit, kind, sellable FROM farm_measures WHERE seed_key IS NOT NULL')).rows.map((row) => [row.seed_key, row]));
+  check('cows are measured by milk AND meat (kg, sold)', seeded['cows.meat']?.kind === 'product' && seeded['cows.meat']?.unit === 'kg' && seeded['cows.meat']?.sellable === true, seeded['cows.meat']);
+  // Renamed by the migration unless somebody renamed them first or records
+  // already sit under them -- in which case the names are left as they are.
+  const familiar = { 'cows.cattle': ['Number of cows', 'cows'], 'chickens.birds': ['Number of chickens', 'chickens'], 'goats.goats': ['Number of goats', 'goats'], 'chickens.eggs': ['Eggs', 'eggs'] };
+  const withRecords = new Set((await pool.query(
+    `SELECT DISTINCT m.seed_key FROM farm_measures m WHERE m.seed_key IS NOT NULL AND (EXISTS (SELECT 1 FROM farm_production p WHERE p.measure_id = m.id)
+       OR EXISTS (SELECT 1 FROM farm_sales x WHERE x.measure_id = m.id) OR EXISTS (SELECT 1 FROM farm_herd_events e WHERE e.measure_id = m.id))`
+  )).rows.map((row) => row.seed_key));
+  check('the starting herds and eggs use familiar words (Number of cows, counted in cows; no "head", no "birds")',
+    Object.entries(familiar).every(([key, [name, unit]]) => withRecords.has(key) || (seeded[key]?.name === name && seeded[key]?.unit === unit)),
+    Object.keys(familiar).map((key) => seeded[key]));
+
   section('1. who reaches the farm');
   const refused = await get(miner.token, '/api/farming/overview');
   check('a Mining manager is refused', refused.status === 403 && refused.body.code === 'FARM_ACCESS', refused);
@@ -343,6 +356,12 @@ try {
     && sentRow.problem?.description === 'ZZTEST duck feed runs out soon' && sentRow.animals.find((entry) => entry.measureId === duckFlock.id)?.diedReason === 'ZZTEST taken by a hawk', sentRow);
   const otherList = await get(other.token, '/api/farming/daily-reports');
   check('another team member does not read it', otherList.status === 200 && !otherList.body.some((row) => row.id === sent.body.id), otherList.body.length);
+  const meatDay = await post(staff.token, '/api/farming/daily-report', { date: TODAY, animals: [{ measureId: duckFlock.id, slaughtered: 1 }] });
+  const slaughterRow = (await pool.query("SELECT kind, delta, reason FROM farm_herd_events WHERE measure_id = $1 AND kind = 'slaughter'", [duckFlock.id])).rows[0];
+  const flockNow = (await get(manager.token, '/api/farming/overview')).body;
+  check('an animal slaughtered for meat leaves the herd with no cause asked (10 − 1 = 9)', meatDay.status === 201 && slaughterRow?.delta === -1
+    && flockNow.herd.find((line) => line.measureId === duckFlock.id)?.head === 9, { status: meatDay.status, slaughterRow });
+  check('  and is not an animal that died without a cause', !flockNow.alerts.some((alert) => alert.kind === 'unexplained_loss' && alert.params.animalTypeId === ducks.body.id), flockNow.alerts);
   const geese = await post(manager.token, '/api/farming/animal-types', { name: 'ZZTEST Geese', measures: [{ name: 'ZZTEST Goose flock', kind: 'herd', unit: 'birds' }] });
   const gooseFlock = (await get(staff.token, '/api/farming/animal-types')).body.types.find((type) => type.id === geese.body.id).measures[0];
   const firstCount = await post(staff.token, '/api/farming/daily-report', { date: TODAY, animals: [{ measureId: gooseFlock.id, counted: 12, born: 2 }] });

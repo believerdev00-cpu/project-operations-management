@@ -258,6 +258,17 @@ const statements = [
   `CREATE INDEX IF NOT EXISTS farm_audit_created_idx ON farm_audit(created_at DESC)`
 ];
 
+// The starting names as first seeded, and the familiar words that replaced
+// them. A row is renamed only while it still has its first name and unit (so
+// nobody has changed it) and nothing is recorded under it (so no history is
+// relabelled). Idempotent: once renamed, the first condition no longer holds.
+const FAMILIAR_NAMES = [
+  { seedKey: 'cows.cattle', from: ['Cattle', 'head'], to: ['Number of cows', 'cows'] },
+  { seedKey: 'chickens.birds', from: ['Birds', 'birds'], to: ['Number of chickens', 'chickens'] },
+  { seedKey: 'goats.goats', from: ['Goats', 'head'], to: ['Number of goats', 'goats'] },
+  { seedKey: 'chickens.eggs', from: ['Eggs', 'pieces'], to: ['Eggs', 'eggs'] }
+];
+
 export async function migrateFarmingModule(pool) {
   for (const statement of statements) await pool.query(statement);
 
@@ -283,5 +294,17 @@ export async function migrateFarmingModule(pool) {
           measure.kind === 'product' && measure.dailyExpected === true, measureIndex, `${type.key}.${measure.key}`]
       );
     }
+  }
+
+  for (const rename of FAMILIAR_NAMES) {
+    await pool.query(
+      `UPDATE farm_measures m SET name = $4, name_key = $5, unit = $6, updated_at = NOW()
+        WHERE m.seed_key = $1 AND m.name = $2 AND m.unit = $3
+          AND NOT EXISTS (SELECT 1 FROM farm_production p WHERE p.measure_id = m.id)
+          AND NOT EXISTS (SELECT 1 FROM farm_sales s WHERE s.measure_id = m.id)
+          AND NOT EXISTS (SELECT 1 FROM farm_herd_events e WHERE e.measure_id = m.id)
+          AND NOT EXISTS (SELECT 1 FROM farm_measures o WHERE o.animal_type_id = m.animal_type_id AND o.id <> m.id AND o.name_key = $5)`,
+      [rename.seedKey, rename.from[0], rename.from[1], rename.to[0], normaliseName(rename.to[0]), rename.to[1]]
+    );
   }
 }

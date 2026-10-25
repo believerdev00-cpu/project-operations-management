@@ -138,7 +138,10 @@ export function mapMeasure(row) {
     perishable: row.perishable,
     dailyExpected: row.daily_expected,
     active: row.active,
-    sortOrder: row.sort_order
+    sortOrder: row.sort_order,
+    // The starting measures' key ('cows.milk'), so the screen can show their
+    // name in the reader's language until somebody renames them.
+    seedKey: row.seed_key || null
   };
 }
 

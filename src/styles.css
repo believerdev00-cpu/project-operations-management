@@ -1450,6 +1450,9 @@ td .operation-checks { display: grid; gap: 0; }
 .farm-cost-row { border-bottom: 1px dashed var(--line); padding-bottom: 10px; margin-bottom: 10px; }
 .farm-sent h2 { font-size: 24px; }
 .farm-cta .big-action { min-height: 52px; font-size: 18px; }
+.farm-cta > span { font-size: 17px; font-weight: 600; }
+.farm-cta-done { border-left: 5px solid var(--green); }
+.farm-cta:not(.farm-cta-done) { border-left: 5px solid #d4a017; }
 .farm-more { margin-top: 18px; }
 .farm-more > summary { cursor: pointer; font-weight: 600; padding: 12px 0; color: var(--blue); }
 .farm-received { display: grid; gap: 12px; }
@@ -1459,3 +1462,8 @@ td .operation-checks { display: grid; gap: 0; }
   .farm-steppers { grid-template-columns: 1fr; }
   .farm-animal-card { padding: 12px; }
 }
+.farm-herd-changes { margin-top: 8px; }
+.farm-herd-changes > summary { cursor: pointer; font-weight: 600; font-size: 16px; padding: 12px 14px; border-radius: 10px; background: var(--blue-soft); color: var(--navy); list-style: none; }
+.farm-herd-changes > summary::before { content: '▸ '; }
+.farm-herd-changes[open] > summary::before { content: '▾ '; }
+.farm-herd-changes[open] > summary { margin-bottom: 10px; }

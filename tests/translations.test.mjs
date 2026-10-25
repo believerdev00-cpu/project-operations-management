@@ -142,6 +142,10 @@ const FAMILIES = {
   'farm.periodName.': farming.FARM_PERIODS,
   'farm.threshold.': Object.keys(farming.THRESHOLD_LIMITS),
   'farm.mode.': ['production', 'herd', 'sale'],
+  // The starting animals and products shown in the reader's language
+  // (localCatalogue in src/Farming.jsx): every seeded key needs its words.
+  'farm.seed.': farming.DEFAULT_ANIMAL_TYPES.flatMap((type) => [type.key, ...type.measures.map((measure) => `${type.key}_${measure.key}`)]),
+  'farm.seedUnit.': farming.DEFAULT_ANIMAL_TYPES.flatMap((type) => type.measures.map((measure) => `${type.key}_${measure.key}`)),
   'farm.noUnitCost.': ['NO_PRODUCTION', 'SEVERAL_PRODUCTS', 'NO_DIRECT_COSTS'],
   'farm.alert.': ['production_decline', 'no_recent_record', 'unexplained_loss', 'expense_rise', 'budget_near', 'budget_over', 'critical_task_overdue'],
   'farm.alertWhy.': ['production_decline', 'no_recent_record', 'unexplained_loss', 'expense_rise', 'budget_near', 'budget_over', 'critical_task_overdue'],

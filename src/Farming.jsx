@@ -21,7 +21,7 @@ import { fill, useI18n } from './i18n.js';
 import { useBusy, useDialog } from './ui.jsx';
 import { formatDate, formatUsd, todayLocal } from './format.js';
 import {
-  FARM_CURRENCIES, addDays, FARM_ERROR_CODES, FARM_EXPENSE_CATEGORIES, FARM_PERIODS, HERD_EVENT_KINDS, ISSUE_KINDS, SHARED_SCOPE,
+  DEFAULT_ANIMAL_TYPES, FARM_CURRENCIES, addDays, FARM_ERROR_CODES, FARM_EXPENSE_CATEGORIES, FARM_PERIODS, HERD_EVENT_KINDS, ISSUE_KINDS, SHARED_SCOPE,
   THRESHOLD_LIMITS, selectableTypes, validateExpense, validateHerdEvent, validateIssue, validateProduction, validateSale
 } from '../shared/farming.js';
 
@@ -74,6 +74,25 @@ function useDraft(key, initial) {
   return [value, setValue, clear];
 }
 
+// The starting animals and products in the reader's language: "Inka",
+// "Amata", "litiro" rather than "Cows", "Milk", "litres". Only while a row
+// still has its starting name or unit -- a name the Farming Manager typed is
+// theirs and is shown as typed. Done once, on the catalogue every tab reads,
+// so no page can show one language beside another. (Set-up reads the stored
+// names, since that is where they are edited.)
+const SEEDED = new Map(DEFAULT_ANIMAL_TYPES.flatMap((type) => [
+  [type.key, { name: type.name }],
+  ...type.measures.map((measure) => [`${type.key}.${measure.key}`, { name: measure.name, unit: measure.unit }])
+]));
+function localCatalogue(types, measures, t) {
+  const seedName = (row) => (row.seedKey && SEEDED.get(row.seedKey)?.name === row.name ? t(`farm.seed.${row.seedKey.replace('.', '_')}`) : row.name);
+  const seedUnit = (row) => (row.seedKey && SEEDED.get(row.seedKey)?.unit === row.unit ? t(`farm.seedUnit.${row.seedKey.replace('.', '_')}`) : row.unit);
+  return {
+    types: types.map((type) => ({ ...type, name: seedName(type) })),
+    measures: measures.map((measure) => ({ ...measure, name: seedName(measure), unit: seedUnit(measure) }))
+  };
+}
+
 function useLoad(fetchJson, path, onError) {
   const [data, setData] = useState(null);
   const latest = useRef(0);
@@ -119,7 +138,7 @@ export default function Farming({ user, fetchJson, onMessage, onError, onChanged
 
   if (!overview) return <div className="loading-state"><span className="spinner" />{t('app.loading')}</div>;
   const can = { manage: role === 'director' || role === 'manager', record: role !== 'reader', money: role !== 'staff', director: role === 'director', role };
-  const catalogue = { types: overview.types, measures: overview.measures };
+  const catalogue = localCatalogue(overview.types, overview.measures, t);
   const common = { fetchJson, onMessage, onError, changed, can, catalogue, overview, user };
   const pending = overview.pendingExpenses?.count || 0;
 
@@ -152,6 +171,14 @@ export default function Farming({ user, fetchJson, onMessage, onError, onChanged
 // today's work and today's figures, then the period's results.
 function TodayTab({ overview, can, catalogue, range, setRange, go, fetchJson, onError }) {
   const { t, language } = useI18n();
+  const [reports, setReports] = useState(null);
+  useEffect(() => {
+    let live = true;
+    fetchJson('/api/farming/daily-reports?days=7').then((data) => { if (live) setReports(data); }).catch((error) => onError(error.message));
+    return () => { live = false; };
+  }, [fetchJson, onError, overview]);
+  // Has today's report gone? The newest one for today, if any.
+  const sentToday = (reports || []).find((report) => report.date === overview.today);
   const typeName = (id) => catalogue.types.find((type) => type.id === id)?.name || '';
   const measureOf = (id) => catalogue.measures.find((measure) => measure.id === id) || {};
   const urgentIssues = overview.issues.filter((issue) => issue.urgent);
@@ -159,11 +186,13 @@ function TodayTab({ overview, can, catalogue, range, setRange, go, fetchJson, on
   const farm = summary.farm;
 
   return <>
-    {can.record && <section className="panel farm-callout farm-cta">
-      <span>{t('farm.daily.ctaText')}</span>
-      <button className="primary-btn big-action" type="button" onClick={() => go('record')}>📝 {t('farm.daily.cta')}</button>
+    {can.record && <section className={`panel farm-callout farm-cta${sentToday ? ' farm-cta-done' : ''}`}>
+      <span>{sentToday
+        ? `✅ ${fill(t('farm.daily.sentToday'), { time: new Date(sentToday.at).toLocaleTimeString(language, { hour: '2-digit', minute: '2-digit' }), name: sentToday.byName })}`
+        : `⏳ ${t('farm.daily.notSentToday')}`}</span>
+      <button className={`${sentToday ? 'secondary-btn' : 'primary-btn'} big-action`} type="button" onClick={() => go('record')}>📝 {t(sentToday ? 'farm.daily.ctaAgain' : 'farm.daily.cta')}</button>
     </section>}
-    <ReportsReceived fetchJson={fetchJson} catalogue={catalogue} onError={onError} reloadKey={overview} />
+    <ReportsReceived rows={reports} catalogue={catalogue} />
     {can.money && overview.alerts?.length > 0 && <Panel title={t('farm.alerts')} subtitle={t('farm.alertsHint')}>
       <ul className="farm-alerts">
         {overview.alerts.map((alert) => <li key={alert.key} className={alert.severity === 'urgent' ? 'farm-alert urgent' : 'farm-alert'}>
@@ -300,6 +329,7 @@ function herdText(herd, unit, t) {
     herd.purchases && fill(t('farm.herdBought'), { count: herd.purchases }),
     herd.deaths && fill(t('farm.herdDied'), { count: herd.deaths }),
     herd.sales && fill(t('farm.herdSold'), { count: herd.sales }),
+    herd.slaughtered && fill(t('farm.herdSlaughtered'), { count: herd.slaughtered }),
     herd.otherChange && fill(t('farm.herdOther'), { count: herd.otherChange > 0 ? `+${herd.otherChange}` : `−${Math.abs(herd.otherChange)}` })
   ].filter(Boolean);
   return parts.length ? `${parts.join(', ')}${unit ? ` (${unit})` : ''}` : t('farm.herdNoChange');
@@ -359,7 +389,7 @@ const PICTURES = [
   [/cow|cattle|inka|vache|ng.ombe/i, '🐄'], [/chick|hen|bird|inkoko|poule|kuku/i, '🐔'], [/goat|ihene|chèvre|mbuzi/i, '🐐'],
   [/sheep|intama|mouton|kondoo/i, '🐑'], [/pig|ingurube|porc|nguruwe/i, '🐖'], [/rabbit|urukwavu|inkwavu|lapin|sungura/i, '🐇'],
   [/turkey|dinde|bata mzinga/i, '🦃'], [/duck|canard|bata/i, '🦆'], [/fish|ifi|poisson|samaki/i, '🐟'], [/bee|inzuki|abeille|nyuki/i, '🐝'],
-  [/milk|amata|lait|maziwa/i, '🥛'], [/egg|amagi|œuf|oeuf|mayai/i, '🥚'], [/honey|ubuki|miel|asali/i, '🍯']
+  [/meat|inyama|viande|nyama/i, '🥩'], [/milk|amata|lait|maziwa/i, '🥛'], [/egg|amagi|œuf|oeuf|mayai/i, '🥚'], [/honey|ubuki|miel|asali/i, '🍯']
 ];
 function picture(...names) {
   for (const name of names) {
@@ -410,7 +440,9 @@ function DailyReport({ fetchJson, onMessage, onError, changed, catalogue, overvi
   const [problem, setProblem] = useState(null);
   const [sent, setSent] = useState(null);
   const types = selectableTypes(catalogue.types)
-    .map((type) => ({ ...type, measures: catalogue.measures.filter((measure) => measure.animalTypeId === type.id && measure.active) }))
+    // What the animals give first (milk, meat, eggs), then the animals themselves.
+    .map((type) => ({ ...type, measures: catalogue.measures.filter((measure) => measure.animalTypeId === type.id && measure.active)
+      .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'product' ? -1 : 1)) }))
     .filter((type) => type.measures.length);
   const headOf = (measureId) => overview.herd.find((line) => line.measureId === measureId)?.head ?? null;
   const line = (measureId) => form.lines[measureId] || {};
@@ -436,6 +468,7 @@ function DailyReport({ fetchJson, onMessage, onError, changed, catalogue, overvi
           if (isPositive(entry.born)) parts.push(fill(t('farm.daily.sayBorn'), { count: entry.born }));
           if (isPositive(entry.bought)) parts.push(fill(t('farm.daily.sayBought'), { count: entry.bought }));
           if (isPositive(entry.died)) parts.push(fill(t('farm.daily.sayDied'), { count: entry.died }));
+          if (isPositive(entry.slaughtered)) parts.push(fill(t('farm.daily.saySlaughtered'), { count: entry.slaughtered }));
           if (isPositive(entry.sold)) parts.push(fill(t('farm.daily.saySoldAnimals'), { count: entry.sold, money: amountText(entry.soldAmount, entry.currency || 'RWF') }));
         }
         if (parts.length) lines.push(`${picture(type.seedKey, type.name)} ${type.name} · ${measure.name}: ${parts.join(', ')}`);
@@ -544,16 +577,20 @@ function DailyReport({ fetchJson, onMessage, onError, changed, catalogue, overvi
         }
         const head = headOf(measure.id);
         const change = ['born', 'bought'].reduce((sum, field) => sum + (isPositive(entry[field]) ? Number(entry[field]) : 0), 0)
-          - ['died', 'sold'].reduce((sum, field) => sum + (isPositive(entry[field]) ? Number(entry[field]) : 0), 0);
+          - ['died', 'slaughtered', 'sold'].reduce((sum, field) => sum + (isPositive(entry[field]) ? Number(entry[field]) : 0), 0);
         return <div key={measure.id} className="farm-measure">
           <h4>{measureName(measure)} <small>({measure.unit})</small></h4>
           <p className="farm-headcount">{head === null
             ? t('farm.daily.notCounted')
             : fill(t(change ? 'farm.daily.haveAfter' : 'farm.daily.have'), { count: head, after: head + change, unit: measure.unit })}</p>
+          {/* Never counted: the first count comes from whoever is in front of them. */}
+          {head === null && <div className="farm-steppers"><Stepper whole id={`daily-${measure.id}-counted`} label={`🔢 ${fill(t('farm.daily.countNow'), { unit: measure.unit })}`} value={entry.counted}
+            onChange={(value) => set({ counted: value })} invalid={wrong({ measureId: measure.id, field: 'counted' })} /></div>}
+          {/* Most days nothing is born, bought, dies or is sold: folded under one
+              question, and open by itself once anything in it is filled in or wrong. */}
+          <details className="farm-herd-changes" open={['born', 'bought', 'died', 'slaughtered', 'sold'].some((field) => isPositive(entry[field])) || problem?.where?.measureId === measure.id}>
+            <summary>{fill(t('farm.daily.herdChanged'), { name: measure.name })}</summary>
           <div className="farm-steppers">
-            {/* Never counted: the first count comes from whoever is in front of them. */}
-            {head === null && <Stepper whole id={`daily-${measure.id}-counted`} label={`🔢 ${fill(t('farm.daily.countNow'), { unit: measure.unit })}`} value={entry.counted}
-              onChange={(value) => set({ counted: value })} invalid={wrong({ measureId: measure.id, field: 'counted' })} />}
             <Stepper whole id={`daily-${measure.id}-born`} label={`🍼 ${t('farm.daily.born')}`} value={entry.born} onChange={(value) => set({ born: value })} invalid={wrong({ measureId: measure.id, field: 'born' })} />
             <Stepper whole id={`daily-${measure.id}-bought`} label={`🛒 ${t('farm.daily.bought')}`} value={entry.bought} onChange={(value) => set({ bought: value })} invalid={wrong({ measureId: measure.id, field: 'bought' })} />
             <Stepper whole id={`daily-${measure.id}-died`} label={`✝️ ${t('farm.daily.died')}`} value={entry.died} onChange={(value) => set({ died: value })} invalid={wrong({ measureId: measure.id, field: 'died' })} />
@@ -561,9 +598,11 @@ function DailyReport({ fetchJson, onMessage, onError, changed, catalogue, overvi
               <span>{t('farm.daily.whatHappened')}</span>
               <textarea rows={2} value={entry.diedReason || ''} onChange={(event) => set({ diedReason: event.target.value })} placeholder={t('farm.daily.whatHappenedHint')} />
             </label>}
+            <Stepper whole id={`daily-${measure.id}-slaughtered`} label={`🥩 ${t('farm.daily.slaughtered')}`} value={entry.slaughtered} onChange={(value) => set({ slaughtered: value })} invalid={wrong({ measureId: measure.id, field: 'slaughtered' })} />
             <Stepper whole id={`daily-${measure.id}-sold`} label={`🤝 ${t('farm.daily.soldAnimals')}`} value={entry.sold} onChange={(value) => set({ sold: value })} invalid={wrong({ measureId: measure.id, field: 'sold' })} />
             {isPositive(entry.sold) && <MoneyBox id={`daily-${measure.id}-money`} line={entry} update={set} t={t} invalid={wrong({ measureId: measure.id, field: 'sold' })} />}
           </div>
+          </details>
         </div>;
       })}
     </div>)}
@@ -625,14 +664,8 @@ function DailyReport({ fetchJson, onMessage, onError, changed, catalogue, overvi
 
 // The reports sent lately: who, when, and what they said. The Director's and
 // the manager's way of seeing the day's progress at a glance.
-function ReportsReceived({ fetchJson, catalogue, onError, reloadKey }) {
+function ReportsReceived({ rows, catalogue }) {
   const { t, language } = useI18n();
-  const [rows, setRows] = useState(null);
-  useEffect(() => {
-    let live = true;
-    fetchJson('/api/farming/daily-reports?days=7').then((data) => { if (live) setRows(data); }).catch((error) => onError(error.message));
-    return () => { live = false; };
-  }, [fetchJson, onError, reloadKey]);
   if (!rows) return null;
   const measureOf = (id) => catalogue.measures.find((measure) => measure.id === id) || {};
   const typeOf = (id) => catalogue.types.find((type) => type.id === id) || {};
@@ -649,6 +682,7 @@ function ReportsReceived({ fetchJson, catalogue, onError, reloadKey }) {
     if (entry.born) parts.push(fill(t('farm.daily.sayBorn'), { count: entry.born }));
     if (entry.bought) parts.push(fill(t('farm.daily.sayBought'), { count: entry.bought }));
     if (entry.died) parts.push(`${fill(t('farm.daily.sayDied'), { count: entry.died })}${entry.diedReason ? ` (${entry.diedReason})` : ''}`);
+    if (entry.slaughtered) parts.push(fill(t('farm.daily.saySlaughtered'), { count: entry.slaughtered }));
     return `${picture(type.seedKey, type.name)} ${type.name || ''} · ${measure.name || ''}: ${parts.join(', ')}`;
   };
   return <Panel title={`📥 ${t('farm.daily.received')}`} subtitle={t('farm.daily.receivedHint')}>

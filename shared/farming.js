@@ -44,7 +44,11 @@ export const FARM_CURRENCIES = ['RWF', 'USD', 'CDF'];
 export const MEASURE_KINDS = ['product', 'herd'];
 
 // The ways a herd changes, and which way each one moves the head count.
-export const HERD_EVENT_KINDS = ['birth', 'purchase', 'death', 'sale', 'transfer_in', 'transfer_out', 'count'];
+// 'slaughter' is an animal killed for its meat: it leaves the herd like a
+// death, but it is the farm's own decision, not a loss -- it needs no cause and
+// never raises the "died with no cause" alert. The meat itself is a product
+// (Cows · Meat, in kg), produced and sold like milk.
+export const HERD_EVENT_KINDS = ['birth', 'purchase', 'death', 'sale', 'transfer_in', 'transfer_out', 'count', 'slaughter'];
 export const HERD_ADDING = ['birth', 'purchase', 'transfer_in'];
 // A death is the event an alert must never miss: it is an animal-welfare
 // question first and a figure second.
@@ -95,28 +99,36 @@ const LARGEST_AMOUNT = 1e15;
 // exactly the same functions. The measures are what the spec lists as
 // examples; each is a row the Farming Manager can switch off, because not
 // every cow gives milk and not every hen lays.
+// The words a farm hand uses: "Number of cows" counted in cows, not "Cattle"
+// in "head"; "Number of chickens", not "Birds". The screen shows these
+// starting names in the reader's language (farm.seed.* / farm.seedUnit.*)
+// for as long as nobody has renamed them; a name the Farming Manager typed is
+// shown as typed.
 export const DEFAULT_ANIMAL_TYPES = [
   {
     key: 'cows',
     name: 'Cows',
     measures: [
       { key: 'milk', name: 'Milk', kind: 'product', unit: 'litres', sellable: true, perishable: true, dailyExpected: true },
-      { key: 'cattle', name: 'Cattle', kind: 'herd', unit: 'head' }
+      // Cows are sold for meat too: the meat is weighed and sold like milk,
+      // and the animal leaves the herd as 'slaughter'.
+      { key: 'meat', name: 'Meat', kind: 'product', unit: 'kg', sellable: true, perishable: true },
+      { key: 'cattle', name: 'Number of cows', kind: 'herd', unit: 'cows' }
     ]
   },
   {
     key: 'chickens',
     name: 'Chickens',
     measures: [
-      { key: 'eggs', name: 'Eggs', kind: 'product', unit: 'pieces', sellable: true, perishable: true, dailyExpected: true },
-      { key: 'birds', name: 'Birds', kind: 'herd', unit: 'birds' }
+      { key: 'eggs', name: 'Eggs', kind: 'product', unit: 'eggs', sellable: true, perishable: true, dailyExpected: true },
+      { key: 'birds', name: 'Number of chickens', kind: 'herd', unit: 'chickens' }
     ]
   },
   {
     key: 'goats',
     name: 'Goats',
     measures: [
-      { key: 'goats', name: 'Goats', kind: 'herd', unit: 'head' }
+      { key: 'goats', name: 'Number of goats', kind: 'herd', unit: 'goats' }
     ]
   }
 ];
@@ -644,12 +656,13 @@ export function farmSummary({ types = [], measures = [], production = [], herdEv
 
   for (const row of herdEvents.filter(live)) {
     const target = block(row.animalTypeId);
-    const herd = target.herd.get(row.measureId) || { measureId: row.measureId, births: 0, purchases: 0, deaths: 0, sales: 0, otherChange: 0, netChange: 0 };
+    const herd = target.herd.get(row.measureId) || { measureId: row.measureId, births: 0, purchases: 0, deaths: 0, sales: 0, slaughtered: 0, otherChange: 0, netChange: 0 };
     const delta = Number(row.delta) || 0;
     if (row.kind === 'birth') herd.births += delta;
     else if (row.kind === 'purchase') herd.purchases += delta;
     else if (row.kind === 'death') herd.deaths += -delta;
     else if (row.kind === 'sale') herd.sales += -delta;
+    else if (row.kind === 'slaughter') herd.slaughtered += -delta;
     else herd.otherChange += delta;
     herd.netChange += delta;
     target.herd.set(row.measureId, herd);

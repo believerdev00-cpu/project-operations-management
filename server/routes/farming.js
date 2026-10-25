@@ -1052,7 +1052,7 @@ router.post('/daily-report', asyncRoute(async (req, res) => {
           made.herd.push(event.id);
           record.counted = event.count;
         }
-        for (const [field, kind] of [['born', 'birth'], ['bought', 'purchase'], ['died', 'death']]) {
+        for (const [field, kind] of [['born', 'birth'], ['bought', 'purchase'], ['died', 'death'], ['slaughtered', 'slaughter']]) {
           if (!positive(line[field])) continue;
           const event = await step(at(field), () => recordHerd(client, req, {
             measureId: measure.id, date, kind, count: Number(line[field]), reason: field === 'died' ? line.diedReason : line.notes

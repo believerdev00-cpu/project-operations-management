@@ -183,6 +183,23 @@ check('the herd cannot go below nothing, and animals are whole', () => {
   assert.ok(event({ date: TODAY, kind: 'sale', count: 11 }).errors.includes('HERD_BELOW_ZERO'));
   assert.ok(event({ date: TODAY, kind: 'birth', count: 1.5 }).errors.includes('COUNT_INVALID'));
 });
+check('an animal slaughtered for meat leaves the herd, needs no cause, and is not a death', () => {
+  const slaughtered = event({ date: TODAY, kind: 'slaughter', count: 2 });
+  assert.deepEqual(slaughtered.errors, []);
+  assert.equal(slaughtered.value.after, 8);
+  assert.ok(event({ date: TODAY, kind: 'slaughter', count: 11 }).errors.includes('HERD_BELOW_ZERO'));
+  const alerts = farmAlerts({ today: TODAY, herdEvents: [{ id: 9, date: TODAY, animalTypeId: 3, kind: 'slaughter', delta: -2, reason: '' }] });
+  assert.equal(alerts.length, 0, 'a slaughter is never an unexplained loss');
+  const summary = farmSummary({ herdEvents: [{ date: TODAY, animalTypeId: 3, measureId: 13, kind: 'slaughter', delta: -2 }] });
+  assert.equal(summary.animalTypes[0].herd[0].slaughtered, 2);
+  assert.equal(summary.animalTypes[0].herd[0].deaths, 0);
+});
+check('the starting names are the familiar ones: cows sell meat, and nothing is counted in "head" or "birds"', () => {
+  const cowsSeed = DEFAULT_ANIMAL_TYPES.find((type) => type.key === 'cows');
+  assert.ok(cowsSeed.measures.some((measure) => measure.key === 'meat' && measure.kind === 'product' && measure.unit === 'kg' && measure.sellable));
+  const words = DEFAULT_ANIMAL_TYPES.flatMap((type) => type.measures.flatMap((measure) => [measure.name, measure.unit]));
+  for (const unfamiliar of ['head', 'birds', 'Birds', 'Cattle', 'pieces']) assert.ok(!words.includes(unfamiliar), unfamiliar);
+});
 check('a death must say what happened', () => {
   assert.ok(event({ date: TODAY, kind: 'death', count: 1 }).errors.includes('REASON_REQUIRED'));
   assert.deepEqual(event({ date: TODAY, kind: 'death', count: 1, reason: 'Illness, vet called' }).errors, []);
@@ -285,7 +302,7 @@ check('days nobody recorded are counted as missing, not as zero', () => {
   assert.equal(block(1).products[0].daysWithoutRecord, 29);
 });
 check('herd changes are summed by kind', () => {
-  assert.deepEqual(block(3).herd[0], { measureId: 13, births: 2, purchases: 0, deaths: 1, sales: 0, otherChange: 0, netChange: 1 });
+  assert.deepEqual(block(3).herd[0], { measureId: 13, births: 2, purchases: 0, deaths: 1, sales: 0, slaughtered: 0, otherChange: 0, netChange: 1 });
 });
 check('revenue comes from sales, not from production', () => {
   assert.equal(block(1).revenueUsd, 24.6);
