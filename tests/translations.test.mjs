@@ -96,7 +96,8 @@ const FAMILIES = {
     'report_returned', 'work_submitted', 'work_to_check', 'work_approved', 'work_returned', 'partner_comment',
     'team_added', 'partner_shared', 'work_handed_over', 'boutique_approval_requested', 'boutique_approval_decided',
     'boutique_report_submitted', 'boutique_issue_raised', 'boutique_submission_decided', 'boutique_low_stock',
-    'project_comment', 'partner_reply', 'farm_daily_report'],
+    'project_comment', 'partner_reply', 'farm_daily_report',
+    'day_recorded', 'day_corrected', 'day_removed', 'work_assigned', 'approval_requested', 'approval_decided', 'budget_change_requested', 'budget_change_decided'],
   // A project's discussion (src/Discussion.jsx): who wrote, and the filters.
   'discussion.role.': ['partner', 'manager', 'super-admin'],
   'discussion.filter.': ['open', 'resolved', 'all'],

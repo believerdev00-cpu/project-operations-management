@@ -12,6 +12,14 @@ import { MOVEMENT_STATUSES } from '../db/movementSchema.js';
 import { TRIPS_OPERATION, operationsOf, runsTrips, worksIn } from '../../shared/businessOperations.js';
 import { canApprove, decisionOpen, pendingForMeSql, resolveDirector, APPROVER_ROLE_LABELS } from '../lib/approvals.js';
 import { CURRENCIES, convertAmount, getCurrentRate, round2 } from '../lib/rates.js';
+import { notify } from '../lib/notifications.js';
+
+// One in-app notice to the person on the other side of a trip -- the approver
+// asked, the requester answered -- never to the person who acted.
+async function tellPerson(client, userId, actor, event) {
+  if (!userId || Number(userId) === Number(actor.id)) return;
+  await notify(client, { ...event, userId, actor });
+}
 
 const router = express.Router();
 
@@ -706,6 +714,11 @@ router.post('/', asyncRoute(async (req, res) => {
       entries.push({ action: 'Approval requested', field: 'approvalRequiredFrom', oldValue: null, newValue: String(approvalFrom) });
     }
     await logHistory(client, id, req.user, entries);
+    if (approvalRequired && status === 'Pending Approval') {
+      await tellPerson(client, approvalFrom, req.user, {
+        kind: 'approval_requested', params: { activity: String(payload.purpose || '').slice(0, 200) }, link: `#/movements/${id}`
+      });
+    }
     await client.query('COMMIT');
     movementId = result.rows[0].id;
   } catch (error) {
@@ -922,6 +935,11 @@ router.patch('/:id/approval', asyncRoute(async (req, res) => {
       entries.push({ action: 'Note', field: 'reason', oldValue: null, newValue: approved ? adminNote : rejectionReason });
     }
     await logHistory(client, existing.id, req.user, entries);
+    await tellPerson(client, existing.created_by, req.user, {
+      kind: 'approval_decided',
+      params: { activity: existing.purpose, outcome: approved ? 'approved' : 'refused', reason: approved ? adminNote : rejectionReason },
+      link: `#/movements/${existing.id}`
+    });
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);

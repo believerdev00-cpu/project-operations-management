@@ -406,6 +406,15 @@ async function insertObjectives(client, planId, objectives, startOrder = 0) {
   return created;
 }
 
+// The objective a day counted towards, by its title, for a notification.
+async function objectiveTitle(db, objectiveId) {
+  // A day from a month written before objectives existed counts towards no
+  // named objective: a dash, rather than empty quotes in the sentence.
+  if (!objectiveId) return '—';
+  const found = await db.query('SELECT title FROM plan_objectives WHERE id = $1', [objectiveId]);
+  return found.rows[0]?.title || '—';
+}
+
 async function logPlanHistory(client, planId, user, entries) {
   for (const entry of entries) {
     await client.query(
@@ -2125,6 +2134,14 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
       note: reportDate + (cost ? ' · ' + formatUsd(cost) : '') + (workStatus ? ' · ' + workStatus : '')
         + (notes ? ' · ' + notes.slice(0, 200) : '')
     }]);
+    // The Director follows the month day by day: each day a manager records
+    // reaches them as it lands, with what it counted towards -- in the same
+    // transaction, so the notice never points at a day that failed to save.
+    await notifyDirectors(client, {
+      kind: 'day_recorded',
+      params: { operation: plan.sector, month: monthKey(plan.month), title: await objectiveTitle(client, objectiveId), count: quantityDone, detail: workStatus },
+      link: `#/monthly/${plan.id}`, planId: plan.id, actor: req.user
+    });
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -2346,6 +2363,11 @@ router.put('/:id/reports/:reportId', asyncRoute(async (req, res) => {
       note: toDateOnly(day.report_date) + (cost !== oldCost ? ` · ${formatUsd(oldCost)} → ${formatUsd(cost)}` : '')
         + (workStatus !== oldStatus ? ` · ${oldStatus || '—'} → ${workStatus || '—'}` : '')
     }]);
+    await notifyDirectors(client, {
+      kind: 'day_corrected',
+      params: { operation: plan.sector, month: monthKey(plan.month), title: await objectiveTitle(client, day.objective_id), count: quantityDone, detail: toDateOnly(day.report_date) },
+      link: `#/monthly/${plan.id}`, planId: plan.id, actor: req.user
+    });
 
     // A correction can finish a month or unfinish it. Same test as recording a
     // day, read after the change so it sees the month as it now stands.
@@ -2404,7 +2426,7 @@ router.delete('/:id/reports/:reportId', asyncRoute(async (req, res) => {
     );
     files = found.rows;
     const removed = await client.query(
-      'DELETE FROM plan_daily_reports WHERE id = $1 AND plan_id = $2 RETURNING report_date, quantity_done, cost',
+      'DELETE FROM plan_daily_reports WHERE id = $1 AND plan_id = $2 RETURNING report_date, quantity_done, cost, submitted_by',
       [reportId, plan.id]
     );
     if (!removed.rowCount) {
@@ -2417,6 +2439,13 @@ router.delete('/:id/reports/:reportId', asyncRoute(async (req, res) => {
       oldValue: round2(Number(gone.quantity_done)), newValue: null,
       note: toDateOnly(gone.report_date) + ' · ' + optionalText(req.body?.reason, 500)
     }]);
+    if (gone.submitted_by && Number(gone.submitted_by) !== Number(req.user.id)) {
+      await notify(client, {
+        userId: gone.submitted_by, kind: 'day_removed',
+        params: { operation: plan.sector, month: monthKey(plan.month), detail: toDateOnly(gone.report_date), reason: optionalText(req.body?.reason, 500) },
+        link: `#/monthly/${plan.id}`, planId: plan.id, actor: req.user
+      });
+    }
     // A month is Completed because every countable objective was met. Taking a
     // day away can unmake that, and the status used to stay Completed over a
     // target no longer reached. Same test as the report route, read after the
@@ -2560,6 +2589,13 @@ router.post('/:id/activities', asyncRoute(async (req, res) => {
     await logPlanHistory(client, plan.id, req.user, [
       { action: 'Activity added', field: 'activity', oldValue: null, newValue: payload.activity.trim().slice(0, 200), note: `${budget}` }
     ]);
+    if (plan.manager_id && Number(plan.manager_id) !== Number(req.user.id)) {
+      await notify(client, {
+        userId: plan.manager_id, kind: 'work_assigned',
+        params: { operation: plan.sector, month: monthKey(plan.month), activity: payload.activity.trim().slice(0, 200) },
+        link: `#/monthly/${plan.id}`, planId: plan.id, activityId: id, actor: req.user
+      });
+    }
     // No allocation change here. Work added to a confirmed month used to raise
     // the approved budget to cover itself, which meant the Director's figure was
     // whatever had been added and a month could never be over it. The activity

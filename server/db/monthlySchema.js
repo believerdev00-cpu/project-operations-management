@@ -530,7 +530,18 @@ export const NOTIFICATION_KINDS = [
   'partner_reply',
   // Farming Management: a day's farm report was sent (to the Directors and the
   // Farming Managers, once per report).
-  'farm_daily_report'
+  'farm_daily_report',
+  // Everything between the Director and the managers that was silent: a day
+  // recorded, corrected or removed; work handed to somebody; an approval asked
+  // for and answered; a budget change asked for and answered.
+  'day_recorded',
+  'day_corrected',
+  'day_removed',
+  'work_assigned',
+  'approval_requested',
+  'approval_decided',
+  'budget_change_requested',
+  'budget_change_decided'
 ];
 
 export async function migrateMonthlyModule(pool) {

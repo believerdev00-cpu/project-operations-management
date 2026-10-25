@@ -34,6 +34,19 @@ import {
 import { checkerFor, personRow } from '../lib/organization.js';
 import { round2 } from '../lib/rates.js';
 import { notify, notifyDirectors } from '../lib/notifications.js';
+
+// One in-app notice to the person on the other side of an act -- the approver
+// asked, the requester answered, the person given the work -- and never to the
+// person who acted. Written inside the act's transaction, like every notice.
+// "$1,200.00" for a figure inside a notice; the reader's screen shows it as is.
+function formatUsdPlain(value) {
+  return `$${new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(value || 0))}`;
+}
+
+async function tellPerson(client, userId, actor, event) {
+  if (!userId || Number(userId) === Number(actor.id)) return;
+  await notify(client, { ...event, userId, actor });
+}
 import { MAX_EVIDENCE_BYTES, MAX_EVIDENCE_FILES, MAX_EVIDENCE_LABEL, deleteFile, readFile, saveFile, storedFileName } from '../lib/storage.js';
 
 const router = express.Router();
@@ -804,6 +817,17 @@ router.post('/', asyncRoute(async (req, res) => {
       });
     }
     await logHistory(client, id, req.user, entries);
+    // Work handed to the person who must also accept it is one notice, not two.
+    if (approvalRequired && status === 'Pending Approval' && !(assigning && Number(approvalFrom) === Number(assignedTo))) {
+      await tellPerson(client, approvalFrom, req.user, {
+        kind: 'approval_requested', params: { operation: sector, activity: payload.activity }, link: `#/activities/${id}`, activityId: id
+      });
+    }
+    if (assigning && assignedTo) {
+      await tellPerson(client, assignedTo, req.user, {
+        kind: 'work_assigned', params: { operation: sector, activity: payload.activity }, link: `#/activities/${id}`, activityId: id
+      });
+    }
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -1051,6 +1075,11 @@ router.patch('/:id/approval', asyncRoute(async (req, res) => {
       return res.status(409).json({ message: 'Somebody else decided this activity a moment ago. Refresh to see the outcome.' });
     }
     await logHistory(client, existing.id, req.user, entries);
+    await tellPerson(client, existing.created_by, req.user, {
+      kind: 'approval_decided',
+      params: { operation: existing.sector, activity: existing.activity, outcome: approved ? 'approved' : 'refused', reason: approved ? adminNote : rejectionReason },
+      link: `#/activities/${existing.id}`, activityId: existing.id
+    });
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -1132,6 +1161,9 @@ router.patch('/:id/submit', asyncRoute(async (req, res) => {
     await logHistory(client, existing.id, req.user, [
       { action: 'Submitted for approval', field: 'status', oldValue: 'Draft', newValue: 'Pending Approval' }
     ]);
+    await tellPerson(client, existing.approval_required_from, req.user, {
+      kind: 'approval_requested', params: { operation: existing.sector, activity: existing.activity }, link: `#/activities/${existing.id}`, activityId: existing.id
+    });
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -1896,6 +1928,11 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
       [existing.id, assignedTo, deadline, instructions, scheduledFor]
     );
     await logHistory(client, existing.id, req.user, entries);
+    if (Number(existing.assigned_to) !== Number(assignedTo)) {
+      await tellPerson(client, assignedTo, req.user, {
+        kind: 'work_assigned', params: { operation: existing.sector, activity: existing.activity }, link: `#/activities/${existing.id}`, activityId: existing.id
+      });
+    }
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -1958,6 +1995,11 @@ router.post('/:id/budget-requests', asyncRoute(async (req, res) => {
       action: 'Budget change requested', field: 'budgetRequest',
       oldValue: currentBudget, newValue: requestedAmount, note: optionalText(reason, 2000)
     }]);
+    await notifyDirectors(client, {
+      kind: 'budget_change_requested',
+      params: { operation: existing.sector, activity: existing.activity, detail: `${formatUsdPlain(currentBudget)} → ${formatUsdPlain(requestedAmount)}`, reason: optionalText(reason, 300) },
+      link: `#/activities/${existing.id}`, activityId: existing.id, actor: req.user
+    });
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
@@ -2055,6 +2097,11 @@ router.patch('/:id/budget-requests/:requestId', asyncRoute(async (req, res) => {
       }
     }
     await logHistory(client, existing.id, req.user, entries);
+    await tellPerson(client, request.requested_by, req.user, {
+      kind: 'budget_change_decided',
+      params: { operation: existing.sector, activity: existing.activity, outcome: status === 'Approved' ? 'approved' : 'refused', reason: note },
+      link: `#/activities/${existing.id}`, activityId: existing.id
+    });
     await client.query('COMMIT');
   } catch (error) {
     await safeRollback(client);
