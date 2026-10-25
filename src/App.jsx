@@ -1358,18 +1358,28 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     }
   });
 
+  // An employee who forgot their password is given a new temporary one, made
+  // here and shown to the Director once so it can be read to them. Nobody can
+  // look up anyone's real password -- only its bcrypt hash is stored -- and this
+  // one stops mattering the moment they sign in, because must_change_password
+  // makes them choose their own.
   const resetPassword = act(async (account) => {
-    const next = await dialog.password({
-      title: t('action.changePassword'),
-      message: `${fill(t('msg.passwordFor'), { name: account.name, username: account.username })} ${t('form.temporaryPasswordHint')}`,
-      confirmLabel: t('action.changePassword')
+    const agreed = await dialog.confirm({
+      title: t('action.forgotPassword'),
+      message: fill(t('msg.passwordFor'), { name: account.name, username: account.username }),
+      confirmLabel: t('action.giveNewPassword')
     });
-    if (next === null) return;
+    if (!agreed) return;
     setError('');
+    const next = temporaryPassword();
     try {
       await fetchJson(`/api/users/${account.id}/password`, { method: 'PATCH', body: JSON.stringify({ password: next }) });
-      notify(fill(t('msg.passwordUpdated'), { name: account.name }));
       loadData();
+      await dialog.notice({
+        title: fill(t('msg.passwordUpdated'), { name: account.name }),
+        message: fill(t('msg.newPasswordShow'), { name: account.name, username: account.username, password: next }),
+        confirmLabel: t('dialog.ok')
+      });
     } catch (resetError) { fail(resetError.message); }
   });
 
@@ -2700,6 +2710,19 @@ function rowActivation(onActivate) {
   };
 }
 
+// A temporary password that is easy to read aloud or copy off a phone: four
+// capitals and four digits, without the look-alikes I/O and 0/1. Drawn from the
+// browser's secure random source, never Math.random.
+const PASSWORD_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+const PASSWORD_DIGITS = '23456789';
+function temporaryPassword() {
+  const random = crypto.getRandomValues(new Uint32Array(8));
+  const pick = (alphabet, n) => alphabet[n % alphabet.length];
+  const letters = [...random.slice(0, 4)].map((n) => pick(PASSWORD_LETTERS, n)).join('');
+  const digits = [...random.slice(4)].map((n) => pick(PASSWORD_DIGITS, n)).join('');
+  return `${letters}-${digits}`;
+}
+
 function UserTable({ users, currentUserId, busy, language, onChangeSector, onResetPassword, onSetStatus, onDelete, empty }) {
   const t = useT();
   return users.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('field.name')}</th><th>{t('field.username')}</th><th>{t('field.role')}</th><th>{t('user.access')}</th><th>{t('field.workingArea')}</th><th className="card-optional">{t('field.projects')}</th><th className="card-optional">{t('field.team')}</th><th className="card-optional">{t('field.added')}</th><th className="card-optional">{t('field.password')}</th><th>{t('field.action')}</th></tr></thead><tbody>
@@ -2745,7 +2768,7 @@ function UserTable({ users, currentUserId, busy, language, onChangeSector, onRes
         <td className="card-actions">{isSelf
           ? <span className="muted-cell">{t('user.thisIsYou')}</span>
           : <>
-            <button className="text-btn" disabled={busy} onClick={() => onResetPassword(account)} type="button">{t('action.changePassword')}</button>
+            <button className="text-btn" disabled={busy} onClick={() => onResetPassword(account)} type="button">{t('action.forgotPassword')}</button>
             {/* Two steps, in order: Suspend first (one press, undone by
                 Recover); a suspended account then offers Recover or Delete
                 permanently. An active account is never one press from gone. */}
