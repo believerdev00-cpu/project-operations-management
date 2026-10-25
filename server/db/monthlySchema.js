@@ -527,7 +527,10 @@ export const NOTIFICATION_KINDS = [
   // a partner wrote on a project, to the people responsible for it; an
   // internal answer, to the partners in that conversation.
   'project_comment',
-  'partner_reply'
+  'partner_reply',
+  // Farming Management: a day's farm report was sent (to the Directors and the
+  // Farming Managers, once per report).
+  'farm_daily_report'
 ];
 
 export async function migrateMonthlyModule(pool) {

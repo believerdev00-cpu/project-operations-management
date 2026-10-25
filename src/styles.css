@@ -1427,3 +1427,35 @@ td .operation-checks { display: grid; gap: 0; }
   .farm-bars li { grid-template-columns: 1fr auto; }
   .farm-bars .farm-bar { grid-column: 1 / -1; grid-row: 2; }
 }
+
+/* ---- the daily farm report (Farming.jsx, DailyReport) ------------------------------- */
+.farm-daily .farm-daily-date input { font-size: 18px; max-width: 260px; }
+.farm-animal-card { border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; margin: 16px 0; background: var(--surface); }
+.farm-animal-card h3 { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; font-size: 20px; }
+.farm-picture { font-size: 34px; line-height: 1; }
+.farm-measure { border-top: 1px dashed var(--line); padding-top: 10px; margin-top: 10px; }
+.farm-measure h4 { margin: 0 0 8px; font-size: 17px; }
+.farm-measure h4 small { color: var(--muted); font-weight: 500; }
+.farm-headcount { margin: 0 0 10px; font-weight: 600; color: var(--navy); }
+.farm-steppers { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+.farm-stepper, .farm-money { display: grid; gap: 6px; }
+.farm-stepper-label { font-weight: 600; font-size: 15px; }
+.farm-stepper-row { display: flex; gap: 8px; align-items: center; }
+.farm-stepper-row input { flex: 1 1 auto; min-width: 0; font-size: 22px; padding: 10px; text-align: center; }
+.farm-stepper-row select { font-size: 16px; padding: 10px; }
+.farm-step { min-width: 52px; min-height: 52px; font-size: 26px; line-height: 1; padding: 0; }
+.farm-field-error { outline: 3px solid var(--red); outline-offset: 4px; border-radius: 8px; }
+.farm-daily-error { font-size: 16px; margin: 12px 0; }
+.farm-send { width: 100%; min-height: 60px; font-size: 20px; margin-top: 8px; }
+.farm-cost-row { border-bottom: 1px dashed var(--line); padding-bottom: 10px; margin-bottom: 10px; }
+.farm-sent h2 { font-size: 24px; }
+.farm-cta .big-action { min-height: 52px; font-size: 18px; }
+.farm-more { margin-top: 18px; }
+.farm-more > summary { cursor: pointer; font-weight: 600; padding: 12px 0; color: var(--blue); }
+.farm-received { display: grid; gap: 12px; }
+.farm-received-item { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
+.farm-received-item ul { margin: 6px 0 0; padding-left: 18px; }
+@media (max-width: 640px) {
+  .farm-steppers { grid-template-columns: 1fr; }
+  .farm-animal-card { padding: 12px; }
+}

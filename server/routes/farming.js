@@ -43,6 +43,7 @@ import {
   validateThresholds
 } from '../../shared/farming.js';
 import { FARM_OPERATION } from '../../shared/businessOperations.js';
+import { notifyMany } from '../lib/notifications.js';
 import { COMPLETED_STATUS, DEAD_STATUSES, toDateOnly } from '../lib/monthly.js';
 
 const router = express.Router();
@@ -524,6 +525,124 @@ router.get('/expenses', asyncRoute(async (req, res) => {
   send(res, rows.rows.map(mapExpense));
 }));
 
+// ---- saving one record --------------------------------------------------------------------
+//
+// Each kind of record is saved by exactly one function, inside the caller's
+// transaction: the single forms call them one at a time, and the daily report
+// (below) calls several in one transaction. So a figure typed into the daily
+// report meets exactly the checks the same figure meets on its own form -- the
+// stock and head-count balances, a cause for a death, the duplicate warnings,
+// an expense waiting for approval -- and nothing a daily report sends can be
+// saved half-way.
+
+async function recordProduction(client, req, body, key = null) {
+  const { measure, type } = await lockMeasure(client, recordId(body.measureId));
+  const history = await productHistory(client, measure.id);
+  const opening = runningBalance(productDeltas(history).filter((row) => row.date < body.date)).balance;
+  const result = validateProduction(body, { type, measure, today: farmToday(), openingStock: opening });
+  if (result.errors.length) refuse(result.errors);
+  const { value } = result;
+  const duplicates = possibleDuplicateProduction({ date: value.date, measureId: measure.id }, history.production);
+  if (duplicates.length && body.confirmDuplicate !== true) {
+    throw new FarmError(409, 'Something is already recorded for this product on this day. Send again to record a second entry.', 'POSSIBLE_DUPLICATE',
+      { matches: duplicates.map(({ id, date, produced, lost, recordedByName }) => ({ id, date, produced, lost, recordedByName })) });
+  }
+  assertNotNegative(runningBalance(productDeltas({ ...history, production: [...history.production, { date: value.date, produced: value.produced, lost: value.lost }] })), measure.unit);
+  const row = await client.query(
+    `INSERT INTO farm_production (measure_id, animal_type_id, produced_on, produced, lost, notes, recorded_by, recorded_by_name, request_key)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+    [measure.id, type.id, value.date, value.produced, value.lost, value.notes, req.user.id, req.user.name, key]
+  );
+  const entry = mapProduction(row.rows[0]);
+  await farmAudit(client, { entityType: 'production', entityId: entry.id, action: 'recorded', details: { after: value }, actor: actorOf(req) });
+  return entry;
+}
+
+async function recordHerd(client, req, body, key = null) {
+  const { measure, type } = await lockMeasure(client, recordId(body.measureId));
+  const events = await herdHistory(client, measure.id);
+  const result = validateHerdEvent(body, { type, measure, today: farmToday(), headCount: isValidDate(body.date) ? headCountOn(events, body.date) : 0 });
+  if (result.errors.length) refuse(result.errors);
+  const { value } = result;
+  assertNotNegative(herdBalance([...events, { date: value.date, delta: value.delta }]), measure.unit);
+  const row = await client.query(
+    `INSERT INTO farm_herd_events (measure_id, animal_type_id, event_on, kind, count, delta, reason, recorded_by, recorded_by_name, request_key)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+    [measure.id, type.id, value.date, value.kind, value.count, value.delta, value.reason, req.user.id, req.user.name, key]
+  );
+  const event = mapHerdEvent(row.rows[0]);
+  await farmAudit(client, { entityType: 'herd', entityId: event.id, action: 'recorded', details: { after: value }, actor: actorOf(req) });
+  return event;
+}
+
+async function recordSale(client, req, body, key = null) {
+  const { measure, type } = await lockMeasure(client, recordId(body.measureId));
+  const result = validateSale(body, { type, measure, today: farmToday() });
+  if (result.errors.length) refuse(result.errors);
+  if (measure.active === false) refuse(['MEASURE_INACTIVE']);
+  const { value } = result;
+  await checkSaleBalance(client, measure, { id: null, date: value.date, quantity: value.quantity });
+  const money = await frozenUsd(client, value.amount, value.currency);
+  const row = await client.query(
+    `INSERT INTO farm_sales (measure_id, animal_type_id, sold_on, quantity, amount, currency, amount_usd, fx_rwf_per_usd, fx_cdf_per_usd,
+                             buyer, notes, recorded_by, recorded_by_name, request_key)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+    [measure.id, type.id, value.date, value.quantity, value.amount, value.currency, money.usd, money.rwfPerUsd, money.cdfPerUsd,
+      value.buyer, String(body.notes || '').trim().slice(0, 1000), req.user.id, req.user.name, key]
+  );
+  const sale = mapSale(row.rows[0]);
+  if (measure.kind === 'herd') {
+    await client.query(
+      `INSERT INTO farm_herd_events (measure_id, animal_type_id, event_on, kind, count, delta, sale_id, recorded_by, recorded_by_name)
+       VALUES ($1, $2, $3, 'sale', $4, $5, $6, $7, $8)`,
+      [measure.id, type.id, value.date, value.quantity, -value.quantity, sale.id, req.user.id, req.user.name]
+    );
+  }
+  await farmAudit(client, { entityType: 'sale', entityId: sale.id, action: 'recorded', details: { after: { ...value, amountUsd: money.usd } }, actor: actorOf(req) });
+  return sale;
+}
+
+async function recordExpense(client, req, body, key = null) {
+  const { types } = await loadCatalogue(client);
+  const result = validateExpense(body, { types, categories: categoriesFor(body.scope, types), today: farmToday() });
+  if (result.errors.length) refuse(result.errors);
+  const { value } = result;
+  const sameDay = await client.query("SELECT * FROM farm_expenses WHERE spent_on = $1 AND status IN ('pending', 'approved')", [value.date]);
+  const duplicates = possibleDuplicateExpense(value, sameDay.rows.map(mapExpense));
+  if (duplicates.length && body.confirmDuplicate !== true) {
+    throw new FarmError(409, 'The same cost is already recorded for this day. Send again if this is a second, separate purchase.', 'POSSIBLE_DUPLICATE',
+      { matches: duplicates.map(({ id, date, amount, currency, category, submittedByName, status }) => ({ id, date, amount, currency, category, submittedByName, status })) });
+  }
+  const money = await frozenUsd(client, value.amount, value.currency);
+  const approver = canManage(req.farm);
+  const row = await client.query(
+    `INSERT INTO farm_expenses (spent_on, amount, currency, amount_usd, fx_rwf_per_usd, fx_cdf_per_usd, animal_type_id, category, description,
+                                payee, receipt_ref, status, submitted_by, submitted_by_name, decided_by, decided_by_name, decided_at, request_key)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING *`,
+    [value.date, value.amount, value.currency, money.usd, money.rwfPerUsd, money.cdfPerUsd, value.animalTypeId, value.category, value.description,
+      value.payee, value.receiptRef, approver ? 'approved' : 'pending', req.user.id, req.user.name,
+      approver ? req.user.id : null, approver ? req.user.name : '', approver ? new Date() : null, key]
+  );
+  const expense = mapExpense(row.rows[0]);
+  await farmAudit(client, { entityType: 'expense', entityId: expense.id, action: approver ? 'recorded_and_approved' : 'submitted', details: { after: { ...value, amountUsd: money.usd } }, actor: actorOf(req) });
+  return expense;
+}
+
+async function recordIssue(client, req, body) {
+  const { types } = await loadCatalogue(client);
+  const result = validateIssue(body || {}, { types });
+  if (result.errors.length) refuse(result.errors);
+  const { value } = result;
+  const row = await client.query(
+    `INSERT INTO farm_issues (kind, urgent, animal_type_id, description, raised_by, raised_by_name)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+    [value.kind, value.urgent, value.animalTypeId, value.description, req.user.id, req.user.name]
+  );
+  await farmAudit(client, { entityType: 'issue', entityId: row.rows[0].id, action: 'raised', details: { after: value }, actor: actorOf(req) });
+  return mapIssue(row.rows[0]);
+}
+
+
 // ---- production ------------------------------------------------------------------------
 
 router.post('/production', asyncRoute(async (req, res) => {
@@ -534,28 +653,7 @@ router.post('/production', asyncRoute(async (req, res) => {
     if (again.rowCount) return send(res, mapProduction(again.rows[0]));
   }
   const today = farmToday();
-  const created = await inTransaction(async (client) => {
-    const { measure, type } = await lockMeasure(client, recordId(body.measureId));
-    const history = await productHistory(client, measure.id);
-    const opening = runningBalance(productDeltas(history).filter((row) => row.date < body.date)).balance;
-    const result = validateProduction(body, { type, measure, today, openingStock: opening });
-    if (result.errors.length) refuse(result.errors);
-    const { value } = result;
-    const duplicates = possibleDuplicateProduction({ date: value.date, measureId: measure.id }, history.production);
-    if (duplicates.length && body.confirmDuplicate !== true) {
-      throw new FarmError(409, 'Something is already recorded for this product on this day. Send again to record a second entry.', 'POSSIBLE_DUPLICATE',
-        { matches: duplicates.map(({ id, date, produced, lost, recordedByName }) => ({ id, date, produced, lost, recordedByName })) });
-    }
-    assertNotNegative(runningBalance(productDeltas({ ...history, production: [...history.production, { date: value.date, produced: value.produced, lost: value.lost }] })), measure.unit);
-    const row = await client.query(
-      `INSERT INTO farm_production (measure_id, animal_type_id, produced_on, produced, lost, notes, recorded_by, recorded_by_name, request_key)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [measure.id, type.id, value.date, value.produced, value.lost, value.notes, req.user.id, req.user.name, key]
-    );
-    const entry = mapProduction(row.rows[0]);
-    await farmAudit(client, { entityType: 'production', entityId: entry.id, action: 'recorded', details: { after: value }, actor: actorOf(req) });
-    return entry;
-  });
+  const created = await inTransaction((client) => recordProduction(client, req, body, key));
   send(res, created, 201);
 }));
 
@@ -633,22 +731,7 @@ router.post('/herd', asyncRoute(async (req, res) => {
     const again = await pool.query('SELECT * FROM farm_herd_events WHERE request_key = $1', [key]);
     if (again.rowCount) return send(res, mapHerdEvent(again.rows[0]));
   }
-  const created = await inTransaction(async (client) => {
-    const { measure, type } = await lockMeasure(client, recordId(body.measureId));
-    const events = await herdHistory(client, measure.id);
-    const result = validateHerdEvent(body, { type, measure, today: farmToday(), headCount: isValidDate(body.date) ? headCountOn(events, body.date) : 0 });
-    if (result.errors.length) refuse(result.errors);
-    const { value } = result;
-    assertNotNegative(herdBalance([...events, { date: value.date, delta: value.delta }]), measure.unit);
-    const row = await client.query(
-      `INSERT INTO farm_herd_events (measure_id, animal_type_id, event_on, kind, count, delta, reason, recorded_by, recorded_by_name, request_key)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-      [measure.id, type.id, value.date, value.kind, value.count, value.delta, value.reason, req.user.id, req.user.name, key]
-    );
-    const event = mapHerdEvent(row.rows[0]);
-    await farmAudit(client, { entityType: 'herd', entityId: event.id, action: 'recorded', details: { after: value }, actor: actorOf(req) });
-    return event;
-  });
+  const created = await inTransaction((client) => recordHerd(client, req, body, key));
   send(res, created, 201);
 }));
 
@@ -700,32 +783,7 @@ router.post('/sales', asyncRoute(async (req, res) => {
     const again = await pool.query('SELECT * FROM farm_sales WHERE request_key = $1', [key]);
     if (again.rowCount) return send(res, mapSale(again.rows[0]));
   }
-  const created = await inTransaction(async (client) => {
-    const { measure, type } = await lockMeasure(client, recordId(body.measureId));
-    const result = validateSale(body, { type, measure, today: farmToday() });
-    if (result.errors.length) refuse(result.errors);
-    if (measure.active === false) refuse(['MEASURE_INACTIVE']);
-    const { value } = result;
-    await checkSaleBalance(client, measure, { id: null, date: value.date, quantity: value.quantity });
-    const money = await frozenUsd(client, value.amount, value.currency);
-    const row = await client.query(
-      `INSERT INTO farm_sales (measure_id, animal_type_id, sold_on, quantity, amount, currency, amount_usd, fx_rwf_per_usd, fx_cdf_per_usd,
-                               buyer, notes, recorded_by, recorded_by_name, request_key)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
-      [measure.id, type.id, value.date, value.quantity, value.amount, value.currency, money.usd, money.rwfPerUsd, money.cdfPerUsd,
-        value.buyer, String(body.notes || '').trim().slice(0, 1000), req.user.id, req.user.name, key]
-    );
-    const sale = mapSale(row.rows[0]);
-    if (measure.kind === 'herd') {
-      await client.query(
-        `INSERT INTO farm_herd_events (measure_id, animal_type_id, event_on, kind, count, delta, sale_id, recorded_by, recorded_by_name)
-         VALUES ($1, $2, $3, 'sale', $4, $5, $6, $7, $8)`,
-        [measure.id, type.id, value.date, value.quantity, -value.quantity, sale.id, req.user.id, req.user.name]
-      );
-    }
-    await farmAudit(client, { entityType: 'sale', entityId: sale.id, action: 'recorded', details: { after: { ...value, amountUsd: money.usd } }, actor: actorOf(req) });
-    return sale;
-  });
+  const created = await inTransaction((client) => recordSale(client, req, body, key));
   send(res, created, 201);
 }));
 
@@ -808,31 +866,7 @@ router.post('/expenses', asyncRoute(async (req, res) => {
     const again = await pool.query('SELECT * FROM farm_expenses WHERE request_key = $1', [key]);
     if (again.rowCount) return send(res, mapExpense(again.rows[0]));
   }
-  const created = await inTransaction(async (client) => {
-    const { types } = await loadCatalogue(client);
-    const result = validateExpense(body, { types, categories: categoriesFor(body.scope, types), today: farmToday() });
-    if (result.errors.length) refuse(result.errors);
-    const { value } = result;
-    const sameDay = await client.query("SELECT * FROM farm_expenses WHERE spent_on = $1 AND status IN ('pending', 'approved')", [value.date]);
-    const duplicates = possibleDuplicateExpense(value, sameDay.rows.map(mapExpense));
-    if (duplicates.length && body.confirmDuplicate !== true) {
-      throw new FarmError(409, 'The same cost is already recorded for this day. Send again if this is a second, separate purchase.', 'POSSIBLE_DUPLICATE',
-        { matches: duplicates.map(({ id, date, amount, currency, category, submittedByName, status }) => ({ id, date, amount, currency, category, submittedByName, status })) });
-    }
-    const money = await frozenUsd(client, value.amount, value.currency);
-    const approver = canManage(req.farm);
-    const row = await client.query(
-      `INSERT INTO farm_expenses (spent_on, amount, currency, amount_usd, fx_rwf_per_usd, fx_cdf_per_usd, animal_type_id, category, description,
-                                  payee, receipt_ref, status, submitted_by, submitted_by_name, decided_by, decided_by_name, decided_at, request_key)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING *`,
-      [value.date, value.amount, value.currency, money.usd, money.rwfPerUsd, money.cdfPerUsd, value.animalTypeId, value.category, value.description,
-        value.payee, value.receiptRef, approver ? 'approved' : 'pending', req.user.id, req.user.name,
-        approver ? req.user.id : null, approver ? req.user.name : '', approver ? new Date() : null, key]
-    );
-    const expense = mapExpense(row.rows[0]);
-    await farmAudit(client, { entityType: 'expense', entityId: expense.id, action: approver ? 'recorded_and_approved' : 'submitted', details: { after: { ...value, amountUsd: money.usd } }, actor: actorOf(req) });
-    return expense;
-  });
+  const created = await inTransaction((client) => recordExpense(client, req, body, key));
   send(res, created, 201);
 }));
 
@@ -922,6 +956,185 @@ router.post('/expenses/:id/void', asyncRoute(async (req, res) => {
   send(res, voided);
 }));
 
+// ---- the daily report ----------------------------------------------------------------
+//
+// One form for the whole day, laid out like the Director's summary table: for
+// each animal, what it gave, what was sold and for how much, what was lost,
+// what was born, bought, died or sold of the animals themselves; then the
+// day's costs and anything that went wrong. It is the way a farm hand reports,
+// so it has to be one page and one button.
+//
+// Everything in it is saved in ONE transaction through the same helpers as the
+// single forms (recordProduction, recordSale, recordHerd, recordExpense,
+// recordIssue), so it meets exactly their checks, and a report that fails on
+// its fourth figure leaves nothing of the first three behind. A refusal names
+// where it happened (`where`: which animal line and which box, which cost, or
+// the problem), so the form can point at it instead of the person hunting.
+//
+// When it is saved, the Director(s) and the Farming Manager(s) are told ONCE --
+// one notification per report, not one per figure -- and the report itself is
+// kept in farm_audit (entity_type 'daily_report') with the figures as sent and
+// the ids of the records it made, which is what the "Reports received" list
+// reads. No new table: the records are the farm's ordinary rows.
+
+const filled = (value) => value !== undefined && value !== null && String(value).trim() !== '';
+const positive = (value) => filled(value) && Number(value) > 0;
+
+async function farmTeamIds(db) {
+  const result = await db.query(
+    `SELECT id FROM users WHERE status = 'active' AND (role = 'super-admin'
+        OR (role = 'manager' AND (covers_all_sectors OR sector = $1
+            OR EXISTS (SELECT 1 FROM manager_operations mo WHERE mo.manager_id = users.id AND mo.sector = $1))))`,
+    [FARM_OPERATION]
+  );
+  return result.rows.map((row) => row.id);
+}
+
+// Runs one step of the report and, if it is refused, says where.
+async function step(where, work) {
+  try {
+    return await work();
+  } catch (error) {
+    if (error instanceof FarmError) error.extra = { ...(error.extra || {}), where };
+    throw error;
+  }
+}
+
+router.post('/daily-report', asyncRoute(async (req, res) => {
+  const body = req.body || {};
+  const date = body.date;
+  if (!isValidDate(date)) throw new FarmError(400, 'Please choose a real date.', 'DATE_INVALID');
+  const key = requestKey(body.requestKey);
+  const confirmDuplicate = body.confirmDuplicate === true;
+  const animals = Array.isArray(body.animals) ? body.animals.slice(0, 100) : [];
+  const costs = (Array.isArray(body.costs) ? body.costs.slice(0, 50) : []).filter((cost) => filled(cost?.amount) || filled(cost?.description));
+  const problem = body.problem && filled(body.problem.description) ? body.problem : null;
+
+  const answer = await inTransaction(async (client) => {
+    // The same report sent twice (a double tap, a retry on a bad connection)
+    // is answered with the first one, never saved twice.
+    if (key) {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`farm-daily-${key}`]);
+      const again = await client.query(
+        "SELECT * FROM farm_audit WHERE entity_type = 'daily_report' AND details->>'requestKey' = $1 LIMIT 1", [key]
+      );
+      if (again.rowCount) return { ...mapDailyReport(again.rows[0]), repeated: true };
+    }
+    const { measures } = await loadCatalogue(client);
+    const made = { production: [], sales: [], herd: [], expenses: [], issue: null };
+    const kept = [];
+
+    for (const [index, line] of animals.entries()) {
+      const measure = measures.find((item) => String(item.id) === String(line?.measureId));
+      if (!measure) throw new FarmError(404, 'That product or herd was not found.', 'NOT_FOUND', { where: { line: index } });
+      const at = (field) => ({ line: index, measureId: measure.id, field });
+      const record = { measureId: measure.id };
+      if (measure.kind === 'product') {
+        if (filled(line.produced) || positive(line.lost)) {
+          const entry = await step(at('produced'), () => recordProduction(client, req, {
+            measureId: measure.id, date, produced: filled(line.produced) ? line.produced : 0, lost: line.lost, notes: line.notes, confirmDuplicate
+          }));
+          made.production.push(entry.id);
+          Object.assign(record, { produced: entry.produced, lost: entry.lost });
+        }
+        if (positive(line.sold)) {
+          const sale = await step(at('sold'), () => recordSale(client, req, {
+            measureId: measure.id, date, quantity: Number(line.sold), amount: line.soldAmount, currency: line.currency || 'RWF'
+          }));
+          made.sales.push(sale.id);
+          Object.assign(record, { sold: sale.quantity, soldAmount: sale.amount, currency: sale.currency });
+        }
+      } else {
+        // A herd nobody has counted yet is counted first, by whoever is
+        // standing in front of it; the day's changes then start from that.
+        if (filled(line.counted)) {
+          const event = await step(at('counted'), () => recordHerd(client, req, { measureId: measure.id, date, kind: 'count', count: Number(line.counted) }));
+          made.herd.push(event.id);
+          record.counted = event.count;
+        }
+        for (const [field, kind] of [['born', 'birth'], ['bought', 'purchase'], ['died', 'death']]) {
+          if (!positive(line[field])) continue;
+          const event = await step(at(field), () => recordHerd(client, req, {
+            measureId: measure.id, date, kind, count: Number(line[field]), reason: field === 'died' ? line.diedReason : line.notes
+          }));
+          made.herd.push(event.id);
+          record[field] = event.count;
+          if (field === 'died') record.diedReason = event.reason;
+        }
+        if (positive(line.sold)) {
+          const sale = await step(at('sold'), () => recordSale(client, req, {
+            measureId: measure.id, date, quantity: Number(line.sold), amount: line.soldAmount, currency: line.currency || 'RWF'
+          }));
+          made.sales.push(sale.id);
+          Object.assign(record, { sold: sale.quantity, soldAmount: sale.amount, currency: sale.currency });
+        }
+      }
+      if (Object.keys(record).length > 1) kept.push(record);
+    }
+
+    const keptCosts = [];
+    for (const [index, cost] of costs.entries()) {
+      const expense = await step({ cost: index, field: 'amount' }, () => recordExpense(client, req, {
+        date, amount: cost.amount, currency: cost.currency || 'RWF', scope: cost.scope || SHARED_SCOPE,
+        category: cost.category, description: cost.description, confirmDuplicate
+      }));
+      made.expenses.push(expense.id);
+      keptCosts.push({ category: expense.category, amount: expense.amount, currency: expense.currency, animalTypeId: expense.animalTypeId, description: expense.description, status: expense.status });
+    }
+
+    let keptProblem = null;
+    if (problem) {
+      const issue = await step({ problem: true, field: 'description' }, () => recordIssue(client, req, problem));
+      made.issue = issue.id;
+      keptProblem = { kind: issue.kind, urgent: issue.urgent, description: issue.description };
+    }
+
+    const count = made.production.length + made.sales.length + made.herd.length + made.expenses.length + (made.issue ? 1 : 0);
+    if (!count) throw new FarmError(400, 'The report is empty. Fill in at least one number.', 'EMPTY_REPORT');
+
+    const saved = await client.query(
+      `INSERT INTO farm_audit (entity_type, entity_id, action, details, actor_id, actor_name)
+       VALUES ('daily_report', NULL, 'submitted', $1::jsonb, $2, $3) RETURNING *`,
+      [JSON.stringify({ date, requestKey: key, animals: kept, costs: keptCosts, problem: keptProblem, made, count }), req.user.id, req.user.name]
+    );
+    // One notice for the whole report, to the people who run the farm.
+    const recipients = (await farmTeamIds(client)).filter((id) => Number(id) !== Number(req.user.id));
+    await notifyMany(client, recipients, { kind: 'farm_daily_report', params: { title: date, count }, link: '#/farming', actor: req.user });
+    return mapDailyReport(saved.rows[0]);
+  });
+  send(res, answer, answer.repeated ? 200 : 201);
+}));
+
+function mapDailyReport(row) {
+  const details = row.details || {};
+  return {
+    id: row.id,
+    date: details.date,
+    animals: details.animals || [],
+    costs: details.costs || [],
+    problem: details.problem || null,
+    count: details.count || 0,
+    byName: row.actor_name || '',
+    byId: row.actor_id,
+    at: row.created_at
+  };
+}
+
+// The reports sent lately, newest first. A team member sees their own; the
+// manager, the Director and the General Manager see everybody's.
+router.get('/daily-reports', asyncRoute(async (req, res) => {
+  const days = Math.min(90, Math.max(1, Number(req.query.days) || 14));
+  const values = [days];
+  let mine = '';
+  if (!seesMoney(req.farm)) { values.push(req.user.id); mine = 'AND actor_id = $2'; }
+  const rows = await pool.query(
+    `SELECT * FROM farm_audit WHERE entity_type = 'daily_report' AND created_at >= NOW() - ($1::int * INTERVAL '1 day') ${mine}
+      ORDER BY created_at DESC LIMIT 200`,
+    values
+  );
+  send(res, rows.rows.map(mapDailyReport));
+}));
+
 // ---- problems ---------------------------------------------------------------------------
 
 router.get('/issues', asyncRoute(async (req, res) => {
@@ -939,19 +1152,7 @@ router.get('/issues', asyncRoute(async (req, res) => {
 }));
 
 router.post('/issues', asyncRoute(async (req, res) => {
-  const { types } = await loadCatalogue(pool);
-  const result = validateIssue(req.body || {}, { types });
-  if (result.errors.length) refuse(result.errors);
-  const { value } = result;
-  const created = await inTransaction(async (client) => {
-    const row = await client.query(
-      `INSERT INTO farm_issues (kind, urgent, animal_type_id, description, raised_by, raised_by_name)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [value.kind, value.urgent, value.animalTypeId, value.description, req.user.id, req.user.name]
-    );
-    await farmAudit(client, { entityType: 'issue', entityId: row.rows[0].id, action: 'raised', details: { after: value }, actor: actorOf(req) });
-    return mapIssue(row.rows[0]);
-  });
+  const created = await inTransaction((client) => recordIssue(client, req, req.body));
   send(res, created, 201);
 }));
 

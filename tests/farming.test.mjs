@@ -77,7 +77,7 @@ let savedThresholds = null;
 
 try {
   section('setup');
-  const { token: director } = await directorSession();
+  const { id: directorId, token: director } = await directorSession();
   const manager = await account('zz-farm-manager', 'ZZTEST Farm Manager', 'manager', 'farming');
   const staff = await account('zz-farm-staff', 'ZZTEST Farm Hand', 'staff', 'farming');
   const other = await account('zz-farm-staff-two', 'ZZTEST Second Hand', 'staff', 'farming');
@@ -270,6 +270,86 @@ try {
   check('only the manager marks it dealt with', staffResolves.status === 403, staffResolves.status);
   const resolved = await post(manager.token, `/api/farming/issues/${welfare.body.id}/resolve`, { note: 'ZZTEST bottle-fed' });
   check('  which they do', resolved.status === 200 && resolved.body.status === 'resolved', resolved.body);
+
+  section('11. the daily report: one form, everything or nothing, the Director told once');
+  const ducks = await post(manager.token, '/api/farming/animal-types', {
+    name: 'ZZTEST Ducks',
+    measures: [{ name: 'ZZTEST Duck eggs', kind: 'product', unit: 'pieces', sellable: true }, { name: 'ZZTEST Duck flock', kind: 'herd', unit: 'birds' }]
+  });
+  const duckRow = (await get(staff.token, '/api/farming/animal-types')).body.types.find((type) => type.id === ducks.body.id);
+  const duckEggs = duckRow.measures.find((measure) => measure.kind === 'product');
+  const duckFlock = duckRow.measures.find((measure) => measure.kind === 'herd');
+  await post(manager.token, '/api/farming/herd', { measureId: duckFlock.id, date: YESTERDAY, kind: 'count', count: 10 });
+  const counts = async () => (await pool.query(
+    `SELECT (SELECT COUNT(*) FROM farm_production WHERE measure_id = $1)::int AS production,
+            (SELECT COUNT(*) FROM farm_sales WHERE measure_id = ANY($2::int[]))::int AS sales,
+            (SELECT COUNT(*) FROM farm_herd_events WHERE measure_id = $3)::int AS herd,
+            (SELECT COUNT(*) FROM farm_expenses WHERE animal_type_id = $4)::int AS expenses`,
+    [duckEggs.id, [duckEggs.id, duckFlock.id], duckFlock.id, ducks.body.id]
+  )).rows[0];
+  const beforeDay = await counts();
+
+  const halfBad = await post(staff.token, '/api/farming/daily-report', {
+    date: TODAY, animals: [
+      { measureId: duckEggs.id, produced: 30, sold: 10, soldAmount: 2000, currency: 'RWF' },
+      { measureId: duckFlock.id, died: 1 }
+    ]
+  });
+  check('a death with no cause refuses the whole report, and says where', halfBad.status === 400 && halfBad.body.code === 'REASON_REQUIRED'
+    && halfBad.body.where?.measureId === duckFlock.id && halfBad.body.where?.field === 'died', halfBad.body);
+  check('  and nothing of it was saved', JSON.stringify(await counts()) === JSON.stringify(beforeDay), await counts());
+  const emptyDay = await post(staff.token, '/api/farming/daily-report', { date: TODAY, animals: [{ measureId: duckEggs.id, produced: '' }] });
+  check('an empty report is refused', emptyDay.status === 400 && emptyDay.body.code === 'EMPTY_REPORT', emptyDay.body);
+  const unsold = await post(staff.token, '/api/farming/daily-report', { date: TODAY, animals: [{ measureId: duckEggs.id, produced: 5, sold: 2 }] });
+  check('a sale with no money refuses the report', unsold.status === 400 && unsold.body.code === 'AMOUNT_INVALID' && unsold.body.where?.field === 'sold', unsold.body);
+
+  const dayReport = {
+    date: TODAY, requestKey: 'zztest-daily-report-0001',
+    animals: [
+      { measureId: duckEggs.id, produced: 30, lost: 2, sold: 10, soldAmount: 2000, currency: 'RWF' },
+      { measureId: duckFlock.id, born: 3, died: 1, diedReason: 'ZZTEST taken by a hawk', sold: 2, soldAmount: 9000, currency: 'RWF' }
+    ],
+    costs: [{ scope: String(ducks.body.id), category: 'animal_feed', amount: 15000, currency: 'RWF', description: 'ZZTEST duck feed' }],
+    problem: { kind: 'missing_supply', description: 'ZZTEST duck feed runs out soon' }
+  };
+  const sent = await post(staff.token, '/api/farming/daily-report', dayReport);
+  check('a team member sends the whole day in one report', sent.status === 201 && sent.body.count === 7, sent.body);
+  const afterDay = await counts();
+  check('  which makes the ordinary records: production, two sales, three herd changes, an expense',
+    afterDay.production === beforeDay.production + 1 && afterDay.sales === beforeDay.sales + 2 && afterDay.herd === beforeDay.herd + 3 && afterDay.expenses === beforeDay.expenses + 1,
+    { beforeDay, afterDay });
+  const expenseState = (await pool.query("SELECT status FROM farm_expenses WHERE animal_type_id = $1 AND description = 'ZZTEST duck feed'", [ducks.body.id])).rows[0];
+  check('  and its cost waits for the Farming Manager, as on its own form', expenseState?.status === 'pending', expenseState);
+  const overviewAfter = (await get(manager.token, '/api/farming/overview')).body;
+  check('  the figures follow: 18 eggs on hand (30 − 2 − 10), 10 birds (10 + 3 − 1 − 2)',
+    overviewAfter.stock.find((line) => line.measureId === duckEggs.id)?.onHand === 18 && overviewAfter.herd.find((line) => line.measureId === duckFlock.id)?.head === 10,
+    { stock: overviewAfter.stock.find((line) => line.measureId === duckEggs.id), herd: overviewAfter.herd.find((line) => line.measureId === duckFlock.id) });
+  const repeat = await post(staff.token, '/api/farming/daily-report', dayReport);
+  check('the same report sent twice (a double tap) is saved once', repeat.status === 200 && repeat.body.id === sent.body.id && JSON.stringify(await counts()) === JSON.stringify(afterDay), repeat.status);
+  const second = await post(staff.token, '/api/farming/daily-report', { date: TODAY, animals: [{ measureId: duckEggs.id, produced: 4 }] });
+  check('more eggs for the same day asks first', second.status === 409 && second.body.code === 'POSSIBLE_DUPLICATE', second.body);
+  const confirmedSecond = await post(staff.token, '/api/farming/daily-report', { date: TODAY, animals: [{ measureId: duckEggs.id, produced: 4 }], confirmDuplicate: true });
+  check('  and is saved when confirmed', confirmedSecond.status === 201, confirmedSecond.body);
+
+  const toldManager = (await pool.query("SELECT * FROM notifications WHERE user_id = $1 AND kind = 'farm_daily_report' AND actor_id = $2", [manager.id, staff.id])).rows;
+  check('the Farming Manager is told once per report, not once per figure', toldManager.length === 2 && toldManager[0].params.count === 7, toldManager.map((row) => row.params));
+  const toldDirector = (await pool.query("SELECT COUNT(*)::int AS n FROM notifications WHERE user_id = $1 AND kind = 'farm_daily_report' AND actor_id = $2", [directorId, staff.id])).rows[0].n;
+  check('  and so is the Director', toldDirector === 2, toldDirector);
+  check('  the sender is not told about their own report', (await pool.query("SELECT COUNT(*)::int AS n FROM notifications WHERE user_id = $1 AND kind = 'farm_daily_report'", [staff.id])).rows[0].n === 0);
+
+  const managerList = await get(manager.token, '/api/farming/daily-reports');
+  const sentRow = managerList.body.find((row) => row.id === sent.body.id);
+  check('the manager reads the report as sent: who, when, every figure', sentRow && sentRow.byName === 'ZZTEST Farm Hand' && sentRow.animals.length === 2 && sentRow.costs.length === 1
+    && sentRow.problem?.description === 'ZZTEST duck feed runs out soon' && sentRow.animals.find((entry) => entry.measureId === duckFlock.id)?.diedReason === 'ZZTEST taken by a hawk', sentRow);
+  const otherList = await get(other.token, '/api/farming/daily-reports');
+  check('another team member does not read it', otherList.status === 200 && !otherList.body.some((row) => row.id === sent.body.id), otherList.body.length);
+  const geese = await post(manager.token, '/api/farming/animal-types', { name: 'ZZTEST Geese', measures: [{ name: 'ZZTEST Goose flock', kind: 'herd', unit: 'birds' }] });
+  const gooseFlock = (await get(staff.token, '/api/farming/animal-types')).body.types.find((type) => type.id === geese.body.id).measures[0];
+  const firstCount = await post(staff.token, '/api/farming/daily-report', { date: TODAY, animals: [{ measureId: gooseFlock.id, counted: 12, born: 2 }] });
+  const geeseNow = (await get(manager.token, '/api/farming/overview')).body.herd.find((line) => line.measureId === gooseFlock.id)?.head;
+  check('a herd never counted is counted from the daily report, then the day starts from it (12 + 2)', firstCount.status === 201 && geeseNow === 14, { status: firstCount.status, geeseNow });
+  const gmSends = await post(general.token, '/api/farming/daily-report', { date: TODAY, animals: [{ measureId: duckEggs.id, produced: 1 }] });
+  check('the General Manager reads but does not send reports', gmSends.status === 403, gmSends.status);
 } catch (error) {
   failed += 1;
   console.log(`  FAIL  the suite stopped: ${error.stack || error.message}`);
@@ -305,6 +385,7 @@ try {
     await pool.query('UPDATE farm_settings SET alert_thresholds = $1::jsonb WHERE id = 1', [JSON.stringify(savedThresholds)]);
     await pool.query("DELETE FROM farm_audit WHERE entity_type = 'settings' AND actor_id = ANY($1::int[])", [created]);
   }
+  await pool.query('DELETE FROM notifications WHERE user_id = ANY($1::int[]) OR actor_id = ANY($1::int[])', [created]);
   await pool.query('DELETE FROM users WHERE id = ANY($1::int[])', [created]);
   await pool.end();
   console.log(`\n${passed} passed, ${failed} failed`);

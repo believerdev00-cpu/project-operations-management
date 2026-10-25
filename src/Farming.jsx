@@ -150,7 +150,7 @@ export default function Farming({ user, fetchJson, onMessage, onError, onChanged
 
 // "What does the farm need, and how is it going?" First anything urgent, then
 // today's work and today's figures, then the period's results.
-function TodayTab({ overview, can, catalogue, range, setRange, go }) {
+function TodayTab({ overview, can, catalogue, range, setRange, go, fetchJson, onError }) {
   const { t, language } = useI18n();
   const typeName = (id) => catalogue.types.find((type) => type.id === id)?.name || '';
   const measureOf = (id) => catalogue.measures.find((measure) => measure.id === id) || {};
@@ -159,6 +159,11 @@ function TodayTab({ overview, can, catalogue, range, setRange, go }) {
   const farm = summary.farm;
 
   return <>
+    {can.record && <section className="panel farm-callout farm-cta">
+      <span>{t('farm.daily.ctaText')}</span>
+      <button className="primary-btn big-action" type="button" onClick={() => go('record')}>📝 {t('farm.daily.cta')}</button>
+    </section>}
+    <ReportsReceived fetchJson={fetchJson} catalogue={catalogue} onError={onError} reloadKey={overview} />
     {can.money && overview.alerts?.length > 0 && <Panel title={t('farm.alerts')} subtitle={t('farm.alertsHint')}>
       <ul className="farm-alerts">
         {overview.alerts.map((alert) => <li key={alert.key} className={alert.severity === 'urgent' ? 'farm-alert urgent' : 'farm-alert'}>
@@ -337,10 +342,334 @@ function TypeTable({ summary, catalogue, money }) {
   </table></div>;
 }
 
+// ---- today's farm report -------------------------------------------------------------
+//
+// The whole day on one page, in the order of the Director's summary table:
+// each animal, what it gave, what was sold and for how much, what was lost,
+// what was born, bought, died or sold; then the costs; then anything wrong.
+// Written for people who read little: a picture on every animal, one plain
+// question per box, − and + buttons instead of typing, the money box and the
+// "what happened?" box only when they are needed, "you have 19 goats, after
+// today 21", and one big button. The server saves it all or nothing
+// (POST /api/farming/daily-report) and tells the Director once.
+
+// A picture per animal and product, from the seeded key or the name; anything
+// unknown gets a paw, so a new animal still has a picture.
+const PICTURES = [
+  [/cow|cattle|inka|vache|ng.ombe/i, '🐄'], [/chick|hen|bird|inkoko|poule|kuku/i, '🐔'], [/goat|ihene|chèvre|mbuzi/i, '🐐'],
+  [/sheep|intama|mouton|kondoo/i, '🐑'], [/pig|ingurube|porc|nguruwe/i, '🐖'], [/rabbit|urukwavu|inkwavu|lapin|sungura/i, '🐇'],
+  [/turkey|dinde|bata mzinga/i, '🦃'], [/duck|canard|bata/i, '🦆'], [/fish|ifi|poisson|samaki/i, '🐟'], [/bee|inzuki|abeille|nyuki/i, '🐝'],
+  [/milk|amata|lait|maziwa/i, '🥛'], [/egg|amagi|œuf|oeuf|mayai/i, '🥚'], [/honey|ubuki|miel|asali/i, '🍯']
+];
+function picture(...names) {
+  for (const name of names) {
+    const found = PICTURES.find(([pattern]) => pattern.test(String(name || '')));
+    if (found) return found[1];
+  }
+  return '🐾';
+}
+
+// A number with big − and + buttons. Blank means "nothing to say", never 0.
+function Stepper({ id, label, value, onChange, step = 1, whole = false, invalid = false }) {
+  const number = value === '' || value === undefined || value === null ? null : Number(value);
+  const move = (by) => {
+    const next = Math.max(0, (number || 0) + by);
+    onChange(whole ? String(Math.round(next)) : String(Math.round(next * 100) / 100));
+  };
+  return <div className={`farm-stepper${invalid ? ' farm-field-error' : ''}`} id={id}>
+    <span className="farm-stepper-label">{label}</span>
+    <div className="farm-stepper-row">
+      <button type="button" className="secondary-btn farm-step" aria-label="−" onClick={() => move(-step)} disabled={!number}>−</button>
+      <input type="number" inputMode={whole ? 'numeric' : 'decimal'} min="0" step={whole ? 1 : 'any'} value={value ?? ''}
+        onChange={(event) => onChange(event.target.value)} aria-label={label} />
+      <button type="button" className="secondary-btn farm-step" aria-label="+" onClick={() => move(step)}>+</button>
+    </div>
+  </div>;
+}
+
+function MoneyBox({ id, line, update, t, invalid }) {
+  return <div className={`farm-money${invalid ? ' farm-field-error' : ''}`} id={id}>
+    <span className="farm-stepper-label">💵 {t('farm.daily.moneyReceived')}</span>
+    <div className="farm-stepper-row">
+      <input type="number" inputMode="decimal" min="0" step="any" value={line.soldAmount ?? ''} onChange={(event) => update({ soldAmount: event.target.value })} aria-label={t('farm.daily.moneyReceived')} />
+      <select value={line.currency || 'RWF'} onChange={(event) => update({ currency: event.target.value })} aria-label={t('farm.currency')}>
+        {FARM_CURRENCIES.map((code) => <option key={code} value={code}>{code}</option>)}
+      </select>
+    </div>
+  </div>;
+}
+
+const newDaily = () => ({ date: todayLocal(), lines: {}, costs: [], problem: { kind: 'other', description: '' }, key: newRequestKey() });
+const isPositive = (value) => value !== '' && value !== undefined && value !== null && Number(value) > 0;
+
+function DailyReport({ fetchJson, onMessage, onError, changed, catalogue, overview, user, can }) {
+  const { t, language } = useI18n();
+  const dialog = useDialog();
+  const [busy, run] = useBusy();
+  const [form, setForm, clear] = useDraft(`farm-draft:${user.id}:daily`, newDaily());
+  const [problem, setProblem] = useState(null);
+  const [sent, setSent] = useState(null);
+  const types = selectableTypes(catalogue.types)
+    .map((type) => ({ ...type, measures: catalogue.measures.filter((measure) => measure.animalTypeId === type.id && measure.active) }))
+    .filter((type) => type.measures.length);
+  const headOf = (measureId) => overview.herd.find((line) => line.measureId === measureId)?.head ?? null;
+  const line = (measureId) => form.lines[measureId] || {};
+  const update = (measureId) => (patch) => setForm({ ...form, lines: { ...form.lines, [measureId]: { ...line(measureId), ...patch } } });
+  const wrong = (where) => problem?.where && Object.entries(where).every(([key, value]) => problem.where[key] === value);
+  const categories = [...new Set([...FARM_EXPENSE_CATEGORIES, ...types.flatMap((type) => type.expenseCategories)])];
+  const measureName = (measure) => `${picture(measure.name)} ${measure.name}`;
+
+  // What the report says, in words, for the check before sending and the
+  // "sent" screen. Only what was filled in.
+  const summary = () => {
+    const lines = [];
+    for (const type of types) {
+      for (const measure of type.measures) {
+        const entry = line(measure.id);
+        const parts = [];
+        if (measure.kind === 'product') {
+          if (entry.produced !== undefined && entry.produced !== '') parts.push(fill(t('farm.daily.sayGot'), { amount: quantityText(Number(entry.produced), measure.unit) }));
+          if (isPositive(entry.sold)) parts.push(fill(t('farm.daily.saySold'), { amount: quantityText(Number(entry.sold), measure.unit), money: amountText(entry.soldAmount, entry.currency || 'RWF') }));
+          if (isPositive(entry.lost)) parts.push(fill(t('farm.daily.sayLost'), { amount: quantityText(Number(entry.lost), measure.unit) }));
+        } else {
+          if (entry.counted !== undefined && entry.counted !== '') parts.push(fill(t('farm.daily.sayCounted'), { count: entry.counted }));
+          if (isPositive(entry.born)) parts.push(fill(t('farm.daily.sayBorn'), { count: entry.born }));
+          if (isPositive(entry.bought)) parts.push(fill(t('farm.daily.sayBought'), { count: entry.bought }));
+          if (isPositive(entry.died)) parts.push(fill(t('farm.daily.sayDied'), { count: entry.died }));
+          if (isPositive(entry.sold)) parts.push(fill(t('farm.daily.saySoldAnimals'), { count: entry.sold, money: amountText(entry.soldAmount, entry.currency || 'RWF') }));
+        }
+        if (parts.length) lines.push(`${picture(type.seedKey, type.name)} ${type.name} · ${measure.name}: ${parts.join(', ')}`);
+      }
+    }
+    for (const cost of form.costs.filter((item) => isPositive(item.amount))) {
+      lines.push(`💵 ${categoryName(cost.category, t)}: ${amountText(cost.amount, cost.currency || 'RWF')}`);
+    }
+    if (form.problem.description.trim()) lines.push(`⚠️ ${t(`farm.issueKind.${form.problem.kind}`)}: ${form.problem.description.trim()}`);
+    return lines;
+  };
+
+  const payload = (confirmDuplicate) => ({
+    date: form.date,
+    requestKey: form.key,
+    confirmDuplicate,
+    animals: Object.entries(form.lines).map(([measureId, entry]) => ({ measureId: Number(measureId), ...entry })),
+    costs: form.costs.filter((cost) => cost.amount !== '' || cost.description.trim()).map((cost) => ({ ...cost, scope: cost.scope || SHARED_SCOPE })),
+    problem: form.problem.description.trim() ? form.problem : null
+  });
+
+  const send = () => run(async () => {
+    const lines = summary();
+    if (!lines.length) { setProblem({ message: t('farm.err.EMPTY_REPORT') }); return false; }
+    // A death needs a cause before anything is sent: asked here, in place.
+    for (const type of types) {
+      for (const measure of type.measures) {
+        const entry = line(measure.id);
+        if (measure.kind === 'herd' && isPositive(entry.died) && !String(entry.diedReason || '').trim()) {
+          setProblem({ message: t('farm.err.REASON_REQUIRED'), where: { measureId: measure.id, field: 'died' } });
+          document.getElementById(`daily-${measure.id}-died`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          return false;
+        }
+        if (isPositive(entry.sold) && !isPositive(entry.soldAmount)) {
+          setProblem({ message: t('farm.err.AMOUNT_INVALID'), where: { measureId: measure.id, field: 'sold' } });
+          document.getElementById(`daily-${measure.id}-sold`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          return false;
+        }
+      }
+    }
+    const sure = await dialog.confirm({ title: t('farm.daily.checkTitle'), message: `${fill(t('farm.daily.checkIntro'), { date: formatDate(form.date, language) })}\n\n${lines.join('\n')}`, confirmLabel: t('farm.daily.sendNow') });
+    if (!sure) return false;
+    setProblem(null);
+    const attempt = async (confirmDuplicate) => fetchJson('/api/farming/daily-report', { method: 'POST', body: JSON.stringify(payload(confirmDuplicate)) });
+    try {
+      let result;
+      try {
+        result = await attempt(false);
+      } catch (error) {
+        if (error?.payload?.code !== 'POSSIBLE_DUPLICATE') throw error;
+        const again = await dialog.confirm({ title: t('farm.maybeDuplicate'), message: t('farm.daily.alreadyToday'), confirmLabel: t('farm.recordAnyway') });
+        if (!again) return false;
+        result = await attempt(true);
+      }
+      setSent({ lines, at: result.at, date: form.date });
+      clear();
+      onMessage(t('farm.daily.sentMessage'));
+      changed();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return true;
+    } catch (error) {
+      const where = error?.payload?.where || null;
+      setProblem({ message: errorText(error, t), where });
+      if (where?.measureId) document.getElementById(`daily-${where.measureId}-${where.field}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      if (where?.cost !== undefined) document.getElementById(`daily-cost-${where.cost}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      return false;
+    }
+  });
+
+  if (sent) {
+    return <section className="panel farm-sent">
+      <h2>✅ {t('farm.daily.sentTitle')}</h2>
+      <p>{fill(t('farm.daily.sentBody'), { date: formatDate(sent.date, language) })}</p>
+      <ul className="farm-list">{sent.lines.map((text) => <li key={text}>{text}</li>)}</ul>
+      <button className="primary-btn big-action" type="button" onClick={() => setSent(null)}>{t('farm.daily.another')}</button>
+    </section>;
+  }
+
+  if (!types.length) return <Empty>{t('farm.noTypes')}</Empty>;
+  return <section className="panel farm-daily">
+    <div className="panel-header"><div>
+      <h2>📝 {t('farm.daily.title')}</h2>
+      <span>{t(can.manage ? 'farm.daily.hintManager' : 'farm.daily.hint')}</span>
+    </div></div>
+    <label className="form-field farm-daily-date"><span>📅 {t('farm.daily.whichDay')}</span>
+      <input type="date" value={form.date} max={todayLocal()} onChange={(event) => setForm({ ...form, date: event.target.value })} />
+    </label>
+
+    {types.map((type) => <div key={type.id} className="farm-animal-card">
+      <h3><span className="farm-picture" aria-hidden="true">{picture(type.seedKey, type.name)}</span> {type.name}</h3>
+      {type.measures.map((measure) => {
+        const entry = line(measure.id);
+        const set = update(measure.id);
+        if (measure.kind === 'product') {
+          return <div key={measure.id} className="farm-measure">
+            <h4>{measureName(measure)} <small>({measure.unit})</small></h4>
+            <div className="farm-steppers">
+              <Stepper id={`daily-${measure.id}-produced`} label={fill(t('farm.daily.howMuchGot'), { unit: measure.unit })} value={entry.produced} onChange={(value) => set({ produced: value })}
+                invalid={wrong({ measureId: measure.id, field: 'produced' })} />
+              {measure.sellable && <Stepper id={`daily-${measure.id}-sold`} label={fill(t('farm.daily.howMuchSold'), { unit: measure.unit })} value={entry.sold} onChange={(value) => set({ sold: value })}
+                invalid={wrong({ measureId: measure.id, field: 'sold' })} />}
+              {measure.sellable && isPositive(entry.sold) && <MoneyBox id={`daily-${measure.id}-money`} line={entry} update={set} t={t} invalid={wrong({ measureId: measure.id, field: 'sold' })} />}
+              <Stepper id={`daily-${measure.id}-lost`} label={fill(t('farm.daily.howMuchLost'), { unit: measure.unit })} value={entry.lost} onChange={(value) => set({ lost: value })} />
+            </div>
+          </div>;
+        }
+        const head = headOf(measure.id);
+        const change = ['born', 'bought'].reduce((sum, field) => sum + (isPositive(entry[field]) ? Number(entry[field]) : 0), 0)
+          - ['died', 'sold'].reduce((sum, field) => sum + (isPositive(entry[field]) ? Number(entry[field]) : 0), 0);
+        return <div key={measure.id} className="farm-measure">
+          <h4>{measureName(measure)} <small>({measure.unit})</small></h4>
+          <p className="farm-headcount">{head === null
+            ? t('farm.daily.notCounted')
+            : fill(t(change ? 'farm.daily.haveAfter' : 'farm.daily.have'), { count: head, after: head + change, unit: measure.unit })}</p>
+          <div className="farm-steppers">
+            {/* Never counted: the first count comes from whoever is in front of them. */}
+            {head === null && <Stepper whole id={`daily-${measure.id}-counted`} label={`🔢 ${fill(t('farm.daily.countNow'), { unit: measure.unit })}`} value={entry.counted}
+              onChange={(value) => set({ counted: value })} invalid={wrong({ measureId: measure.id, field: 'counted' })} />}
+            <Stepper whole id={`daily-${measure.id}-born`} label={`🍼 ${t('farm.daily.born')}`} value={entry.born} onChange={(value) => set({ born: value })} invalid={wrong({ measureId: measure.id, field: 'born' })} />
+            <Stepper whole id={`daily-${measure.id}-bought`} label={`🛒 ${t('farm.daily.bought')}`} value={entry.bought} onChange={(value) => set({ bought: value })} invalid={wrong({ measureId: measure.id, field: 'bought' })} />
+            <Stepper whole id={`daily-${measure.id}-died`} label={`✝️ ${t('farm.daily.died')}`} value={entry.died} onChange={(value) => set({ died: value })} invalid={wrong({ measureId: measure.id, field: 'died' })} />
+            {isPositive(entry.died) && <label className={`form-field form-field-wide${wrong({ measureId: measure.id, field: 'died' }) ? ' farm-field-error' : ''}`}>
+              <span>{t('farm.daily.whatHappened')}</span>
+              <textarea rows={2} value={entry.diedReason || ''} onChange={(event) => set({ diedReason: event.target.value })} placeholder={t('farm.daily.whatHappenedHint')} />
+            </label>}
+            <Stepper whole id={`daily-${measure.id}-sold`} label={`🤝 ${t('farm.daily.soldAnimals')}`} value={entry.sold} onChange={(value) => set({ sold: value })} invalid={wrong({ measureId: measure.id, field: 'sold' })} />
+            {isPositive(entry.sold) && <MoneyBox id={`daily-${measure.id}-money`} line={entry} update={set} t={t} invalid={wrong({ measureId: measure.id, field: 'sold' })} />}
+          </div>
+        </div>;
+      })}
+    </div>)}
+
+    <div className="farm-animal-card">
+      <h3><span className="farm-picture" aria-hidden="true">💵</span> {t('farm.daily.costsTitle')}</h3>
+      <p className="muted">{t(can.manage ? 'farm.ownApprovedHint' : 'farm.goesToManager')}</p>
+      {form.costs.map((cost, index) => {
+        const setCost = (patch) => setForm({ ...form, costs: form.costs.map((item, at) => (at === index ? { ...item, ...patch } : item)) });
+        return <div key={cost.id} id={`daily-cost-${index}`} className={`farm-cost-row form-grid${wrong({ cost: index }) ? ' farm-field-error' : ''}`}>
+          <label className="form-field"><span>{t('farm.daily.costFor')}</span>
+            <select value={cost.category} onChange={(event) => setCost({ category: event.target.value })}>
+              {categories.map((category) => <option key={category} value={category}>{categoryName(category, t)}</option>)}
+            </select>
+          </label>
+          <label className="form-field"><span>{t('farm.amount')}</span>
+            <div className="farm-stepper-row">
+              <input type="number" inputMode="decimal" min="0" step="any" value={cost.amount} onChange={(event) => setCost({ amount: event.target.value })} />
+              <select value={cost.currency} onChange={(event) => setCost({ currency: event.target.value })} aria-label={t('farm.currency')}>
+                {FARM_CURRENCIES.map((code) => <option key={code} value={code}>{code}</option>)}
+              </select>
+            </div>
+          </label>
+          <label className="form-field"><span>{t('farm.forWhichAnimal')}</span>
+            <select value={cost.scope} onChange={(event) => setCost({ scope: event.target.value })}>
+              <option value={SHARED_SCOPE}>{t('farm.sharedFarm')}</option>
+              {types.map((type) => <option key={type.id} value={String(type.id)}>{type.name}</option>)}
+            </select>
+          </label>
+          <label className="form-field"><span>{t('farm.daily.whatWasBought')}</span>
+            <input value={cost.description} maxLength={1000} onChange={(event) => setCost({ description: event.target.value })} placeholder={t('farm.whatAndWhyHint')} />
+          </label>
+          <div className="form-field"><button className="text-btn" type="button" onClick={() => setForm({ ...form, costs: form.costs.filter((_, at) => at !== index) })}>✕ {t('farm.daily.removeCost')}</button></div>
+        </div>;
+      })}
+      <button className="secondary-btn big-action" type="button" onClick={() => setForm({ ...form, costs: [...form.costs, { id: newRequestKey(), category: FARM_EXPENSE_CATEGORIES[0], amount: '', currency: 'RWF', scope: SHARED_SCOPE, description: '' }] })}>
+        ➕ {t('farm.daily.addCost')}
+      </button>
+    </div>
+
+    <div className={`farm-animal-card${wrong({ problem: true }) ? ' farm-field-error' : ''}`}>
+      <h3><span className="farm-picture" aria-hidden="true">⚠️</span> {t('farm.daily.problemTitle')}</h3>
+      <div className="form-grid">
+        <label className="form-field"><span>{t('farm.problemKind')}</span>
+          <select value={form.problem.kind} onChange={(event) => setForm({ ...form, problem: { ...form.problem, kind: event.target.value } })}>
+            {ISSUE_KINDS.map((kind) => <option key={kind} value={kind}>{t(`farm.issueKind.${kind}`)}</option>)}
+          </select>
+        </label>
+        <label className="form-field form-field-wide"><span>{t('farm.daily.problemText')}</span>
+          <textarea rows={2} value={form.problem.description} onChange={(event) => setForm({ ...form, problem: { ...form.problem, description: event.target.value } })} placeholder={t('farm.daily.problemHint')} />
+        </label>
+      </div>
+    </div>
+
+    {problem && <p className="form-error farm-daily-error" role="alert">⚠️ {problem.message}</p>}
+    <button className="primary-btn big-action farm-send" type="button" disabled={busy} onClick={send}>📤 {t('farm.daily.send')}</button>
+  </section>;
+}
+
+// The reports sent lately: who, when, and what they said. The Director's and
+// the manager's way of seeing the day's progress at a glance.
+function ReportsReceived({ fetchJson, catalogue, onError, reloadKey }) {
+  const { t, language } = useI18n();
+  const [rows, setRows] = useState(null);
+  useEffect(() => {
+    let live = true;
+    fetchJson('/api/farming/daily-reports?days=7').then((data) => { if (live) setRows(data); }).catch((error) => onError(error.message));
+    return () => { live = false; };
+  }, [fetchJson, onError, reloadKey]);
+  if (!rows) return null;
+  const measureOf = (id) => catalogue.measures.find((measure) => measure.id === id) || {};
+  const typeOf = (id) => catalogue.types.find((type) => type.id === id) || {};
+  const describe = (entry) => {
+    const measure = measureOf(entry.measureId);
+    const type = typeOf(measure.animalTypeId);
+    const parts = [];
+    if (entry.produced !== undefined) parts.push(fill(t('farm.daily.sayGot'), { amount: quantityText(entry.produced, measure.unit) }));
+    if (entry.sold) parts.push(measure.kind === 'herd'
+      ? fill(t('farm.daily.saySoldAnimals'), { count: entry.sold, money: amountText(entry.soldAmount, entry.currency) })
+      : fill(t('farm.daily.saySold'), { amount: quantityText(entry.sold, measure.unit), money: amountText(entry.soldAmount, entry.currency) }));
+    if (entry.lost) parts.push(fill(t('farm.daily.sayLost'), { amount: quantityText(entry.lost, measure.unit) }));
+    if (entry.counted !== undefined) parts.push(fill(t('farm.daily.sayCounted'), { count: entry.counted }));
+    if (entry.born) parts.push(fill(t('farm.daily.sayBorn'), { count: entry.born }));
+    if (entry.bought) parts.push(fill(t('farm.daily.sayBought'), { count: entry.bought }));
+    if (entry.died) parts.push(`${fill(t('farm.daily.sayDied'), { count: entry.died })}${entry.diedReason ? ` (${entry.diedReason})` : ''}`);
+    return `${picture(type.seedKey, type.name)} ${type.name || ''} · ${measure.name || ''}: ${parts.join(', ')}`;
+  };
+  return <Panel title={`📥 ${t('farm.daily.received')}`} subtitle={t('farm.daily.receivedHint')}>
+    {rows.length === 0 ? <Empty>{t('farm.daily.noneReceived')}</Empty> : <div className="farm-received">
+      {rows.map((report) => <article key={report.id} className="farm-received-item">
+        <header><strong>{formatDate(report.date, language)}</strong> · {fill(t('farm.daily.sentBy'), { name: report.byName, when: new Date(report.at).toLocaleString(language) })}</header>
+        <ul>
+          {report.animals.map((entry) => <li key={`a${entry.measureId}`}>{describe(entry)}</li>)}
+          {report.costs.map((cost, index) => <li key={`c${index}`}>💵 {categoryName(cost.category, t)}: {amountText(cost.amount, cost.currency)}{cost.description ? ` — ${cost.description}` : ''}
+            {cost.status === 'pending' && <> <Badge tone="waiting">{t('farm.expenseStatus.pending')}</Badge></>}</li>)}
+          {report.problem && <li>⚠️ {t(`farm.issueKind.${report.problem.kind}`)}: {report.problem.description}</li>}
+        </ul>
+      </article>)}
+    </div>}
+  </Panel>;
+}
+
 // ---- record -----------------------------------------------------------------------
 
 // Pick the animal, pick what you are recording, type the number.
-function RecordTab({ fetchJson, onMessage, onError, changed, can, catalogue, user }) {
+function RecordTab({ fetchJson, onMessage, onError, changed, can, catalogue, user, overview }) {
   const { t } = useI18n();
   const types = selectableTypes(catalogue.types);
   const [typeId, setTypeId] = useState(types[0]?.id || null);
@@ -358,6 +687,11 @@ function RecordTab({ fetchJson, onMessage, onError, changed, can, catalogue, use
   const shared = { fetchJson, onMessage, onError, changed, type, measure, user };
 
   return <>
+    <DailyReport fetchJson={fetchJson} onMessage={onMessage} onError={onError} changed={changed} catalogue={catalogue} overview={overview} user={user} can={can} />
+    {/* One record at a time: for a correction, or a figure added after the
+        day's report went. Folded, so the daily report is the obvious way in. */}
+    <details className="farm-more">
+      <summary>{t('farm.daily.oneRecord')}</summary>
     <Panel title={t('farm.whichAnimal')}>
       <div className="farm-choices">
         {types.map((item) => <button key={item.id} type="button" className={`big-action ${item.id === typeId ? 'primary-btn' : 'secondary-btn'}`} onClick={() => setTypeId(item.id)}>{item.name}</button>)}
@@ -376,6 +710,7 @@ function RecordTab({ fetchJson, onMessage, onError, changed, can, catalogue, use
     {measure && mode === 'herd' && <HerdForm key={`h${measure.id}`} {...shared} />}
     {measure && mode === 'sale' && <SaleForm key={`s${measure.id}`} {...shared} />}
     {measure && <RecentRecords key={`r${measure.id}-${mode}`} {...shared} mode={mode} can={can} />}
+    </details>
   </>;
 }
 
