@@ -17,6 +17,7 @@ import * as i18n from '../shared/strings.js';
 import * as ops from '../shared/businessOperations.js';
 import { DAY_COLUMNS } from '../shared/dailyReport.js';
 import * as boutique from '../shared/boutique.js';
+import * as farming from '../shared/farming.js';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -29,7 +30,7 @@ const check = (label, ok, detail = '') => {
 
 // ui.jsx holds the shared error boundary and dialogs; left off this list, every
 // key only they use was reported as unused, and their JSX went unchecked.
-const FILES = ['App.jsx', 'ui.jsx', 'journey.jsx', 'Home.jsx', 'MovementModule.jsx', 'ActivityReview.jsx', 'PartnerPortal.jsx', 'ExternalPartners.jsx', 'MonthlyPlans.jsx', 'ExpensePanel.jsx', 'Organization.jsx', 'Boutique.jsx', 'Progress.jsx']
+const FILES = ['App.jsx', 'ui.jsx', 'journey.jsx', 'Home.jsx', 'MovementModule.jsx', 'ActivityReview.jsx', 'PartnerPortal.jsx', 'ExternalPartners.jsx', 'MonthlyPlans.jsx', 'ExpensePanel.jsx', 'Organization.jsx', 'Boutique.jsx', 'Progress.jsx', 'Farming.jsx']
   .map((name) => path.join(root, 'src', name));
 
 const sources = Object.fromEntries(FILES.map((file) => [path.basename(file), fs.readFileSync(file, 'utf8')]));
@@ -125,6 +126,25 @@ const FAMILIES = {
     'leader_changed', 'reporting_changed', 'partner_profile_changed', 'partner_projects_changed',
     'account_suspended', 'account_reactivated', 'account_deleted'],
   'progress.missing.': ['no_plans', 'no_objectives', 'no_countable'],
+  // Farming Management (shared/farming.js): every list src/Farming.jsx renders
+  // through a template key, so a value added there without its words fails here.
+  'farm.tab.': ['today', 'record', 'expenses', 'problems', 'reports', 'setup', 'history'],
+  'farm.err.': farming.FARM_ERROR_CODES,
+  'farm.cat.': farming.FARM_EXPENSE_CATEGORIES,
+  'farm.herdKind.': farming.HERD_EVENT_KINDS,
+  'farm.issueKind.': farming.ISSUE_KINDS,
+  'farm.measureKind.': farming.MEASURE_KINDS,
+  'farm.expenseStatus.': farming.EXPENSE_STATUSES,
+  'farm.periodName.': farming.FARM_PERIODS,
+  'farm.threshold.': Object.keys(farming.THRESHOLD_LIMITS),
+  'farm.mode.': ['production', 'herd', 'sale'],
+  'farm.noUnitCost.': ['NO_PRODUCTION', 'SEVERAL_PRODUCTS', 'NO_DIRECT_COSTS'],
+  'farm.alert.': ['production_decline', 'no_recent_record', 'unexplained_loss', 'expense_rise', 'budget_near', 'budget_over', 'critical_task_overdue'],
+  'farm.alertWhy.': ['production_decline', 'no_recent_record', 'unexplained_loss', 'expense_rise', 'budget_near', 'budget_over', 'critical_task_overdue'],
+  // farm_audit rows: entity_type and action as server/routes/farming.js writes them.
+  'farm.entity.': ['animal_type', 'measure', 'production', 'herd', 'sale', 'expense', 'issue', 'budget', 'settings'],
+  'farm.action.': ['created', 'updated', 'reactivated', 'deactivated', 'removed', 'recorded', 'corrected', 'voided', 'submitted',
+    'recorded_and_approved', 'edited', 'approved', 'rejected', 'raised', 'resolved', 'budget_set', 'thresholds_changed'],
   'plan.objectiveState.': ['notStarted', 'inProgress', 'done', 'overdue']
 };
 for (const [prefix, values] of Object.entries(FAMILIES)) {

@@ -19,13 +19,15 @@ const ExternalPartners = lazy(() => import('./ExternalPartners.jsx'));
 const MonthlyPlans = lazy(() => import('./MonthlyPlans.jsx'));
 // The Boutique Management System (Project 5): its own workspace at #/boutique.
 const Boutique = lazy(() => import('./Boutique.jsx'));
+// Farming Management: its own workspace at #/farming.
+const Farming = lazy(() => import('./Farming.jsx'));
 // The organisation is not a page: its two pieces sit where the work is (the
 // teams on Projects and on Home, the chart on People and the GM's Home).
 const TeamsSection = lazy(() => import('./Organization.jsx').then((module) => ({ default: module.TeamsSection })));
 const OrganizationSection = lazy(() => import('./Organization.jsx').then((module) => ({ default: module.OrganizationSection })));
 const GeneralManagerHome = lazy(() => import('./Organization.jsx').then((module) => ({ default: module.GeneralManagerHome })));
 import { LANGUAGES, LanguageContext, displayLanguage, fill, setDisplayLanguage, useI18n, useLanguage, useT } from './i18n.js';
-import { BUSINESS_OPERATIONS, isRetailOperation, operationName, operationsOf, runsTrips, worksIn, worksInBoutique } from '../shared/businessOperations.js';
+import { BUSINESS_OPERATIONS, isRetailOperation, operationName, operationsOf, runsTrips, worksIn, worksInBoutique, worksOnFarm } from '../shared/businessOperations.js';
 import { OPERATIONS_WITH_CATEGORIES, OTHER_CATEGORY } from '../shared/categories.js';
 import { DAY_COLUMNS } from '../shared/dailyReport.js';
 import ActivityReview, {
@@ -522,7 +524,9 @@ const NAV_ICON_PATHS = {
   users: 'M16 19v-1a4 4 0 0 0-8 0v1M12 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7 8v-1a3 3 0 0 0-2-2.8M17 5.2a3 3 0 0 1 0 5.6',
   partners: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm-9 9h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9Z',
   // A shopping bag: the boutique.
-  boutique: 'M6 8h12l1 12H5L6 8Zm3 0V6a3 3 0 0 1 6 0v2'
+  boutique: 'M6 8h12l1 12H5L6 8Zm3 0V6a3 3 0 0 1 6 0v2',
+  // A barn: the farm.
+  farming: 'M3 10l9-6 9 6v10H3V10Zm6 10v-6h6v6M9 14l6 6M15 14l-6 6'
 };
 
 function NavIcon({ id }) {
@@ -973,6 +977,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       // The badge is what the Boutique Manager has put in front of the
       // Director directly: adjustments, voids, reports and issues to answer.
       ['boutique', t('nav.boutique'), summary.summary?.boutiquePending || 0, 'main', t('nav.boutique')],
+      // Farming Management: the Director oversees it and sets its budget; the
+      // day-to-day approvals are the Farming Manager's, so no badge here.
+      ['farming', t('nav.farming'), 0, 'main', t('nav.farming')],
       ['reports', t('nav.reports'), 0, 'review'],
       ['projects', t('nav.projects'), 0, 'manage'],
       ['users', t('nav.users'), 0, 'manage'],
@@ -989,7 +996,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       ['activities', t('nav.activities'), 0, 'review'],
       ['reports', t('nav.reports'), 0, 'review'],
       // The boutique, read-only for them like every other operation.
-      ['boutique', t('nav.boutique'), 0, 'review']
+      ['boutique', t('nav.boutique'), 0, 'review'],
+      // The farm, read-only for them too.
+      ['farming', t('nav.farming'), 0, 'review']
     ];
   } else if (isManager) {
     // A manager's job is the month they were given: the plan is the front door,
@@ -1017,7 +1026,10 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       ['monthly', t('nav.myPlan'), 0, 'main', t('nav.shortMyPlan')],
       // The Boutique Manager's shop (Project 5): only for the manager whose
       // operation it is, or one covering every operation.
-      ...(worksInBoutique(user) ? [['boutique', t('nav.boutique'), 0, 'main', t('nav.boutique')]] : [])
+      ...(worksInBoutique(user) ? [['boutique', t('nav.boutique'), 0, 'main', t('nav.boutique')]] : []),
+      // The Farming Manager's farm, badged with the team's expenses waiting
+      // for their approval.
+      ...(worksOnFarm(user) ? [['farming', t('nav.farming'), summary.summary?.farmPending || 0, 'main', t('nav.farming')]] : [])
     ];
   } else {
     // A team member has one job: the work they were given. Two pages, and the
@@ -1029,7 +1041,9 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       ['dashboard', t('nav.myWork'), 0, 'main', t('nav.myWork')],
       ['activities', t('nav.myActivities'), 0, 'main', t('nav.myActivities')],
       // A boutique cashier's till (Project 5).
-      ...(worksInBoutique(user) ? [['boutique', t('nav.boutique'), 0, 'main', t('nav.boutique')]] : [])
+      ...(worksInBoutique(user) ? [['boutique', t('nav.boutique'), 0, 'main', t('nav.boutique')]] : []),
+      // A farm team member records the day's production here.
+      ...(worksOnFarm(user) ? [['farming', t('nav.farming'), 0, 'main', t('nav.farming')]] : [])
     ];
   }
   // The bar along the bottom of a phone. Someone who works in Movements &
@@ -1042,8 +1056,8 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     : isGeneral
       ? ['dashboard', 'monthly', 'activities', 'reports']
       : isManager
-        ? ['dashboard', 'monthly', ...(worksInBoutique(user) ? ['boutique'] : [])]
-        : ['dashboard', 'activities', ...(worksInBoutique(user) ? ['boutique'] : [])];
+        ? ['dashboard', 'monthly', ...(worksInBoutique(user) ? ['boutique'] : []), ...(worksOnFarm(user) ? ['farming'] : [])]
+        : ['dashboard', 'activities', ...(worksInBoutique(user) ? ['boutique'] : []), ...(worksOnFarm(user) ? ['farming'] : [])];
   // An address naming a page this account does not have -- a manager following
   // a Director's link to #/users -- lands on the home page instead of a blank page.
   // A manager has no work register, but they do open single records: the work
@@ -2192,6 +2206,10 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     const search = query.toString();
     navigate(`${buildHash('boutique', tab === 'overview' ? null : tab)}${search ? `?${search}` : ''}`);
   }, [navigate]);
+  // The farm's addresses: #/farming/<tab>.
+  const farmingNavigate = useCallback((tab) => {
+    navigate(buildHash('farming', tab === 'today' ? null : tab));
+  }, [navigate]);
   const openQueueItem = (item) => (item.ref ? navigate(buildHash('movements', item.id)) : openActivity(item.id));
   const onModuleChanged = useCallback(() => { loadData(); }, [loadData]);
 
@@ -2565,6 +2583,16 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
       tab={routeId || 'overview'}
       query={route.query}
       onNavigate={boutiqueNavigate}
+    />;
+  } else if (view === 'farming') {
+    content = <Farming
+      user={user}
+      fetchJson={fetchJson}
+      onMessage={notify}
+      onError={fail}
+      onChanged={onModuleChanged}
+      tab={routeId || 'today'}
+      onNavigate={farmingNavigate}
     />;
   }
 

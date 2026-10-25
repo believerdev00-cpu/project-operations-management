@@ -25,6 +25,7 @@ const API = process.env.API || 'http://localhost:5000';
 // a broken dictionary fails in a second, without touching the database.
 const SUITES = [
   ['pure logic', 'pure-logic.test.mjs', { needsApi: false }],
+  ['farming logic', 'farming-logic.test.mjs', { needsApi: false }],
   ['translations', 'translations.test.mjs', { needsApi: false }],
   ['account security', 'account-security.test.mjs', { needsApi: true }],
   ['approval workflow', 'approval-workflow.test.mjs', { needsApi: true }],
@@ -40,7 +41,8 @@ const SUITES = [
   ['organization', 'organization.test.mjs', { needsApi: true }],
   ['boutique', 'boutique.test.mjs', { needsApi: true }],
   ['user delete', 'user-delete.test.mjs', { needsApi: true }],
-  ['plan money', 'plan-money.test.mjs', { needsApi: true }]
+  ['plan money', 'plan-money.test.mjs', { needsApi: true }],
+  ['farming', 'farming.test.mjs', { needsApi: true }]
 ];
 
 const only = process.argv[2];

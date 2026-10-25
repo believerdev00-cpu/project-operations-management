@@ -28,6 +28,8 @@ import monthlyPlanRouter from './routes/monthlyPlans.js';
 import notificationRouter from './routes/notifications.js';
 import organizationRouter from './routes/organization.js';
 import boutiqueRouter from './routes/boutique.js';
+import farmingRouter from './routes/farming.js';
+import { farmRole } from './lib/farming.js';
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -440,6 +442,13 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
     )).rows[0].pending
     : 0;
 
+  // The Farming Manager's queue: the team's expenses waiting for them. Theirs
+  // alone -- the Director may decide one too, but is not badged for it, so
+  // the farm's day-to-day costs do not land on the Director's menu.
+  const farmQueue = farmRole(req.user) === 'manager'
+    ? (await pool.query("SELECT COUNT(*)::int AS pending FROM farm_expenses WHERE status = 'pending'")).rows[0].pending
+    : 0;
+
   // The month at a glance, for the Director's dashboard and the manager's.
   //
   // A plan is ACTIVE from the moment the Director types it (it is created
@@ -567,6 +576,7 @@ app.get('/api/summary', authMiddleware, asyncRoute(async (req, res) => {
       // The badge on "What I Need to Approve".
       approvalsAwaitingMe: approvalQueue.rows[0].activities + approvalQueue.rows[0].movements,
       boutiquePending: boutiqueQueue,
+      farmPending: farmQueue,
       approvalsAwaitingMeActivities: approvalQueue.rows[0].activities,
       approvalsAwaitingMeMovements: approvalQueue.rows[0].movements,
       activityReviewsPending: reviewQueue.rows[0].activity_reviews_pending,
@@ -929,6 +939,12 @@ app.use('/api/organization', authMiddleware, organizationRouter);
 // not on the partner allowlist; the router's own boutiqueAccess refuses
 // everybody else before any handler runs.
 app.use('/api/boutique', authMiddleware, boutiqueRouter);
+
+// Farming Management: animal types, production, herd, sales, the farm's
+// expenses and their approval, problems, reports and the farm's own budget.
+// Internal only -- not on the partner allowlist; farmAccess refuses everybody
+// who neither works on the farm nor is senior management.
+app.use('/api/farming', authMiddleware, farmingRouter);
 
 // An /api path nothing matched is answered in JSON, not by the SPA fallback
 // below. Handing back index.html would give the client an HTML page where it

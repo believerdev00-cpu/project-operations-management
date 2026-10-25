@@ -164,6 +164,20 @@ export function worksInBoutique(user) {
   return (user.role === 'manager' || user.role === 'staff') && operationsOf(user).includes(RETAIL_OPERATION);
 }
 
+// The operation whose people run Farming Management (shared/farming.js,
+// server/routes/farming.js, src/Farming.jsx): the animals, their production,
+// the farm's sales and costs. Read this rather than comparing against
+// 'farming' by hand.
+export const FARM_OPERATION = 'farming';
+
+// Whether this account works on the farm: a manager of Farming (or one
+// covering every operation) or a team member placed in it. The Director and the
+// General Manager are a question of role, answered in server/lib/farming.js.
+export function worksOnFarm(user) {
+  if (!user || !['manager', 'staff'].includes(user.role)) return false;
+  return worksIn(user, FARM_OPERATION);
+}
+
 // Which operation runs the trips register: Movement & Facilitation, because
 // coordinating transport and the movement of people and materials for the three
 // primary operations is precisely what that function is for.

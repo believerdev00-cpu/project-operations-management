@@ -1389,3 +1389,40 @@ td .operation-checks { display: grid; gap: 0; }
 .btq-count input[type="number"] { width: 110px; font-size: 1.05rem; }
 .btq-stock-profit td, .btq-stock-profit th { white-space: nowrap; }
 .btq-total-row td { border-top: 2px solid var(--navy); background: #f7fafc; }
+
+/* ---- Farming Management (src/Farming.jsx) ---------------------------------- */
+.farming .partner-tabs { margin-top: 14px; }
+.farming .nav-badge { margin-left: 6px; }
+.farming .panel { margin-top: 18px; }
+.farming .panel h3 { margin: 16px 0 8px; font-size: 15px; }
+.farming .muted { color: var(--muted); }
+.farming .form-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
+.farming .form-error { color: var(--red); font-weight: 600; margin: 0; }
+.farming .checkbox-row { display: flex; align-items: center; gap: 8px; }
+.farming .row-actions { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.farm-choices { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 4px; }
+.farm-list { list-style: none; margin: 0; padding: 0; }
+.farm-list li { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.farm-list li:last-child { border-bottom: 0; }
+.farm-voided { opacity: .6; }
+.farm-alerts { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.farm-alert { display: grid; gap: 4px; padding: 12px 14px; border-radius: 10px; background: var(--blue-soft); border-left: 4px solid var(--blue); }
+.farm-alert.urgent { background: #fbeaea; border-left-color: var(--red); }
+.farm-callout { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; }
+.farm-metric-quiet strong { color: var(--muted); font-weight: 500; }
+.farm-metric-bad strong { color: var(--red); }
+.farm-bars { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.farm-bars li { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 2fr) auto; gap: 10px; align-items: center; }
+.farm-bar { display: block; height: 10px; border-radius: 5px; background: var(--line); overflow: hidden; }
+.farm-bar span { display: block; height: 100%; background: var(--blue); }
+.farm-trend { margin: 10px 0 16px; }
+.farm-spark { display: flex; align-items: flex-end; gap: 2px; height: 56px; margin-top: 6px; border-bottom: 1px solid var(--line); }
+.farm-spark span { flex: 1 1 0; min-width: 3px; background: var(--green); border-radius: 2px 2px 0 0; }
+.farm-type { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.farm-type-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+.farm-type-head h3 { margin: 0; }
+@media (max-width: 640px) {
+  .farm-list li { flex-direction: column; }
+  .farm-bars li { grid-template-columns: 1fr auto; }
+  .farm-bars .farm-bar { grid-column: 1 / -1; grid-row: 2; }
+}

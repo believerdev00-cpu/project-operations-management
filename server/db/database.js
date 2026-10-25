@@ -6,6 +6,7 @@ import { migrateActivityModule } from './activitySchema.js';
 import { migrateMonthlyModule } from './monthlySchema.js';
 import { migrateOrganizationModule } from './organizationSchema.js';
 import { migrateBoutiqueModule } from './boutiqueSchema.js';
+import { migrateFarmingModule } from './farmingSchema.js';
 import { BUSINESS_OPERATIONS } from '../../shared/businessOperations.js';
 
 dotenv.config({ path: '.env.local' });
@@ -482,6 +483,11 @@ export async function initDatabase() {
     // the PRJ-BOUTIQUE project row. After the organisation, because the
     // project row it seeds is what the Projects page and the teams refer to.
     await migrateBoutiqueModule(pool);
+
+    // Farming Management: the farm's animal types, production, herd, sales,
+    // expenses, issues, budget and history. Its own tables only -- the
+    // farming monthly plan and its activities are left exactly as they are.
+    await migrateFarmingModule(pool);
 
   // The Director is identified by the role, not by a fixed username. Keyed on
   // username = 'admin', renaming that account -- which its owner is free to do
