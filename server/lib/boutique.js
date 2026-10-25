@@ -29,10 +29,12 @@ import { BOUTIQUE_PAYMENT_METHODS, EXCHANGE_CREDIT, STOCK_MOVEMENT_KINDS, fromMi
 export const BOUTIQUE_FOLDER = 'boutique';
 
 export class BoutiqueError extends Error {
-  constructor(status, message, code = null) {
+  // `params`: the values a translated sentence needs (shared/apiErrors.js).
+  constructor(status, message, code = null, params = null) {
     super(message);
     this.status = status;
     this.code = code;
+    this.params = params;
   }
 }
 
@@ -139,7 +141,7 @@ export async function moveStock(client, { variantId, quantity, kind, referenceTy
   if (after < 0) {
     throw new BoutiqueError(409,
       `Only ${variant.stock_quantity} of ${variant.product_name} (${variant.sku}) in stock; ${Math.abs(change)} asked for.`,
-      'INSUFFICIENT_STOCK');
+      'INSUFFICIENT_STOCK', { available: variant.stock_quantity, asked: Math.abs(change), product: variant.product_name });
   }
   await client.query('UPDATE boutique_variants SET stock_quantity = $2, updated_at = NOW() WHERE id = $1', [variantId, after]);
   const movement = await client.query(

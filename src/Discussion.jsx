@@ -18,10 +18,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { fill, useI18n } from './i18n.js';
 import { useBusy } from './ui.jsx';
-import { dateLocale } from './format.js';
+import { dateLocale, formatDateTime } from './format.js';
 
 function when(value, language) {
-  return value ? new Date(value).toLocaleString(language) : '';
+  return value ? formatDateTime(value, language) : '';
 }
 
 // '2026-09' as "September 2026" in the reader's language; anything else as it is.

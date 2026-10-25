@@ -19,7 +19,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fill, useI18n } from './i18n.js';
 import { useBusy, useDialog } from './ui.jsx';
-import { formatDate, formatUsd, todayLocal } from './format.js';
+import { formatDate, formatUsd, todayLocal, formatTime } from './format.js';
 import {
   DEFAULT_ANIMAL_TYPES, FARM_CURRENCIES, addDays, FARM_ERROR_CODES, FARM_EXPENSE_CATEGORIES, FARM_PERIODS, HERD_EVENT_KINDS, ISSUE_KINDS, SHARED_SCOPE,
   THRESHOLD_LIMITS, selectableTypes, validateExpense, validateHerdEvent, validateIssue, validateProduction, validateSale
@@ -688,7 +688,7 @@ function ReportsReceived({ rows, catalogue }) {
   return <Panel title={`📥 ${t('farm.daily.received')}`} subtitle={t('farm.daily.receivedHint')}>
     {rows.length === 0 ? <Empty>{t('farm.daily.noneReceived')}</Empty> : <div className="farm-received">
       {rows.map((report) => <article key={report.id} className="farm-received-item">
-        <header><strong>{formatDate(report.date, language)}</strong> · {fill(t('farm.daily.sentBy'), { name: report.byName, when: new Date(report.at).toLocaleString(language) })}</header>
+        <header><strong>{formatDate(report.date, language)}</strong> · {fill(t('farm.daily.sentBy'), { name: report.byName, when: formatTime(report.at, language) })}</header>
         <ul>
           {report.animals.map((entry) => <li key={`a${entry.measureId}`}>{describe(entry)}</li>)}
           {report.costs.map((cost, index) => <li key={`c${index}`}>💵 {categoryName(cost.category, t)}: {amountText(cost.amount, cost.currency)}{cost.description ? ` — ${cost.description}` : ''}

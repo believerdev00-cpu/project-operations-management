@@ -61,6 +61,24 @@ export function dateLocale(language) {
   return language === 'en' ? 'en-GB' : language;
 }
 
+// A moment as people say it: "25 Oct 2026, 23:55" -- the same day format as
+// formatDate, the time without seconds. Used wherever a screen said when
+// something happened; toLocaleString(language) printed "10/25/2026, 11:55:27
+// PM" in English and differently ordered digits in every other language.
+export function formatDateTime(value, language) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleString(dateLocale(language), { ...DATE_STYLE, hour: '2-digit', minute: '2-digit' });
+}
+
+// The time of day alone, for a line that already names the date.
+export function formatTime(value, language) {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString(dateLocale(language), { hour: '2-digit', minute: '2-digit' });
+}
+
 export function formatDate(value, language) {
   if (!value) return '—';
   const [year, month, day] = String(value).slice(0, 10).split('-').map(Number);

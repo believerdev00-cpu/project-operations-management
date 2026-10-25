@@ -6,6 +6,7 @@
 //      dead weight or a sign a replacement was missed).
 //   4. No user-visible English is left hard-coded in the JSX.
 
+import { API_ERROR_CODES } from '../shared/apiErrors.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -103,6 +104,7 @@ const FAMILIES = {
   'discussion.filter.': ['open', 'resolved', 'all'],
   // The Boutique Manager's submissions to the Director.
   'btq.subKind.': ['report', 'incident'],
+  'apiError.': API_ERROR_CODES,
   'btq.subStatus.': ['submitted', 'accepted', 'returned'],
   // The boutique (shared/boutique.js): every list a screen renders through a
   // template key, so a value added there without its words fails here.

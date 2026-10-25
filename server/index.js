@@ -1056,30 +1056,30 @@ if (fs.existsSync(clientIndex)) {
 // refused (a non-numeric id, an impossible date, a duplicate, text too long for
 // its column) all used to surface as "Server or database error".
 const DATABASE_INPUT_ERRORS = {
-  '22P02': [400, 'One of the values sent is not in the expected format.'],
-  '22007': [400, 'One of the dates sent is not a valid date.'],
-  '22008': [400, 'One of the dates sent is out of range.'],
-  '22003': [400, 'One of the numbers sent is too large.'],
-  '22001': [400, 'One of the values sent is too long.'],
-  '23505': [409, 'A record with those details already exists.'],
-  '23503': [409, 'This record is linked to something that no longer exists, or is still in use elsewhere.'],
-  '23514': [400, 'One of the values sent is not allowed.'],
+  '22P02': [400, 'One of the values sent is not in the expected format.', 'BAD_FORMAT'],
+  '22007': [400, 'One of the dates sent is not a valid date.', 'BAD_DATE'],
+  '22008': [400, 'One of the dates sent is out of range.', 'BAD_DATE'],
+  '22003': [400, 'One of the numbers sent is too large.', 'NUMBER_TOO_LARGE'],
+  '22001': [400, 'One of the values sent is too long.', 'TOO_LONG'],
+  '23505': [409, 'A record with those details already exists.', 'DUPLICATE'],
+  '23503': [409, 'This record is linked to something that no longer exists, or is still in use elsewhere.', 'IN_USE'],
+  '23514': [400, 'One of the values sent is not allowed.', 'NOT_ALLOWED_VALUE'],
   // Two requests met on the same rows in opposite orders and Postgres gave
   // one of them up. Nothing of it was written; the caller simply tries again.
-  '40P01': [409, 'Another change got in first. Please try again.']
+  '40P01': [409, 'Another change got in first. Please try again.', 'TRY_AGAIN']
 };
 
 app.use((error, req, res, next) => {
   if (res.headersSent) return next(error);
   if (error?.type === 'entity.parse.failed') {
-    return res.status(400).json({ message: 'The request body is not valid JSON.' });
+    return res.status(400).json({ code: 'INVALID_JSON', message: 'The request body is not valid JSON.' });
   }
   if (error?.type === 'entity.too.large') {
-    return res.status(413).json({ message: 'The request is too large.' });
+    return res.status(413).json({ code: 'TOO_LARGE', message: 'The request is too large.' });
   }
   const known = DATABASE_INPUT_ERRORS[error?.code];
   if (known) {
-    return res.status(known[0]).json({ message: known[1] });
+    return res.status(known[0]).json({ code: known[2], message: known[1] });
   }
   // A RAISE EXCEPTION from a trigger -- the three-managers-per-sector rule -- is
   // a business rule speaking, and its message is written for people.
@@ -1087,7 +1087,7 @@ app.use((error, req, res, next) => {
     return res.status(400).json({ message: error.message });
   }
   console.error(error);
-  res.status(500).json({ message: 'Server or database error.' });
+  res.status(500).json({ code: 'SERVER_ERROR', message: 'Server or database error.' });
 });
 
 // Listen only when this file is the process entry point -- `node server/index.js`,

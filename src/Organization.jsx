@@ -1,3 +1,5 @@
+import { ProjectProgress } from './Progress.jsx';
+import { formatDateTime } from './format.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BUSINESS_OPERATIONS, isRetailOperation, operationName, operationsOf, worksIn } from '../shared/businessOperations.js';
 
@@ -120,6 +122,8 @@ export function TeamsSection({ user, fetchJson, onMessage, onError, onChanged, r
   const me = data.people.find((person) => person.id === user.id);
   const boss = me?.reportsToId ? data.people.find((person) => person.id === me.reportsToId) : null;
   const isStaff = user.role === 'staff';
+  // A team member on no team has nothing to read here; their Home is their work.
+  if (isStaff && !data.teams.length) return null;
 
   return <>
     <section className="panel" id="teams">
@@ -167,11 +171,15 @@ export function TeamsSection({ user, fetchJson, onMessage, onError, onChanged, r
 // Who reports to whom, for senior management: the chart with its two
 // branches, and the trail of every change to it. The Director sets a project
 // manager's line from the chart itself.
+const HISTORY_SHOWN = 5;
+
 export function OrganizationSection({ user, fetchJson, onMessage, onError, onChanged, reloadKey }) {
   const { language, t } = useI18n();
   const { data, history, failed, busy, load, act } = useOrganization({
     fetchJson, onMessage, onError, onChanged, reloadKey, withHistory: true
   });
+  // Every account change ever made ran to a page of its own on a phone.
+  const [allHistory, setAllHistory] = useState(false);
 
   if (!data) return <section className="panel"><SectionLoading failed={failed} onRetry={load} t={t} /></section>;
 
@@ -192,11 +200,14 @@ export function OrganizationSection({ user, fetchJson, onMessage, onError, onCha
     <section className="panel">
       <div className="panel-header"><div><h2>{t('org.history')}</h2></div></div>
       {history && history.length
-        ? <ul className="history-list">{history.map((row) => <li key={row.id}>
+        ? <><ul className="history-list">{(allHistory ? history : history.slice(0, HISTORY_SHOWN)).map((row) => <li key={row.id}>
           <strong>{t(`org.action.${row.action}`)}</strong>
           <span>{[row.subjectName, row.teamName && row.teamName !== row.subjectName ? row.teamName : null].filter(Boolean).join(' · ')}</span>
-          <small>{row.actorName} · {new Date(row.createdAt).toLocaleString(language)}</small>
+          <small>{row.actorName} · {formatDateTime(row.createdAt, language)}</small>
         </li>)}</ul>
+        {history.length > HISTORY_SHOWN && <button type="button" className="text-btn" onClick={() => setAllHistory(!allHistory)}>
+          {allHistory ? t('org.historyFewer') : fill(t('org.historyAll'), { count: history.length })}
+        </button>}</>
         : <div className="empty-state"><strong>{t('org.historyEmpty')}</strong></div>}
     </section>
   </>;
@@ -506,6 +517,7 @@ export function GeneralManagerHome({ user, summary, sectorRows, fetchJson, reloa
   const { language, t } = useI18n();
 
   const counts = summary || {};
+  const hasActivities = (sectorRows || []).some((row) => Number(row.activities) > 0);
   const tiles = [
     { id: 'overdue', count: counts.overdueWork || 0, tone: counts.overdueWork ? 'urgent' : 'calm', title: t('home.tileOverdue'), go: () => onGo('monthly') },
     { id: 'plans', count: counts.activePlans || 0, tone: 'calm', title: t('home.tileActivePlans'), go: () => onGo('monthly') },
@@ -515,7 +527,9 @@ export function GeneralManagerHome({ user, summary, sectorRows, fetchJson, reloa
     { id: 'manager-checks', count: counts.managerChecksWaiting || 0, tone: counts.managerChecksWaiting ? 'active' : 'calm', title: t('home.tileManagerChecks'), go: () => onGo('activities', 'manager-check') },
     { id: 'final-checks', count: counts.finalChecksWaiting || 0, tone: counts.finalChecksWaiting ? 'active' : 'calm', title: t('gm.tileFinalChecks'), go: () => onGo('activities', 'final-check') },
     { id: 'reports', count: counts.monthEndReportsWaiting || 0, tone: counts.monthEndReportsWaiting ? 'active' : 'calm', title: t('gm.tileReportsWithDirector'), go: () => onGo('reports') }
-  ];
+  // The three check-and-report tiles say something only when something waits;
+  // as a row of zeros they were most of the page’s first screen.
+  ].filter((tile) => tile.count > 0 || !['manager-checks', 'final-checks', 'reports'].includes(tile.id));
 
   return <div className="home">
     <section className="home-hello">
@@ -535,8 +549,9 @@ export function GeneralManagerHome({ user, summary, sectorRows, fetchJson, reloa
       </button>)}
     </div>
 
-    <h3 className="home-heading">{t('gm.operationsHeading')}</h3>
-    <div className="table-wrap"><table className="card-table">
+    {!hasActivities && <ProjectProgress fetchJson={fetchJson} reloadKey={reloadKey} compact />}
+    {hasActivities && <h3 className="home-heading">{t('gm.operationsHeading')}</h3>}
+    {hasActivities && <div className="table-wrap"><table className="card-table">
       <thead><tr>
         <th>{t('app.businessOperation')}</th>
         <th>{t('gm.colActivities')}</th>
@@ -551,7 +566,7 @@ export function GeneralManagerHome({ user, summary, sectorRows, fetchJson, reloa
         <td data-label={t('gm.colCompleted')}>{row.completedActivities}</td>
         <td data-label={t('gm.colWaiting')}>{row.decisionsPending + row.finalChecks}</td>
       </tr>)}</tbody>
-    </table></div>
+    </table></div>}
 
     <TeamsSection user={user} fetchJson={fetchJson} onMessage={onMessage} onError={onError} onChanged={onChanged} reloadKey={reloadKey} />
     <OrganizationSection user={user} fetchJson={fetchJson} onMessage={onMessage} onError={onError} onChanged={onChanged} reloadKey={reloadKey} />

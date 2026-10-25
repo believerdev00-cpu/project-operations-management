@@ -5,7 +5,7 @@ import { DAY_COLUMNS } from '../shared/dailyReport.js';
 import { displayLanguage, fill, useI18n } from './i18n.js';
 import { EvidenceList, EvidenceUpload, categoryLabel, trailActionLabel } from './ActivityReview.jsx';
 import { ActionIcon, DetailView, Fact, useBusy, useDialog } from './ui.jsx';
-import { DATE_STYLE, dateLocale, formatDate, formatUsd, todayLocal } from './format.js';
+import { DATE_STYLE, dateLocale, formatDate, formatUsd, todayLocal, formatDateTime } from './format.js';
 import { ExpensePanel } from './ExpensePanel.jsx';
 import { FilePicker, activityJourney, formatLocal, journeyLabel, journeyTone, nextAction } from './journey.jsx';
 import { objectiveState, objectiveStateTone } from './Home.jsx';
@@ -597,7 +597,9 @@ export default function MonthlyPlans({
   return <>
     <section className="context-strip">
       <div>
-        <span className="eyebrow">{t('monthly.eyebrow')}</span>
+        {/* "Monthly budget" above a manager's own plan read as if the page were
+            about money; their page is the work. */}
+        {isDirector && <span className="eyebrow">{t('monthly.eyebrow')}</span>}
         <h2>{isDirector ? t('monthly.title') : t('monthly.myPlan')}</h2>
         <p>{isDirector ? t('monthly.blurb') : t('monthly.myPlanBlurb')}</p>
       </div>
@@ -607,8 +609,9 @@ export default function MonthlyPlans({
     </section>
 
     {/* Stated on the screen itself, not only in the code: this is a record of
-        an approved budget, not a payment. */}
-    <p className="partner-notice">{t('monthly.noMoneyNotice')}</p>
+        an approved budget, not a payment. The Director's, who sets budgets; a
+        manager's page keeps to the work. */}
+    {isDirector && <p className="partner-notice">{t('monthly.noMoneyNotice')}</p>}
 
     {isDirector && <>
       {/* The month's money across every operation: the same three cards as
@@ -2288,7 +2291,7 @@ function PlanDetail({
     {history.length ? <ul className="history-list">{history.map((entry) => <li key={entry.id}>
       <strong>{trailActionLabel(entry.action, t)}</strong>
       {entry.field && <span> {planTrailValue(entry.field, entry.oldValue, t)} &rarr; {planTrailValue(entry.field, entry.newValue, t)}</span>}
-      <small>{entry.actorName} · {new Date(entry.createdAt).toLocaleString(language)}</small>
+      <small>{entry.actorName} · {formatDateTime(entry.createdAt, language)}</small>
       {entry.note && <small className="justification">{entry.note}</small>}
     </li>)}</ul> : <div className="empty-state"><strong>{t('empty.noHistory')}</strong><span>{t('empty.noHistoryHint')}</span></div>}
     </details>}

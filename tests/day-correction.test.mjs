@@ -106,6 +106,16 @@ try {
   check('a correction past the target is refused', pastTarget.status === 400 && pastTarget.body.code === 'OVER_TARGET', pastTarget.body);
   const pastBudget = await put(managerA.token, dayPath(second.body.day.id), { quantityDone: 3, cost: 300 });
   check('a correction past the budget is refused', pastBudget.status === 400, pastBudget.body);
+  // Each refusal names itself, with what its sentence needs, so the screen can
+  // say it in the reader's language (shared/apiErrors.js).
+  check('  named OVER_BUDGET, with what is left', pastBudget.body.code === 'OVER_BUDGET' && typeof pastBudget.body.remaining === 'number', pastBudget.body);
+  check('  the target refusal carries its unit and objective', pastTarget.body.unit === 'tonnes' && Boolean(pastTarget.body.title), pastTarget.body);
+  const outside = await post(managerA.token, '/api/monthly-plans/' + planId + '/reports', { date: '2001-01-05', quantityDone: 1 });
+  check('a day outside the month is DAY_OUTSIDE_MONTH, naming the month', outside.status === 400 && outside.body.code === 'DAY_OUTSIDE_MONTH' && outside.body.month === MONTH, outside.body);
+  const emptyDay = await post(managerA.token, '/api/monthly-plans/' + planId + '/reports', { date: day(5) });
+  check('an empty day is EMPTY_REPORT', emptyDay.status === 400 && emptyDay.body.code === 'EMPTY_REPORT', emptyDay.body);
+  const badJson = await api(managerA.token, '/api/monthly-plans/' + planId + '/reports', { method: 'POST', body: '{not json' });
+  check('a broken request is INVALID_JSON', badJson.status === 400 && badJson.body.code === 'INVALID_JSON', badJson.body);
   const atBudget = await put(managerA.token, dayPath(second.body.day.id), { quantityDone: 3, cost: 240 });
   check('  but spending exactly what is left is allowed', atBudget.status === 200, atBudget.body);
   const empty = await put(managerA.token, dayPath(second.body.day.id), { quantityDone: 0, cost: 0, notes: '' });

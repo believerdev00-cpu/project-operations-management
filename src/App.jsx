@@ -1,3 +1,4 @@
+import { API_ERROR_CODES, MONEY_ERROR_CODES } from '../shared/apiErrors.js';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 // The four whole-page modules, fetched the first time somebody opens them.
@@ -35,7 +36,7 @@ import ActivityReview, {
   ACTIVITY_STATUSES, MIN_CORRECTION_NOTE, approvalTone, approverName, categoryLabel,
   deadlineNote, formatDate, statusTone
 } from './ActivityReview.jsx';
-import { DATE_STYLE, dateLocale, formatUsd } from './format.js';
+import { DATE_STYLE, dateLocale, formatUsd, formatDateTime } from './format.js';
 import {
   ALL_OPERATIONS, DetailView, DialogProvider, ErrorBoundary, MINIMUM_PASSWORD_LENGTH, OperationChecks, PHONE_QUERY, buildHash, trapFocus, useBusy, useDialog,
   useHashRoute, useMediaQuery, useScrollLock
@@ -187,6 +188,14 @@ function authRefusal(payload, t) {
   }
 }
 
+// A refusal the API named with a code (shared/apiErrors.js), in the reader's
+// language, with the values it carries filled in; money is shown as dollars.
+function apiErrorText(payload, t) {
+  const values = { ...payload };
+  if (MONEY_ERROR_CODES.includes(payload.code) && payload.remaining !== undefined) values.remaining = formatUsd(payload.remaining);
+  return fill(t(`apiError.${payload.code}`), values);
+}
+
 // The one way every screen reaches the API. It carries the session, turns a
 // dead session into a sign-out, and reports failures in words a reader can act
 // on -- the method, status and URL go to the console for whoever is debugging,
@@ -231,7 +240,9 @@ function useApi(token, onExpired) {
     }
     // The code travels with the message, so a screen can act on a refusal
     // (choose who takes over) and not only print it.
-    const failure = new Error(payload.code ? authRefusal(payload, translator.current) : (payload.message || translator.current('app.requestFailed')));
+    const failure = new Error(API_ERROR_CODES.includes(payload.code)
+      ? apiErrorText(payload, translator.current)
+      : payload.code ? authRefusal(payload, translator.current) : (payload.message || translator.current('app.requestFailed')));
     failure.code = payload.code || null;
     failure.payload = payload;
     throw failure;
@@ -3319,7 +3330,7 @@ function ReportBody({ report, busy, sectorLabel, onExport, onPrint, onClose }) {
             same thing in the language the reader chose. */}
         <span>
           {formatDate(report.period.start)} {t('report.to')} {formatDate(report.period.end)}
-          {' '}&middot; {t('report.generated')} {new Date(report.generatedAt).toLocaleString(displayLanguage())}
+          {' '}&middot; {t('report.generated')} {formatDateTime(report.generatedAt, displayLanguage())}
         </span>
       </div>
       <div className="report-actions report-controls">

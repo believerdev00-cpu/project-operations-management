@@ -4,7 +4,7 @@ import { ExpensePanel } from './ExpensePanel.jsx';
 import { FilePicker, Journey, MoneyBar, NextStep, Section, activityJourney, goToSection } from './journey.jsx';
 import { ActionIcon, Fact } from './ui.jsx';
 import { worksIn } from '../shared/businessOperations.js';
-import { DATE_STYLE, dateLocale, formatUsd } from './format.js';
+import { DATE_STYLE, dateLocale, formatUsd, formatDateTime as formatMoment } from './format.js';
 
 // The Director's review screen for one activity, and the same record as the
 // manager sees it -- whether they raised it themselves or the Director handed
@@ -129,7 +129,7 @@ function formatLocal(value, currency) {
 }
 
 function formatDateTime(value) {
-  return value ? new Date(value).toLocaleString(displayLanguage()) : '—';
+  return formatMoment(value, displayLanguage());
 }
 
 // A deadline is a calendar day, not an instant. Handing '2026-01-05' to Date

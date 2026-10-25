@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { BUSINESS_OPERATIONS, operationName, operationsOf, worksIn } from '../shared/businessOperations.js';
+import { BUSINESS_OPERATIONS, operationName, operationsOf, worksIn, worksOnFarm } from '../shared/businessOperations.js';
 import { fill, useI18n } from './i18n.js';
 import { MoneyBar, activityJourney, journeyLabel, journeyTone, nextAction } from './journey.jsx';
 import { DATE_STYLE, dateLocale, todayLocal } from './format.js';
-import { ActionIcon, STEP_ICONS } from './ui.jsx';
+import { ActionIcon, STEP_ICONS, buildHash } from './ui.jsx';
 import { BudgetCards, MonthTrend, ProjectProgress } from './Progress.jsx';
 
 // How many of the newest manager-raised activities the Director's Home lists.
@@ -245,6 +245,10 @@ export default function Home({
   const operations = BUSINESS_OPERATIONS.filter((operation) => isDirector || worksIn(user, operation.id));
   const rowFor = (id) => (sectorRows || []).find((row) => row.id === id) || {};
   const planFor = (id) => (plans || []).find((plan) => plan.operation === id);
+  // This month's operations, split into those with a plan (a card each) and
+  // those without (one line, with the button that plans them).
+  const planned = operations.filter((operation) => planFor(operation.id));
+  const unplanned = operations.filter((operation) => !planFor(operation.id));
   // The manager's own months, taken from the review payload that is already
   // loaded -- it carries each plan's objectives and overall figure, so the
   // manager's dashboard costs no extra request. One per operation they run,
@@ -258,6 +262,7 @@ export default function Home({
   // A team member's page: their name for it, how much there is, and the list.
   if (isWorker) {
     const waiting = myWork === null;
+    const farmWorker = worksOnFarm(user);
     return <div className="home">
       <section className="home-hello">
         <div>
@@ -273,6 +278,17 @@ export default function Home({
         </li>)}
       </ul>}
 
+      {/* Somebody who works on the farm does their job there, not in a list
+          of activities: the two things they do, as the first thing they see. */}
+      {farmWorker && <div className="home-farm-actions">
+        <button type="button" className="primary-btn big-action" onClick={() => { window.location.hash = buildHash('farming', 'record'); }}>
+          <span aria-hidden="true">📝</span> {t('home.farmRecord')}
+        </button>
+        <button type="button" className="secondary-btn big-action" onClick={() => { window.location.hash = buildHash('farming', 'problems'); }}>
+          <span aria-hidden="true">⚠️</span> {t('home.farmProblem')}
+        </button>
+      </div>}
+
       {!waiting && (myWork.length > 0
         ? <>
           {/* Said in a sentence, because a number in a box does not tell somebody
@@ -282,7 +298,7 @@ export default function Home({
             : fill(t('home.howManyToDo'), { count: myWork.length })}</p>
           <WorkList items={myWork} user={user} t={t} language={language} onOpen={onOpenActivity} onStart={onStartWork} busy={busy} />
         </>
-        : <div className="empty-state">
+        : !farmWorker && <div className="empty-state">
           <strong>{t('home.noWorkTitle')}</strong>
           <span>{t('home.noWorkText')}</span>
         </div>)}
@@ -524,7 +540,7 @@ export default function Home({
     {/* This month's money across every operation: the same three cards as
         the monthly plan page, from the same review payload, so the two pages
         cannot show different figures for the same month. */}
-    {isDirector && planTotals && <>
+    {isDirector && planTotals && planned.length > 0 && <>
       <h3 className="home-heading">{`${t('home.budgetOverview')} · ${monthLabel(month, language)}`}</h3>
       <BudgetCards approved={planTotals.approvedBudget} spent={planTotals.totalSpent}
         remaining={planTotals.remainingBalance} unbudgeted={planTotals.spentWithoutBudget} t={t} />
@@ -540,9 +556,13 @@ export default function Home({
     {/* The operations at a glance are the Director's. A manager's Home is their
         own month and their latest day, and nothing else: their plan above is
         where they work. */}
-    {isDirector && <h3 className="home-heading">{`${t('home.sectorProgress')} · ${monthLabel(month, language)}`}</h3>}
-    {isDirector && <div className="home-operations">
-      {operations.map((operation) => {
+    {isDirector && plans !== null && unplanned.length > 0 && <div className="home-unplanned">
+      <p>{fill(t('home.notPlannedYet'), { month: monthLabel(month, language), operations: unplanned.map((operation) => operationName(operation.id, language)).join(', ') })}</p>
+      <button className="primary-btn" type="button" onClick={() => onGo('monthly', 'create')}>{t('home.createPlan')}</button>
+    </div>}
+    {isDirector && planned.length > 0 && <h3 className="home-heading">{`${t('home.sectorProgress')} · ${monthLabel(month, language)}`}</h3>}
+    {isDirector && planned.length > 0 && <div className="home-operations">
+      {planned.map((operation) => {
         const plan = planFor(operation.id);
         const row = rowFor(operation.id);
         return <article key={operation.id} className={`operation-card operation-${operation.id}`}>
@@ -581,11 +601,11 @@ export default function Home({
             ? <MoneyBar approved={plan.approvedBudget} spent={plan.totalSpent}
               format={formatUsdShort} rates={rate} />
             : <p className="operation-empty">{isDirector ? t('home.planThisMonth') : t('home.noPlanForYou')}</p>}
-          <ul className="operation-facts">
-            <li><strong>{row.activeActivities || 0}</strong> {t('home.underWay')}</li>
-            <li><strong>{row.decisionsPending || 0}</strong> {t('home.waitingDecision')}</li>
-            <li><strong>{row.finalChecks || 0}</strong> {t('home.waitingCheck')}</li>
-          </ul>
+          {(row.activeActivities || row.decisionsPending || row.finalChecks) > 0 && <ul className="operation-facts">
+            {row.activeActivities > 0 && <li><strong>{row.activeActivities}</strong> {t('home.underWay')}</li>}
+            {row.decisionsPending > 0 && <li><strong>{row.decisionsPending}</strong> {t('home.waitingDecision')}</li>}
+            {row.finalChecks > 0 && <li><strong>{row.finalChecks}</strong> {t('home.waitingCheck')}</li>}
+          </ul>}
           <div className="operation-actions">
             {plan
               ? <button className="secondary-btn" type="button" onClick={() => onOpenPlan(plan.id)}>{t('home.openMonth')}</button>

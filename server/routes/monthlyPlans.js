@@ -1944,7 +1944,7 @@ router.post('/:id/start', asyncRoute(async (req, res) => {
 router.post('/:id/reports', asyncRoute(async (req, res) => {
   const plan = await loadPlan(req.params.id, req.user);
   if (!canWorkPlan(req.user, plan)) {
-    return res.status(403).json({ message: 'Only the manager of this project can report on this month.' });
+    return res.status(403).json({ code: 'NOT_YOUR_PLAN', message: 'Only the manager of this project can report on this month.' });
   }
   // THE MANAGER OWNS THE OPERATIONAL RECORD. The Director monitors the month;
   // they do not lead it and they do not enter what happened in it. Letting them
@@ -1960,21 +1960,21 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
     });
   }
   if (plan.status === 'Draft') {
-    return res.status(409).json({ message: 'The Director has not confirmed this month yet, so there is nothing to report against.' });
+    return res.status(409).json({ code: 'PLAN_NOT_CONFIRMED', message: 'The Director has not confirmed this month yet, so there is nothing to report against.' });
   }
   if (plan.status === 'Closed') {
-    return res.status(400).json({ message: 'This month has been closed. Ask the Director to reopen it.' });
+    return res.status(400).json({ code: 'PLAN_CLOSED', message: 'This month has been closed. Ask the Director to reopen it.' });
   }
 
   const payload = req.body || {};
   const reportDate = payload.date ? String(payload.date).slice(0, 10) : null;
   if (!reportDate || !isValidDate(reportDate)) {
-    return res.status(400).json({ message: 'Give the day this work was done.' });
+    return res.status(400).json({ code: 'DAY_REQUIRED', message: 'Give the day this work was done.' });
   }
   // Work reported against September belongs in September, or the month's own
   // total counts days that were not part of it.
   if (monthKey(reportDate) !== monthKey(plan.month)) {
-    return res.status(400).json({ message: `That day is outside this month. Choose a day in ${monthKey(plan.month)}.` });
+    return res.status(400).json({ code: 'DAY_OUTSIDE_MONTH', month: monthKey(plan.month), message: `That day is outside this month. Choose a day in ${monthKey(plan.month)}.` });
   }
   // Which of the month's commitments this day counted towards. A day of
   // irrigating and a day of cultivating are different work, and pooling them
@@ -2004,12 +2004,12 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
   }
 
   if (!validNumber(payload.quantityDone ?? 0)) {
-    return res.status(400).json({ message: 'The work done must be a number that is not negative.' });
+    return res.status(400).json({ code: 'BAD_QUANTITY', message: 'The work done must be a number that is not negative.' });
   }
   const quantityDone = round2(payload.quantityDone ?? 0);
   // Cost is optional and defaults to nothing.
   if (!validNumber(payload.cost ?? 0)) {
-    return res.status(400).json({ message: 'The cost must be a number that is not negative.' });
+    return res.status(400).json({ code: 'BAD_COST', message: 'The cost must be a number that is not negative.' });
   }
   const cost = round2(payload.cost ?? 0);
   // `notes` is the Description on the form.
@@ -2017,7 +2017,7 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
   const workStatus = readWorkStatus(payload.workStatus);
   const remarks = optionalText(payload.remarks, 4000);
   if (!quantityDone && !cost && !notes && !workStatus && !remarks) {
-    return res.status(400).json({ message: 'Say what was done, what it cost, or leave a note -- an empty report records nothing.' });
+    return res.status(400).json({ code: 'EMPTY_REPORT', message: 'Say what was done, what it cost, or leave a note -- an empty report records nothing.' });
   }
 
   const client = await pool.connect();
@@ -2057,7 +2057,7 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
           return await refuse(client, res, 400, {
             message: `Only ${remaining} ${objective.target_unit} of "${objective.title}" is left. Reporting ${quantityDone} would take it past the target.`,
             code: 'OVER_TARGET',
-            remaining
+            remaining, unit: objective.target_unit || '', title: objective.title
           });
         }
       }
@@ -2077,6 +2077,7 @@ router.post('/:id/reports', asyncRoute(async (req, res) => {
       if (!fitsRemaining(cost, approved, spentSoFar)) {
         return await refuse(client, res, 400, {
           message: OVER_BUDGET_MESSAGE,
+          code: 'OVER_BUDGET',
           approvedBudget: approved,
           alreadySpent: spentSoFar,
           remaining: fromCents(cents(approved) - cents(spentSoFar))
@@ -2259,17 +2260,17 @@ router.put('/:id/reports/:reportId', asyncRoute(async (req, res) => {
     return res.status(403).json({ message: 'Only the manager who recorded this day can correct it.' });
   }
   if (!isPlanOpen(plan)) {
-    return res.status(400).json({ message: 'This month has been closed. Ask the Director to reopen it.' });
+    return res.status(400).json({ code: 'PLAN_CLOSED', message: 'This month has been closed. Ask the Director to reopen it.' });
   }
   const reportId = parseId(req.params.reportId);
   if (!reportId) return res.status(404).json({ message: 'That daily report was not found.' });
 
   const payload = req.body || {};
   if (!validNumber(payload.quantityDone ?? 0)) {
-    return res.status(400).json({ message: 'The work done must be a number that is not negative.' });
+    return res.status(400).json({ code: 'BAD_QUANTITY', message: 'The work done must be a number that is not negative.' });
   }
   if (!validNumber(payload.cost ?? 0)) {
-    return res.status(400).json({ message: 'The cost must be a number that is not negative.' });
+    return res.status(400).json({ code: 'BAD_COST', message: 'The cost must be a number that is not negative.' });
   }
   const quantityDone = round2(payload.quantityDone ?? 0);
   const cost = round2(payload.cost ?? 0);
@@ -2337,7 +2338,7 @@ router.put('/:id/reports/:reportId', asyncRoute(async (req, res) => {
           return await refuse(client, res, 400, {
             message: `Only ${remaining} ${objective.target_unit} of "${objective.title}" is left. Reporting ${quantityDone} would take it past the target.`,
             code: 'OVER_TARGET',
-            remaining
+            remaining, unit: objective.target_unit || '', title: objective.title
           });
         }
       }
@@ -2348,6 +2349,7 @@ router.put('/:id/reports/:reportId', asyncRoute(async (req, res) => {
       if (!fitsRemaining(cost, approved, spentWithout)) {
         return await refuse(client, res, 400, {
           message: OVER_BUDGET_MESSAGE,
+          code: 'OVER_BUDGET',
           approvedBudget: approved,
           alreadySpent: spentWithout,
           remaining: fromCents(cents(approved) - cents(spentWithout))
@@ -2675,7 +2677,7 @@ router.post('/:id/activities/:activityId/work', asyncRoute(async (req, res) => {
   // Work towards September's plan happens in September. A day outside the month
   // would be counted in a month whose budget it is not spending.
   if (monthKey(scheduledFor) !== monthKey(plan.month)) {
-    return res.status(400).json({ message: `That day is outside this month. Choose a day in ${monthKey(plan.month)}.` });
+    return res.status(400).json({ code: 'DAY_OUTSIDE_MONTH', month: monthKey(plan.month), message: `That day is outside this month. Choose a day in ${monthKey(plan.month)}.` });
   }
   if (!validNumber(payload.budget ?? 0)) {
     return res.status(400).json({ message: 'The budget for this work must be a valid non-negative number.' });

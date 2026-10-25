@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { operationName } from '../shared/businessOperations.js';
 import { categoryLabel } from './ActivityReview.jsx';
-import { DATE_STYLE, dateLocale } from './format.js';
+import { DATE_STYLE, dateLocale, formatDateTime as formatDateTimeShared } from './format.js';
 import { fill } from './i18n.js';
 import { readableNote } from '../shared/workbookNote.js';
 import { ProjectDiscussion } from './Discussion.jsx';
@@ -43,7 +43,7 @@ function formatDate(value, language) {
 }
 
 function formatDateTime(value, language) {
-  return value ? new Date(value).toLocaleString(language) : '—';
+  return formatDateTimeShared(value, language);
 }
 
 function statusTone(status) {

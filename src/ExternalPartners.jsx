@@ -1,3 +1,4 @@
+import { formatDateTime } from './format.js';
 import { Fragment, useState } from 'react';
 import { BUSINESS_OPERATIONS, operationName } from '../shared/businessOperations.js';
 import { OperationChecks } from './ui.jsx';
@@ -151,7 +152,7 @@ export default function ExternalPartners({
           {thread.unreadByDirector > 0 && <button className="text-btn" type="button" disabled={busy} onClick={() => onMarkRead(thread)}>{t('partners.markRead')}</button>}
         </header>
         {thread.messages.map((message) => <div key={message.id} className={message.authorRole === 'partner' ? 'message theirs' : 'message mine'}>
-          <small>{message.authorName} · {new Date(message.createdAt).toLocaleString(language)}</small>
+          <small>{message.authorName} · {formatDateTime(message.createdAt, language)}</small>
           <p>{message.body}</p>
         </div>)}
         <form className="message-reply" onSubmit={(event) => {

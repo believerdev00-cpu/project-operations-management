@@ -592,7 +592,7 @@ router.post('/products', asyncRoute(async (req, res) => {
   // merged: merging would move stock and history between products on a guess.
   const twin = await pool.query("SELECT id, name FROM boutique_products WHERE lower(name) = lower($1) AND status = 'active' LIMIT 1", [product.name]);
   if (twin.rowCount) {
-    throw new BoutiqueError(409, `A product called "${twin.rows[0].name}" is already in the shop. To add more of it, use Update stock on that product, or give this one a different name.`, 'PRODUCT_EXISTS');
+    throw new BoutiqueError(409, `A product called "${twin.rows[0].name}" is already in the shop. To add more of it, use Update stock on that product, or give this one a different name.`, 'PRODUCT_EXISTS', { product: twin.rows[0].name });
   }
   const created = await transaction(async (client) => {
     const inserted = await client.query(
@@ -1221,7 +1221,7 @@ router.post('/stock/adjustments', asyncRoute(async (req, res) => {
     if (!variant.rowCount) throw new BoutiqueError(404, 'Variant not found.');
     const delta = adjustmentDelta(kind, quantity, variant.rows[0].stock_quantity);
     if (delta < 0 && variant.rows[0].stock_quantity + delta < 0) {
-      throw new BoutiqueError(409, `Only ${variant.rows[0].stock_quantity} in stock, so ${quantity} cannot be taken out. Please check the number.`, 'INSUFFICIENT_STOCK');
+      throw new BoutiqueError(409, `Only ${variant.rows[0].stock_quantity} in stock, so ${quantity} cannot be taken out. Please check the number.`, 'INSUFFICIENT_STOCK', { available: variant.rows[0].stock_quantity, asked: quantity, product: '' });
     }
     const inserted = await client.query(
       `INSERT INTO boutique_stock_adjustments (variant_id, kind, quantity, delta, reason, status, requested_by, request_key) VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7) RETURNING *`,
@@ -1391,7 +1391,7 @@ router.post('/shelf-counts', asyncRoute(async (req, res) => {
       if (line.counted > variant.stock_quantity) {
         throw new BoutiqueError(409,
           `"${variant.product_name}": you counted ${line.counted}, but the shelf should only hold ${variant.stock_quantity}. If new stock came in, record it first (Update stock → New stock arrived), then count again.`,
-          'COUNT_ABOVE_SHELF');
+          'COUNT_ABOVE_SHELF', { product: variant.product_name, counted: line.counted, available: variant.stock_quantity });
       }
     }
     const inserted = await client.query(
@@ -2201,7 +2201,7 @@ router.get('/audit', asyncRoute(async (req, res) => {
 // 500 for the rest.
 router.use((error, req, res, next) => {
   if (error instanceof BoutiqueError) {
-    return res.status(error.status).json({ message: error.message, ...(error.code ? { code: error.code } : {}) });
+    return res.status(error.status).json({ message: error.message, ...(error.code ? { code: error.code } : {}), ...(error.params || {}) });
   }
   if (error instanceof multer.MulterError) {
     return res.status(400).json({ message: error.code === 'LIMIT_FILE_SIZE' ? 'The picture is larger than 4 MB.' : 'The upload was refused.' });
