@@ -1156,41 +1156,28 @@ function StockTab({ fetchJson, onMessage, onError, changed, can, query }) {
 // routes/boutique.js); the totals line is the sum of the rows.
 function StockProfitPanel({ data }) {
   const { t } = useI18n();
-  const rows = data.rows.filter((r) => r.opening || r.received || r.sold || r.other || r.closing);
-  const signed = (n) => (n > 0 ? `+${n}` : String(n));
-  return <Panel title={t('btq.sp.title')} subtitle={t('btq.sp.blurb')}>
-    <p className="field-hint">{t('btq.sp.formula')}</p>
+  // Per product, only what the owner asks: how many sold, how many are left,
+  // the money they brought and the profit on them. The full stock movement
+  // (start, came in, damaged) is in the Stock tab and the exported report.
+  const rows = data.rows.filter((r) => r.sold || r.closing);
+  return <Panel title={t('btq.sp.title')}>
     {rows.length ? <div className="table-wrap"><table className="card-table btq-stock-profit">
-      <thead><tr>
-        <th>{t('btq.product')}</th><th>{t('btq.sp.opening')}</th><th>{t('btq.sp.received')}</th><th>{t('btq.sp.sold')}</th>
-        <th>{t('btq.sp.other')}</th><th>{t('btq.sp.closing')}</th><th>{t('btq.sp.revenue')}</th><th>{t('btq.sp.cost')}</th>
-        <th>{t('btq.sp.profit')}</th><th>{t('btq.sp.stockValue')}</th>
-      </tr></thead>
+      <thead><tr><th>{t('btq.product')}</th><th>{t('btq.sp.sold')}</th><th>{t('btq.sp.closing')}</th><th>{t('btq.sp.revenue')}</th><th>{t('btq.sp.profit')}</th></tr></thead>
       <tbody>{rows.map((r) => <tr key={r.variantId}>
-        <td className="card-title-cell"><strong>{fullName(r)}</strong><small>{r.sku}</small></td>
-        <td data-label={t('btq.sp.opening')}>{qty(r.opening, r.unit)}</td>
-        <td data-label={t('btq.sp.received')}>{r.received ? `+${r.received}` : 0}</td>
+        <td className="card-title-cell"><strong>{fullName(r)}</strong></td>
         <td data-label={t('btq.sp.sold')}><strong>{qty(r.sold, r.unit)}</strong></td>
-        <td data-label={t('btq.sp.other')}>{signed(r.other)}</td>
         <td data-label={t('btq.sp.closing')}>{qty(r.closing, r.unit)}</td>
         <td data-label={t('btq.sp.revenue')}>{money(r.revenue)}</td>
-        <td data-label={t('btq.sp.cost')}>{money(r.cost)}</td>
         <td data-label={t('btq.sp.profit')}><strong className={r.profit < 0 ? 'over-budget' : undefined}>{money(r.profit)}</strong></td>
-        <td data-label={t('btq.sp.stockValue')}>{money(r.stockValue)}</td>
       </tr>)}</tbody>
-      <tfoot><tr className="btq-total-row">
-        <td className="card-title-cell"><strong>{t('btq.total')}</strong></td>
-        <td data-label={t('btq.sp.opening')}>{data.totals.opening}</td>
-        <td data-label={t('btq.sp.received')}>{signed(data.totals.received)}</td>
-        <td data-label={t('btq.sp.sold')}><strong>{data.totals.sold}</strong></td>
-        <td data-label={t('btq.sp.other')}>{signed(data.totals.other)}</td>
-        <td data-label={t('btq.sp.closing')}>{data.totals.closing}</td>
-        <td data-label={t('btq.sp.revenue')}><strong>{money(data.totals.revenue)}</strong></td>
-        <td data-label={t('btq.sp.cost')}>{money(data.totals.cost)}</td>
-        <td data-label={t('btq.sp.profit')}><strong>{money(data.totals.profit)}</strong></td>
-        <td data-label={t('btq.sp.stockValue')}><strong>{money(data.totals.stockValue)}</strong></td>
-      </tr></tfoot>
     </table></div> : <Empty>{t('btq.nothingInPeriod')}</Empty>}
+    {/* The totals as plain lines under the table, not a table row: a row
+        drawn as a card on a phone ran its labels into its figures. */}
+    {rows.length > 0 && <div className="btq-stock-preview">
+      <Fact label={t('btq.sp.sold')} value={<strong>{data.totals.sold}</strong>} />
+      <Fact label={t('btq.sp.revenue')} value={<strong>{money(data.totals.revenue)}</strong>} />
+      <Fact label={t('btq.sp.profit')} value={<strong>{money(data.totals.profit)}</strong>} />
+    </div>}
   </Panel>;
 }
 
@@ -1706,7 +1693,6 @@ function FinanceGrid({ f }) {
       <Metric label={t('btq.purchasesReceived')} value={money(f.purchases.value)} />
       <Metric label={t('btq.owedToSuppliers')} value={money(f.supplierBalance)} />
     </div>
-    <p className="field-hint">{t('btq.noDoubleCount')}</p>
     <div className="table-wrap"><table className="card-table">
       <thead><tr><th>{t('btq.method')}</th><th>{t('btq.taken')}</th><th>{t('btq.change')}</th><th>{t('btq.refunded')}</th><th>{t('btq.receivedMoney')}</th></tr></thead>
       <tbody>{f.paymentsByMethod.map((m) => <tr key={m.method}>
@@ -1766,8 +1752,9 @@ function ToDirectorPanel({ fetchJson, onMessage, onError, changed, can, period, 
       refresh();
     } catch (error) { onError(error.message); }
   });
-  return <Panel title={t('btq.toDirector')} subtitle={t('btq.toDirectorBlurb')}>
-    {can.manage && <div className="button-row">
+  // Only the Boutique Manager sends: the Director is who it is sent to.
+  return <Panel title={t('btq.toDirector')}>
+    {can.role === 'manager' && <div className="button-row">
       <button type="button" className="primary-btn big-action" disabled={busy} onClick={sendReport}>{t('btq.sendReport')}</button>
       <button type="button" className="secondary-btn" disabled={busy} onClick={raise}>{t('btq.raiseIssue')}</button>
     </div>}
@@ -1828,9 +1815,6 @@ function ReportsTab({ fetchJson, onMessage, onError, changed, can, query }) {
   const { t, language } = useI18n();
   const [period, setPeriod] = useState(() => defaultPeriod('daily'));
   const [report] = useLoad(fetchJson, `/api/boutique/reports?${periodQuery(period)}`, 0, onError);
-  // Each detail is a folded section with its row count on the bar, so the page
-  // reads as a list of headings under the summary; an empty one says so.
-  const section = (title, rows, head, row) => <Section title={title} count={rows?.length ?? 0}>{rows?.length ? <div className="table-wrap"><table className="card-table"><thead><tr>{head.map((h) => <th key={h}>{h}</th>)}</tr></thead><tbody>{rows.map(row)}</tbody></table></div> : <Empty>{t('btq.nothingInPeriod')}</Empty>}</Section>;
   return <>
     {/* A folded section prints folded: open them all first, so the paper
         carries the whole report and not a list of headings. */}
@@ -1841,47 +1825,6 @@ function ReportsTab({ fetchJson, onMessage, onError, changed, can, query }) {
     </Panel>
     <ToDirectorPanel fetchJson={fetchJson} onMessage={onMessage} onError={onError} changed={changed} can={can} period={period} query={query} />
     {report?.stockProfit && <StockProfitPanel data={report.stockProfit} />}
-    {report && <Panel title={t('btq.reportDetails')}><div className="btq-report">
-      {section(t('btq.salesByDay'), report.salesByDay, [t('table.date'), t('btq.tab.sales'), t('btq.total'), t('btq.discounts')],
-        (r) => <tr key={r.day}><td className="card-title-cell"><strong>{formatDate(r.day, language)}</strong></td><td data-label={t('btq.tab.sales')}>{r.sales}</td><td data-label={t('btq.total')}>{money(r.total)}</td><td data-label={t('btq.discounts')}>{money(r.discounts)}</td></tr>)}
-      {section(t('btq.popularProducts'), report.topProducts, [t('btq.product'), t('btq.pieces'), t('btq.revenue'), t('btq.profit')],
-        (r) => <tr key={r.sku}><td className="card-title-cell"><strong>{r.productName}</strong><small>{r.sku} {variantLabel(r)}</small></td><td data-label={t('btq.pieces')}>{r.pieces}</td><td data-label={t('btq.revenue')}>{money(r.revenue)}</td><td data-label={t('btq.profit')}>{money(r.profit)}</td></tr>)}
-      {section(t('btq.sizeDemand'), report.sizeDemand, [t('btq.size'), t('btq.pieces')], (r) => <tr key={r.size}><td className="card-title-cell"><strong>{r.size}</strong></td><td data-label={t('btq.pieces')}>{r.pieces}</td></tr>)}
-      {section(t('btq.colorDemand'), report.colorDemand, [t('btq.color'), t('btq.pieces')], (r) => <tr key={r.color}><td className="card-title-cell"><strong>{r.color}</strong></td><td data-label={t('btq.pieces')}>{r.pieces}</td></tr>)}
-      {section(t('btq.byType'), report.typeDemand, [t('btq.productType'), t('btq.pieces'), t('btq.revenue')],
-        (r) => <tr key={r.productType}><td className="card-title-cell"><strong>{t(`btq.type.${r.productType}`)}</strong></td><td data-label={t('btq.pieces')}>{r.pieces}</td><td data-label={t('btq.revenue')}>{money(r.revenue)}</td></tr>)}
-      <Section title={`${t('btq.inventoryReport')} · ${report.inventory.pieces} · ${money(report.inventory.value)}`} count={report.inventory.lowStock.length || null}>
-        {report.inventory.byType.length > 0 && <ul className="history-list">{report.inventory.byType.map((r) => <li key={r.productType}>{t(`btq.type.${r.productType}`)}: {r.pieces} · {money(r.value)}</li>)}</ul>}
-        {report.inventory.lowStock.length ? <div className="table-wrap"><table className="card-table"><thead><tr><th>{t('btq.lowStock')}</th><th>{t('btq.stock')}</th><th>{t('btq.reorderLevel')}</th></tr></thead>
-          <tbody>{report.inventory.lowStock.map((v) => <tr key={v.id}><td className="card-title-cell"><strong>{fullName(v)}</strong><small>{v.sku}</small></td><td data-label={t('btq.stock')}>{v.stockQuantity}</td><td data-label={t('btq.reorderLevel')}>{v.reorderLevel}</td></tr>)}</tbody></table></div> : <p className="field-hint">{t('btq.noLowStock')}</p>}
-      </Section>
-      <Section title={t('btq.purchasesReport')}>
-        <div className="detail-facts">
-          <Fact label={t('btq.deliveries')} value={report.purchases.receipts} />
-          <Fact label={t('btq.pieces')} value={report.purchases.pieces} />
-          <Fact label={t('btq.purchasesReceived')} value={money(report.purchases.value)} />
-          <Fact label={t('btq.paymentsMade')} value={money(report.purchases.supplierPayments)} />
-          <Fact label={t('btq.owedToSuppliers')} value={money(report.purchases.supplierBalance)} />
-        </div>
-      </Section>
-      {section(t('btq.expensesByCategory'), report.expensesByCategory, [t('field.category'), t('btq.count'), t('btq.total')],
-        (r) => <tr key={r.category}><td className="card-title-cell"><strong>{r.category}</strong></td><td data-label={t('btq.count')}>{r.count}</td><td data-label={t('btq.total')}>{money(r.total)}</td></tr>)}
-      {section(t('btq.returns'), report.returns, [t('btq.number'), t('table.date'), t('btq.returnKindLabel'), t('btq.value'), t('btq.refund'), t('btq.reason')],
-        (r) => <tr key={r.id}><td className="card-title-cell"><strong>{r.number}</strong><small>{r.saleNumber}</small></td><td data-label={t('table.date')}>{formatDate(r.returnedOn, language)}</td><td data-label={t('btq.returnKindLabel')}>{t(`btq.returnKind.${r.kind}`)}</td><td data-label={t('btq.value')}>{money(r.value)}</td><td data-label={t('btq.refund')}>{money(r.refundTotal)}</td><td data-label={t('btq.reason')}>{r.reason}</td></tr>)}
-      <Section title={`${t('btq.reconciliation')} · ${fill(t('btq.closedTills'), { count: report.paymentReconciliation.closedSessions })}`}>
-        <div className="table-wrap"><table className="card-table">
-          <thead><tr><th>{t('btq.method')}</th><th>{t('btq.receivedMoney')}</th><th>{t('btq.tillExpected')}</th><th>{t('btq.tillCounted')}</th><th>{t('btq.variance')}</th></tr></thead>
-          <tbody>{report.paymentReconciliation.methods.map((m) => <tr key={m.method}>
-            <td className="card-title-cell"><strong>{t(`btq.method.${m.method}`)}</strong></td>
-            <td data-label={t('btq.receivedMoney')}>{money(m.received)}</td><td data-label={t('btq.tillExpected')}>{money(m.tillExpected)}</td>
-            <td data-label={t('btq.tillCounted')}>{m.tillCounted === null ? '—' : money(m.tillCounted)}</td>
-            <td data-label={t('btq.variance')}>{m.tillVariance === null ? '—' : <span className={m.tillVariance < 0 ? 'over-budget' : undefined}>{money(m.tillVariance)}</span>}</td>
-          </tr>)}</tbody>
-        </table></div>
-      </Section>
-      {section(t('btq.cashierPerformance'), report.cashierPerformance, [t('btq.cashier'), t('btq.tab.sales'), t('btq.pieces'), t('btq.total'), t('btq.averageSale'), t('btq.discounts'), t('btq.returns'), t('btq.voidedCount')],
-        (r) => <tr key={r.cashierId}><td className="card-title-cell"><strong>{r.name}</strong></td><td data-label={t('btq.tab.sales')}>{r.sales}</td><td data-label={t('btq.pieces')}>{r.pieces}</td><td data-label={t('btq.total')}>{money(r.total)}</td><td data-label={t('btq.averageSale')}>{money(r.average)}</td><td data-label={t('btq.discounts')}>{money(r.discounts)}</td><td data-label={t('btq.returns')}>{r.returns}</td><td data-label={t('btq.voidedCount')}>{r.voided}</td></tr>)}
-    </div></Panel>}
   </>;
 }
 
