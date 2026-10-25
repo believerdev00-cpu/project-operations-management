@@ -66,7 +66,6 @@ const STRINGS = {
   'auth.password': { en: 'Password', rw: 'Ijambobanga', fr: 'Mot de passe', sw: 'Nenosiri' },
 
   // ---- navigation ----------------------------------------------------------
-  'nav.approvalQueue': { en: 'Needs my approval', rw: 'Bikeneye kwemezwa nanjye', fr: 'À approuver', sw: 'Inahitaji idhini yangu' },
   'nav.projects': { en: 'Projects', rw: 'Imishinga', fr: 'Projets', sw: 'Miradi' },
   'nav.activities': { en: 'Activities', rw: 'Ibikorwa', fr: 'Activités', sw: 'Shughuli' },
   'nav.movements': { en: 'Trips & Facilitation', rw: 'Ingendo n’Ubufasha', fr: 'Trajets et facilitation', sw: 'Safari na Uwezeshaji' },
@@ -315,7 +314,6 @@ const STRINGS = {
   'review.decisionFirst': { en: 'This is waiting for a decision. Approve or reject it first; until then you can only pause or cancel it here.', rw: 'Ibi bitegereje icyemezo. Banza ubyemeze cyangwa ubyange; kugeza icyo gihe hano ushobora kubihagarika by’agateganyo cyangwa kubihagarika burundu gusa.', fr: 'Ceci attend une décision. Approuvez-le ou rejetez-le d’abord ; en attendant, vous ne pouvez ici que le mettre en pause ou l’annuler.', sw: 'Hili linasubiri uamuzi. Liidhinishe au ulikatae kwanza; hadi hapo unaweza tu kulisitisha au kulighairi hapa.' },
   'nav.home': { en: 'Home', rw: 'Ahabanza', fr: 'Accueil', sw: 'Nyumbani' },
   'nav.more': { en: 'More', rw: 'Ibindi', fr: 'Plus', sw: 'Zaidi' },
-  'nav.shortApprovals': { en: 'Approvals', rw: 'Kwemeza', fr: 'Approbations', sw: 'Idhini' },
   'nav.shortBudget': { en: 'Plan', rw: 'Gahunda', fr: 'Plan', sw: 'Mpango' },
   'nav.shortTrips': { en: 'Trips', rw: 'Ingendo', fr: 'Trajets', sw: 'Safari' },
   'form.activityPlaceholder': { en: 'What needs doing? e.g. Buy fertilizer for plot 2', rw: 'Ni iki gikenewe? urugero: Kugura ifumbire y’umurima wa 2', fr: 'Que faut-il faire ? ex. Acheter de l’engrais pour la parcelle 2', sw: 'Nini kinahitajika? mfano Kununua mbolea kwa shamba la 2' },
@@ -337,7 +335,6 @@ const STRINGS = {
   'home.latestFromManagers': { en: 'Latest from managers', rw: 'Ibiheruka koherezwa n’abayobozi', fr: 'Derniers envois des responsables', sw: 'Za hivi karibuni kutoka kwa mameneja' },
   'home.latestFromManagersHint': { en: 'The five newest activities managers added, whatever their state. The full history is in Reports.', rw: 'Ibikorwa bitanu biheruka abayobozi bongeyeho, uko byaba bimeze kose. Amateka yose ari muri Raporo.', fr: 'Les cinq activités les plus récentes ajoutées par les responsables, quel que soit leur état. L’historique complet est dans Rapports.', sw: 'Shughuli tano za karibuni zilizoongezwa na mameneja, hali yoyote ile. Historia kamili iko kwenye Ripoti.' },
   'home.newTrip': { en: 'New trip', rw: 'Urugendo rushya', fr: 'Nouveau déplacement', sw: 'Safari mpya' },
-  'home.seeAll': { en: 'See all {count}', rw: 'Reba byose ({count})', fr: 'Tout voir ({count})', sw: 'Ona zote {count}' },
   'home.recentUpdates': { en: 'What happened lately', rw: 'Ibyabaye vuba', fr: 'Ce qui s’est passé récemment', sw: 'Yaliyotokea hivi karibuni' },
   'home.myLatestUpdate': { en: 'Your latest update', rw: 'Ibyo uheruka kwandika', fr: 'Votre dernière mise à jour', sw: 'Taarifa yako ya hivi karibuni' },
   'home.updateDid': { en: 'recorded {amount} {unit}', rw: 'yanditse {amount} {unit}', fr: '{amount} {unit} enregistrés', sw: 'ameandika {amount} {unit}' },
@@ -1421,7 +1418,6 @@ const STRINGS = {
 
   // ---- the Director's dashboard -------------------------------------------------
   'home.createPlan': { en: 'Create monthly plan', rw: 'Kora gahunda y’ukwezi', fr: 'Créer un plan mensuel', sw: 'Unda mpango wa mwezi' },
-  'home.reviewWork': { en: 'Review work', rw: 'Suzuma akazi', fr: 'Examiner le travail', sw: 'Pitia kazi' },
   'home.viewReports': { en: 'View reports', rw: 'Reba raporo', fr: 'Voir les rapports', sw: 'Tazama ripoti' },
   'home.tileActivePlans': { en: 'Active plans', rw: 'Gahunda zirimo gukora', fr: 'Plans actifs', sw: 'Mipango inayotumika' },
   'home.tileInProgress': { en: 'Work in progress', rw: 'Akazi karimo gukorwa', fr: 'Travaux en cours', sw: 'Kazi inayoendelea' },
@@ -1451,10 +1447,8 @@ const STRINGS = {
   'home.actionSubmit': { en: 'Submit for review', rw: 'Ohereza ngo bisuzumwe', fr: 'Soumettre pour examen', sw: 'Wasilisha kwa mapitio' },
   'home.viewPlan': { en: 'View plan', rw: 'Reba gahunda', fr: 'Voir le plan', sw: 'Tazama mpango' },
   'home.openRecord': { en: 'Open', rw: 'Fungura', fr: 'Ouvrir', sw: 'Fungua' },
-  'home.reviewQueueBlurb': { en: 'Finished work and month-end reports the managers have submitted. Open each one to approve it or return it with a reason.', rw: 'Akazi karangiye n’amaraporo y’impera z’ukwezi abayobozi boherejwe. Fungura buri kimwe ukemeze cyangwa ukigarure n’impamvu.', fr: 'Travaux terminés et rapports de fin de mois soumis par les responsables. Ouvrez chacun pour l’approuver ou le renvoyer avec un motif.', sw: 'Kazi zilizokamilika na ripoti za mwisho wa mwezi zilizowasilishwa na mameneja. Fungua kila moja kuidhinisha au kuirudisha na sababu.' },
   'home.reviewReports': { en: 'Month-end reports to review', rw: 'Raporo z’impera z’ukwezi zo gusuzuma', fr: 'Rapports de fin de mois à examiner', sw: 'Ripoti za mwisho wa mwezi za kupitia' },
   'home.submittedOn': { en: 'Submitted {date}', rw: 'Byoherejwe {date}', fr: 'Soumis le {date}', sw: 'Imewasilishwa {date}' },
-  'home.nothingToReview': { en: 'Nothing is waiting for review.', rw: 'Nta kintu gitegereje isuzuma.', fr: 'Rien n’attend d’examen.', sw: 'Hakuna kinachosubiri mapitio.' },
 
   // ---- the report, in the order it is read ---------------------------------
   //

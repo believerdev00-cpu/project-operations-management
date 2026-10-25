@@ -83,6 +83,12 @@ export function objectiveStateTone(state) {
   return 'tone-waiting';
 }
 
+// The Director's "Needs your attention" lines point at lists further down the
+// same page now that there is no separate approvals page.
+function scrollToSection(id) {
+  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 export default function Home({
   user, summary, sectorRows, approvalItems, approvalCount, fetchJson, reloadKey,
   canAddActivity, canAddMovement, busy, rate,
@@ -204,9 +210,9 @@ export default function Home({
   // "Needs your attention": the same counts as sentences, each one a link. A
   // Director who reads one line and presses it has done the whole dashboard.
   const attention = isDirector ? [
-    counts.monthEndReportsWaiting > 0 && { id: 'reports', text: fill(t(counts.monthEndReportsWaiting === 1 ? 'home.attentionReportsOne' : 'home.attentionReports'), { count: counts.monthEndReportsWaiting }), go: () => onGo('approval-queue') },
+    counts.monthEndReportsWaiting > 0 && { id: 'reports', text: fill(t(counts.monthEndReportsWaiting === 1 ? 'home.attentionReportsOne' : 'home.attentionReports'), { count: counts.monthEndReportsWaiting }), go: () => scrollToSection('home-month-end') },
     counts.finalChecksWaiting > 0 && { id: 'checks', text: fill(t(counts.finalChecksWaiting === 1 ? 'home.attentionChecksOne' : 'home.attentionChecks'), { count: counts.finalChecksWaiting }), go: () => onGo('activities', 'final-check') },
-    approvalCount > 0 && { id: 'approvals', text: fill(t(approvalCount === 1 ? 'home.attentionApprovalsOne' : 'home.attentionApprovals'), { count: approvalCount }), go: () => onGo('approval-queue') },
+    approvalCount > 0 && { id: 'approvals', text: fill(t(approvalCount === 1 ? 'home.attentionApprovalsOne' : 'home.attentionApprovals'), { count: approvalCount }), go: () => scrollToSection('home-approvals') },
     counts.overdueWork > 0 && { id: 'overdue', text: fill(t(counts.overdueWork === 1 ? 'home.attentionOverdueOne' : 'home.attentionOverdue'), { count: counts.overdueWork }), go: () => onGo('monthly') },
     counts.budgetChangesPending > 0 && { id: 'budget', text: fill(t(counts.budgetChangesPending === 1 ? 'home.attentionBudgetOne' : 'home.attentionBudget'), { count: counts.budgetChangesPending }), go: () => onGo('activities') }
   ].filter(Boolean) : [];
@@ -302,7 +308,6 @@ export default function Home({
       {isDirector
         ? <div className="home-quick home-quick-director">
           <button className="primary-btn" type="button" onClick={() => onGo('monthly', 'create')}>{t('home.createPlan')}</button>
-          <button className="secondary-btn" type="button" onClick={() => onGo('approval-queue')}>{t('home.reviewWork')}</button>
           {canAddActivity && <button className="secondary-btn" type="button" onClick={onAddActivity}>{t('action.assignActivity')}</button>}
         </div>
         : !isManager && (canAddActivity || canAddMovement) && <div className="home-quick">
@@ -426,13 +431,15 @@ export default function Home({
       </button>)}
     </div>}
 
-    {isDirector && approvalItems.length > 0 && <>
+    {/* Month-end reports a manager handed in, when there are any. */}
+    {isDirector && <MonthEndReports fetchJson={fetchJson} reloadKey={reloadKey} onOpenPlan={onOpenPlan} />}
+
+    {/* Anything sent for the Director's approval, all of it: there is no
+        separate approvals page to send them to any more. */}
+    {isDirector && approvalItems.length > 0 && <div id="home-approvals">
       <h3 className="home-heading">{t('home.tileApprovals')}</h3>
-      <DecisionList items={approvalItems.slice(0, 3)} onOpen={onOpenQueueItem} onDecide={onDecide} busy={busy} />
-      {approvalItems.length > 3 && <button className="text-btn home-more" type="button" onClick={() => onGo('approval-queue')}>
-        {fill(t('home.seeAll'), { count: approvalCount })} &rarr;
-      </button>}
-    </>}
+      <DecisionList items={approvalItems} onOpen={onOpenQueueItem} onDecide={onDecide} busy={busy} />
+    </div>}
 
     {isDirector && finalChecks && finalChecks.length > 0 && <>
       <h3 className="home-heading">{t('home.tileChecks')}</h3>
@@ -625,37 +632,35 @@ export function noticeSentence(notice, t, language) {
   });
 }
 
-// The Director's REVIEW WORK page (section 8 of the brief): what the managers
-// have handed in. Two lists -- finished activities waiting for the final check,
-// and month-end reports waiting to be accepted or returned -- each item opening
-// the record where the approve / return buttons live. Both come from the same
-// queries as the dashboard tiles, so the numbers and the lists agree.
-export function ReviewQueue({ fetchJson, reloadKey, user, onOpenActivity, onOpenPlan }) {
+// Month-end reports a manager handed in and the Director has not yet accepted
+// or returned, on the Director's Home -- and nothing at all when none is
+// waiting. It used to be half of a "Review work" page, which went with the
+// approvals page it sat on. Each opens the month, where the accept / return
+// buttons are.
+function MonthEndReports({ fetchJson, reloadKey, onOpenPlan }) {
   const { language, t } = useI18n();
-  const [checks, setChecks] = useState(null);
-  const [reports, setReports] = useState(null);
+  const [reports, setReports] = useState([]);
   const latest = useRef(0);
 
   useEffect(() => {
     const request = ++latest.current;
-    Promise.allSettled([
-      fetchJson('/api/activities?awaiting=final-check&limit=50'),
-      fetchJson('/api/monthly-plans')
-    ]).then(([checkResult, planResult]) => {
-      if (request !== latest.current) return;
-      setChecks(checkResult.status === 'fulfilled' ? checkResult.value : []);
-      setReports(planResult.status === 'fulfilled'
-        ? (planResult.value || []).filter((plan) => plan.report?.status === 'Submitted' && plan.status !== 'Closed')
-        : []);
-    });
+    fetchJson('/api/monthly-plans')
+      .then((plans) => {
+        if (request !== latest.current) return;
+        setReports((plans || []).filter((plan) => plan.report?.status === 'Submitted' && plan.status !== 'Closed'));
+      })
+      .catch(() => { if (request === latest.current) setReports([]); });
   }, [fetchJson, reloadKey]);
 
-  if (checks === null || reports === null) return null;
-  return <section className="review-queue">
-    <p className="home-lead">{t('home.reviewQueueBlurb')}</p>
+  if (!reports.length) return null;
+  return <section className="review-queue" id="home-month-end">
     <h3 className="home-heading">{t('home.reviewReports')}</h3>
-    {reports.length
-      ? <ul className="work-list">
+    <MonthEndList reports={reports} t={t} language={language} onOpenPlan={onOpenPlan} />
+  </section>;
+}
+
+function MonthEndList({ reports, t, language, onOpenPlan }) {
+  return <ul className="work-list">
         {reports.map((plan) => <li key={plan.id}>
           <button type="button" className="work-card" onClick={() => onOpenPlan(plan.id)}>
             <span className="work-card-text">
@@ -667,20 +672,14 @@ export function ReviewQueue({ fetchJson, reloadKey, user, onOpenActivity, onOpen
             <span className="status-badge tone-waiting">{t('monthend.status.Submitted')}</span>
           </button>
         </li>)}
-      </ul>
-      : <div className="empty-state"><strong>{t('home.nothingToReview')}</strong></div>}
-    <h3 className="home-heading">{t('home.tileChecks')}</h3>
-    {checks.length
-      ? <WorkList items={checks} user={user} t={t} language={language} onOpen={onOpenActivity} />
-      : <div className="empty-state"><strong>{t('home.nothingToReview')}</strong></div>}
-  </section>;
+      </ul>;
 }
 
 // A record waiting for a decision, as a card with the three things the approver
-// needs -- what, how much, who asked -- and the two buttons. Used on the home
-// screen and on the approvals page, instead of an eight-column table that
-// became a seven-line card on a phone.
-export function DecisionList({ items, onOpen, onDecide, busy, empty }) {
+// needs -- what, how much, who asked -- and the two buttons, on the Director's
+// Home, instead of an eight-column table that became a seven-line card on a
+// phone.
+function DecisionList({ items, onOpen, onDecide, busy, empty }) {
   const { language, t } = useI18n();
   if (!items.length) return <div className="empty-state"><strong>{empty}</strong></div>;
   return <ul className="decision-list">

@@ -41,7 +41,7 @@ import {
   useHashRoute, useMediaQuery, useScrollLock
 } from './ui.jsx';
 import { activityJourney, formatLocal, journeyLabel, journeyTone } from './journey.jsx';
-import Home, { DecisionList, ReviewQueue, noticeSentence } from './Home.jsx';
+import Home, { noticeSentence } from './Home.jsx';
 import { MonthTrend, ProjectProgress } from './Progress.jsx';
 
 // The category presets offered per business operation. Keep in step with
@@ -597,7 +597,6 @@ function ChoosePasswordScreen({ token, user, onChosen, onSignOut, onExpired }) {
 // the sidebar and the drawer. Drawn inline: no icon font or extra request.
 const NAV_ICON_PATHS = {
   dashboard: 'M4 13h7V4H4v9Zm0 7h7v-5H4v5Zm9 0h7v-9h-7v9Zm0-16v5h7V4h-7Z',
-  'approval-queue': 'M9 12l2 2 4-4M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3Z',
   projects: 'M3 7h6l2 2h10v10H3V7Z',
   activities: 'M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01',
   monthly: 'M7 3v3M17 3v3M4 8h16M5 5h14v15H5V5Zm4 7h2m2 0h2m-6 4h2',
@@ -1034,11 +1033,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // comes from the API's own count of the same predicate the queue runs, so the
   // two can never drift apart.
   const approvalCount = summary.summary?.approvalsAwaitingMe ?? approvalQueue.total ?? 0;
-  // Five things people use every day, and the rest under "More". Nine items at
-  // one level, with two of them both called some form of "approvals", was the
-  // first thing the client found confusing. Only people who approve anything --
-  // the Director and managers -- get the approvals page at all.
-  const approves = isDirector || isManager;
   // A menu is a list of a person's job, not a list of the software's features.
   //
   // Every account used to get almost the same nine or ten items, and the
@@ -1054,8 +1048,13 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     // but in named groups rather than one "More" pile, so the daily pages and
     // the set-up pages are not the same kind of thing on the same list.
     navItems = [
-      ['dashboard', t('nav.home'), 0, 'main', t('nav.home')],
-      ['approval-queue', t('nav.approvalQueue'), approvalCount, 'main', t('nav.shortApprovals')],
+      // No "Needs my approval" page: the Director sets the month and the
+      // managers work against it, so on the live system that page never had
+      // anything in it (0 activities, 0 trips, 0 month-end reports against 160
+      // recorded days, October 2026). The rare thing that does wait for them --
+      // a month-end report, an activity or trip sent for approval -- is on Home,
+      // drawn only when it exists. Removed at the Director's request.
+      ['dashboard', t('nav.home'), approvalCount, 'main', t('nav.home')],
       ['monthly', t('nav.monthlyPlans'), 0, 'main', t('nav.shortBudget')],
       ['activities', t('nav.activities'), 0, 'main', t('nav.activities')],
       ['movements', t('nav.trips'), 0, 'main', t('nav.shortTrips')],
@@ -1139,7 +1138,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
   // The boutique's own people get their shop in the bar: it is their job,
   // not something to look for behind "More".
   const bottomNav = isDirector
-    ? ['dashboard', 'approval-queue', 'monthly', 'activities']
+    ? ['dashboard', 'monthly', 'activities', 'reports']
     : isGeneral
       ? ['dashboard', 'monthly', 'activities', 'reports']
       : isManager
@@ -2408,32 +2407,6 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
         has nothing new on their page. */}
     {isManager && <DiscussionInbox fetchJson={fetchJson} onMessage={notify} onError={fail} hideWhenEmpty />}
     </>;
-  } else if (view === 'approval-queue') {
-    content = <>
-      <section className="welcome-strip">
-        <div>
-          <span className="eyebrow">{t('approval.yourQueue')}</span>
-          <h2>{t('approval.queueTitle')} <span className="queue-count">{approvalCount}</span></h2>
-          <p>{t('approval.queueBlurb')} {t('approval.onlyYou')}</p>
-        </div>
-      </section>
-      {issues.queue
-        ? <Panel title={t('approval.queueTitle')}><LoadIssue onRetry={loadData} /></Panel>
-        : <DecisionList
-          items={[...approvalQueue.activities, ...approvalQueue.movements]}
-          onOpen={openQueueItem}
-          onDecide={decideFromQueue}
-          busy={actionBusy}
-          empty={t('approval.queueEmpty')}
-        />}
-      {/* The Director's REVIEW WORK: everything the managers have handed in --
-          finished activities waiting for the final check, and month-end
-          reports waiting to be accepted or returned. Each opens the record
-          where the approve / return buttons are, so this page and the record
-          cannot offer different decisions. */}
-      {isDirector && <ReviewQueue fetchJson={fetchJson} reloadKey={summary} user={user}
-        onOpenActivity={openActivity} onOpenPlan={openPlanRoute} />}
-    </>;
   } else if (view === 'projects') {
     content = <>
       <section className="toolbar-row">
@@ -2733,7 +2706,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     eyebrow={t('app.name')}
     title={pageTitle}
     badge={approvalCount}
-    onBadge={() => go('approval-queue')}
+    onBadge={() => go('dashboard')}
     online={online}
     refreshing={refreshing}
     onRefresh={loadData}

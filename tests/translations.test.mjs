@@ -202,7 +202,7 @@ for (const operation of ops.BUSINESS_OPERATIONS) {
 
 console.log('\n=== 6. a sample renders in every language ===');
 for (const code of i18n.LANGUAGE_CODES) {
-  const sample = ['nav.approvalQueue', 'form.addProject', 'movement.costBreakdown', 'report.budgetSummary']
+  const sample = ['nav.monthlyPlans', 'form.addProject', 'movement.costBreakdown', 'report.budgetSummary']
     .map((key) => i18n.translate(code, key));
   check(`  ${code}: ${sample.join(' | ')}`, sample.every((text) => text && !text.includes('.')));
 }

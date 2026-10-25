@@ -58,6 +58,7 @@ import {
   objectiveProgress, overActivityBudgetMessage, overMonthlyBudgetMessage, planProgress,
   toDateOnly, uncommitted
 } from '../lib/monthly.js';
+import { readableNote } from '../../shared/workbookNote.js';
 
 const router = express.Router();
 
@@ -899,7 +900,10 @@ router.get('/updates', asyncRoute(async (req, res) => {
         targetUnit: row.target_unit || '',
         quantityDone: round2(Number(row.quantity_done || 0)),
         cost: round2(Number(row.cost || 0)),
-        notes: row.notes || '',
+        // The Home feed reads the note without an imported day's sheet-and-row
+        // tag, as the reports do -- except a day its owner may still correct,
+        // whose edit form starts from this text and must not lose anything.
+        notes: row.correctable ? (row.notes || '') : readableNote(row.notes),
         workStatus: row.work_status || '',
         remarks: row.remarks || '',
         submittedByName: row.submitted_by_name || '',
