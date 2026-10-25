@@ -280,7 +280,7 @@ async function validSupervisor(db, supervisorId, sector) {
   );
   const supervisor = result.rows[0];
   if (!supervisor || !withinScope(supervisor, sector)) {
-    throw new OrganizationError(400, 'Choose an active manager who works in this project’s operation.');
+    throw new OrganizationError(400, 'Choose an active manager who works in this project.');
   }
   return supervisor;
 }
@@ -309,7 +309,7 @@ router.post('/teams', asyncRoute(async (req, res) => {
       return res.status(403).json({ message: 'Only the Director or the General Manager chooses who supervises a team.' });
     }
     supervisorId = parseId(payload.supervisorId);
-    if (!supervisorId) return res.status(400).json({ message: 'Choose an active manager who works in this project’s operation.' });
+    if (!supervisorId) return res.status(400).json({ message: 'Choose an active manager who works in this project.' });
     await validSupervisor(pool, supervisorId, project.rows[0].sector);
   }
 
@@ -362,7 +362,7 @@ router.patch('/teams/:id', asyncRoute(async (req, res) => {
       }
       const supervisorId = payload.supervisorId === null || payload.supervisorId === '' ? null : parseId(payload.supervisorId);
       if (payload.supervisorId !== null && payload.supervisorId !== '' && !supervisorId) {
-        throw new OrganizationError(400, 'Choose an active manager who works in this project’s operation.');
+        throw new OrganizationError(400, 'Choose an active manager who works in this project.');
       }
       if (supervisorId) await validSupervisor(client, supervisorId, team.sector);
       if (Number(supervisorId || 0) !== Number(team.supervisor_id || 0)) changes.supervisor_id = supervisorId;
@@ -443,7 +443,7 @@ router.post('/teams/:id/members', asyncRoute(async (req, res) => {
     if (!member || member.role !== 'staff') throw new OrganizationError(400, 'Only team members can be added to a team.');
     if (member.status !== 'active') throw new OrganizationError(400, 'That account is suspended.');
     if (!withinScope(member, team.sector)) {
-      throw new OrganizationError(400, 'That person works in a different operation from this project.');
+      throw new OrganizationError(400, 'That person works in a different project.');
     }
     const inserted = await client.query(
       `INSERT INTO team_members (team_id, user_id, added_by) VALUES ($1, $2, $3)

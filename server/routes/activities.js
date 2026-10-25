@@ -480,9 +480,9 @@ function canEditRequest(user, row) {
 // refused rather than quietly overridden.
 function projectSector(payload, project) {
   const sector = validateSector(project.sector);
-  if (!sector) return { error: 'That project has no valid operation.' };
+  if (!sector) return { error: 'That project is not set up correctly.' };
   if (payload.sector && payload.sector !== sector) {
-    return { error: 'The operation must match the project’s. Choose a project in that operation, or change the operation.' };
+    return { error: 'This work must be filed under its own project. Choose the right project.' };
   }
   return { sector };
 }
@@ -656,7 +656,7 @@ router.post('/', asyncRoute(async (req, res) => {
   if (resolved.error) return res.status(400).json({ message: resolved.error });
   const sector = resolved.sector;
   if (!withinScope(req.user, sector)) {
-    return res.status(403).json({ message: 'You can only add work in your own operation.' });
+    return res.status(403).json({ message: 'You can only add work in your own project.' });
   }
 
   // Two ways in, one table. The Director assigns work to a manager, and that
@@ -696,7 +696,7 @@ router.post('/', asyncRoute(async (req, res) => {
     // handing them work outside it would leave them assigned to a record they
     // cannot open. A manager who covers every area can be handed anything.
     if (!withinScope(manager.rows[0], sector)) {
-      return res.status(400).json({ message: 'That person works in a different operation. Pick somebody from this one.' });
+      return res.status(400).json({ message: 'That person works in a different project. Pick somebody from this one.' });
     }
     // A team member has nobody to answer to on the record, so there is nothing
     // for them to accept: the Director's own instruction is the approval. Left
@@ -845,7 +845,7 @@ router.put('/:id', asyncRoute(async (req, res) => {
   if (resolved.error) return res.status(400).json({ message: resolved.error });
   const sector = resolved.sector;
   if (!withinScope(req.user, sector)) {
-    return res.status(403).json({ message: 'You can only add work in your own operation.' });
+    return res.status(403).json({ message: 'You can only add work in your own project.' });
   }
 
   const requestedBudget = round2(payload.costUsd || 0);
@@ -1831,7 +1831,7 @@ router.patch('/:id/assignment', asyncRoute(async (req, res) => {
       );
       if (!manager.rowCount) return res.status(400).json({ message: 'The selected person is invalid.' });
       if (!withinScope(manager.rows[0], existing.sector)) {
-        return res.status(400).json({ message: 'That person works in a different operation. Pick somebody from this one.' });
+        return res.status(400).json({ message: 'That person works in a different project. Pick somebody from this one.' });
       }
       // Handing work to a team member while it is still waiting for a manager to
       // accept it would leave the record waiting on somebody with no approval
@@ -1920,7 +1920,7 @@ const BUDGET_CHANGEABLE_STATUSES = ['Approved', 'Budget Adjusted', 'In Progress'
 router.post('/:id/budget-requests', asyncRoute(async (req, res) => {
   const existing = await loadActivity(req.params.id, req.user);
   if (!isAdmin(req.user) && (!withinScope(req.user, existing.sector) || req.user.role !== 'manager')) {
-    return res.status(403).json({ message: 'Only a manager in this operation can ask for a different budget.' });
+    return res.status(403).json({ message: 'Only a manager in this project can ask for a different budget.' });
   }
   assertPlanOpen(existing);
   if (!BUDGET_CHANGEABLE_STATUSES.includes(existing.status)) {

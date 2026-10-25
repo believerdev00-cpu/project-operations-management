@@ -243,7 +243,7 @@ router.patch('/:id/operations', asyncRoute(async (req, res) => {
 router.patch('/:id/operation', asyncRoute(async (req, res) => {
   const { operation } = req.body || {};
   if (!validOperation(operation)) {
-    return res.status(400).json({ message: 'Choose one operation: Mining, Agriculture, Farming, or Movement & Facilitation.' });
+    return res.status(400).json({ message: 'Choose one project: Mining, Agriculture, Farming, or Movement & Facilitation.' });
   }
   if (!(await loadPartner(req.params.id))) return res.status(404).json({ message: 'External partner not found.' });
   await replaceGrants(req.params.id, [operation], req.user.id);
@@ -313,7 +313,7 @@ router.put('/:id/projects', asyncRoute(async (req, res) => {
     : { rows: [] };
   if (found.rows.length !== wanted.length) return res.status(400).json({ message: 'One of those projects does not exist.' });
   if (found.rows.some((project) => !partner.operations.includes(project.sector))) {
-    return res.status(400).json({ message: 'A project can be shared only in an operation the partner already follows.' });
+    return res.status(400).json({ message: 'A project can be shared only if the partner already follows it.' });
   }
   const before = new Set(partner.projects.map((project) => project.id));
   const client = await pool.connect();

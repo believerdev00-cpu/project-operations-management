@@ -727,9 +727,9 @@ function readProjectPayload(payload, current = null) {
     spent: pick('spent', current?.spent ?? 0),
     category: pick('category', current?.category || 'General')
   };
-  if (!project.sector) return { error: 'A valid operation is required.' };
+  if (!project.sector) return { error: 'A valid project is required.' };
   if (!requiredText(project.name) || !requiredText(project.location) || !requiredText(project.owner)) {
-    return { error: 'Project name, operation, location, and owner are required.' };
+    return { error: 'Name, project, location and owner are required.' };
   }
   if (project.name.trim().length > 200 || project.location.trim().length > 200 || project.owner.trim().length > 200) {
     return { error: 'Project name, location and owner can be at most 200 characters.' };
@@ -770,7 +770,7 @@ async function checkProjectManager(rawManagerId, sector) {
   );
   if (!found.rowCount) return { error: 'Selected manager is invalid.' };
   // A manager covering every operation may manage a project in any of them.
-  if (!withinScope(found.rows[0], sector)) return { error: 'That manager works in a different operation.' };
+  if (!withinScope(found.rows[0], sector)) return { error: 'That manager works in a different project.' };
   return { managerId };
 }
 
@@ -801,14 +801,14 @@ app.put('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
   // Authorize against the sector the project is in now, not the one the caller
   // sent, and refuse to let a manager move a project out of their own sector.
   if (!isAdmin(req.user) && (req.user.role !== 'manager' || !withinScope(req.user, current.sector))) {
-    return res.status(403).json({ message: 'Managers can only update projects in their own operation.' });
+    return res.status(403).json({ message: 'Managers can only update their own projects.' });
   }
   // Anything left out of the body keeps its current value. Defaulting a missing
   // sector to 'agriculture' silently moved projects the Director edited.
   const { project, error } = readProjectPayload(payload, current);
   if (error) return res.status(400).json({ message: error });
   if (!withinScope(req.user, project.sector)) {
-    return res.status(403).json({ message: 'Managers cannot move a project to another operation.' });
+    return res.status(403).json({ message: 'Managers cannot move a project.' });
   }
   // An activity's operation is its project's (create and edit refuse anything
   // else), so a project with activities under it cannot change operation: every
@@ -817,7 +817,7 @@ app.put('/api/projects/:id', authMiddleware, asyncRoute(async (req, res) => {
   if (project.sector !== current.sector) {
     const filed = await pool.query('SELECT 1 FROM activities WHERE project_id = $1 LIMIT 1', [current.id]);
     if (filed.rowCount) {
-      return res.status(409).json({ message: 'This project has activities filed under it, so it cannot move to another operation.' });
+      return res.status(409).json({ message: 'This project has activities filed under it, so it cannot be moved.' });
     }
   }
 

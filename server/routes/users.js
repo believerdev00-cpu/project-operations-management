@@ -137,10 +137,10 @@ function requestedOperations(body, role) {
     return { coversAll: true, operations: [] };
   }
   if (!unique.length || !unique.every((id) => sectorIds.has(id))) {
-    return { error: 'Choose an operation.' };
+    return { error: 'Choose a project.' };
   }
   if (role !== 'manager' && unique.length > 1) {
-    return { error: 'A team member works in one operation. Choose one.' };
+    return { error: 'A team member works in one project. Choose one.' };
   }
   return { coversAll: false, operations: unique };
 }
@@ -225,7 +225,7 @@ router.post('/', adminOnly('Only the Director can create accounts.'), asyncRoute
     // General Manager or the Director above someone covers every operation by
     // role, so only a manager boss is checked against the operations.
     if (manager.rows[0].role === 'manager' && !coversAll && !coversEvery(manager.rows[0], operations)) {
-      return res.status(400).json({ message: 'That manager works in a different operation. Pick a manager from the same one.' });
+      return res.status(400).json({ message: 'That manager works in a different project. Pick a manager from the same one.' });
     }
   }
 
@@ -653,14 +653,14 @@ router.patch('/:id/assignment', adminOnly('Only the Director can change an assig
 
   const target = existing.rows[0];
   if (target.role === 'super-admin') {
-    return res.status(403).json({ message: 'The Director oversees every operation and reports to nobody.' });
+    return res.status(403).json({ message: 'The Director oversees every project and reports to nobody.' });
   }
   if (target.role === 'partner') {
-    return res.status(403).json({ message: 'Change an external partner\'s operations from External Partners.' });
+    return res.status(403).json({ message: 'Change an external partner\'s projects from External Partners.' });
   }
   if (target.role === 'general-manager' && (Object.prototype.hasOwnProperty.call(payload, 'sector')
     || Object.prototype.hasOwnProperty.call(payload, 'sectors'))) {
-    return res.status(400).json({ message: 'The General Manager oversees every operation; there is no operation to change.' });
+    return res.status(400).json({ message: 'The General Manager oversees every project; there is no project to change.' });
   }
 
   // An absent key means "leave as is"; an explicit null means "clear it".
@@ -668,7 +668,7 @@ router.patch('/:id/assignment', adminOnly('Only the Director can change an assig
     || Object.prototype.hasOwnProperty.call(payload, 'sectors');
   const managerGiven = Object.prototype.hasOwnProperty.call(payload, 'managerId');
   if (!sectorGiven && !managerGiven) {
-    return res.status(400).json({ message: 'Choose an operation, a manager, or both.' });
+    return res.status(400).json({ message: 'Choose a project, a manager, or both.' });
   }
 
   // 'all' is only meaningful for a manager. Left unspecified, an account keeps
@@ -715,7 +715,7 @@ router.patch('/:id/assignment', adminOnly('Only the Director can change an assig
     if (!manager.rowCount) return res.status(400).json({ message: 'The selected manager is invalid.' });
     if (manager.rows[0].role === 'manager' && !coversAll && !coversEvery(manager.rows[0], operations)) {
       return res.status(400).json({
-        message: 'That manager works in a different operation. Move the user to the manager\'s operation, or pick a manager from this one.'
+        message: 'That manager works in a different project. Move the user to the manager\'s project, or pick a manager from this one.'
       });
     }
     if (await createsReportingLoop(target.id, managerId)) {

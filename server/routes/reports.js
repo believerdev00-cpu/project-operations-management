@@ -224,9 +224,9 @@ export async function resolveFilters(user, query = {}) {
   const choice = { operation: null, operationName: null, projectId: null, projectName: null };
 
   if (wanted && wanted !== 'All') {
-    if (!sectorIds.has(wanted)) throw new ReportError(400, 'That operation does not exist.');
+    if (!sectorIds.has(wanted)) throw new ReportError(400, 'That project does not exist.');
     if (!withinScope(user, wanted)) {
-      throw new ReportError(403, 'That operation is not yours to report on.');
+      throw new ReportError(403, 'That project is not yours to report on.');
     }
     choice.operation = wanted;
     choice.operationName = sectorName(wanted);
@@ -242,7 +242,7 @@ export async function resolveFilters(user, query = {}) {
       throw new ReportError(403, 'That project is not yours to report on.');
     }
     if (choice.operation && project.sector !== choice.operation) {
-      throw new ReportError(400, 'That project belongs to a different operation.');
+      throw new ReportError(400, 'That project does not match the one chosen.');
     }
     choice.projectId = project.id;
     choice.projectName = project.name;
