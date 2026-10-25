@@ -106,15 +106,11 @@ const FAMILIES = {
   'btq.subStatus.': ['submitted', 'accepted', 'returned'],
   // The boutique (shared/boutique.js): every list a screen renders through a
   // template key, so a value added there without its words fails here.
-  'btq.tab.': ['overview', 'sell', 'sales', 'products', 'stock', 'count', 'cash', 'expenses', 'books', 'reports', 'approvals', 'history'],
+  'btq.tab.': ['overview', 'products', 'stock', 'count', 'expenses', 'reports', 'approvals'],
   'btq.type.': boutique.PRODUCT_TYPES,
   'btq.method.': boutique.ALL_BOUTIQUE_PAYMENT_METHODS,
   'btq.kind.': boutique.STOCK_MOVEMENT_KINDS,
   'btq.approval.': boutique.APPROVAL_STATUSES,
-  'btq.saleStatus.': boutique.SALE_STATUSES,
-  'btq.returnKind.': boutique.RETURN_KINDS,
-  'btq.sessionStatus.': boutique.SESSION_STATUSES,
-  'btq.cashKind.': boutique.CASH_MOVEMENT_KINDS,
   'btq.expenseStatus.': boutique.EXPENSE_STATUSES,
   'btq.itemStatus.': ['active', 'archived'],
   'btq.kindHint.': boutique.ADJUSTMENT_KINDS,

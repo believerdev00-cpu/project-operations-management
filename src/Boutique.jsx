@@ -1,9 +1,9 @@
 // The Boutique Management System (Project 5): the shop's workspace, at
 // #/boutique/<tab>.
 //
-// One module, one page, with a tab per part of the brief: the till (Sell),
-// Sales, Products, Stock, Cash, Expenses, the Books,
-// Reports, Approvals and History. Which tabs a person gets is decided by the
+// One module, one page, with a tab per job: Today (profit and loss), Products,
+// Report sales (counting the shelf), Stock, Expenses, Reports and Approvals.
+// Which tabs a person gets is decided by the
 // role the API answers in /overview (director, reader, manager, cashier),
 // never by the browser's own guess, and every button here is re-checked by
 // the route it calls.
@@ -20,33 +20,34 @@ import { Section } from './journey.jsx';
 import { categoryLabel } from './ActivityReview.jsx';
 import { formatDate, formatRwf, todayLocal } from './format.js';
 import {
-  ADDING_ADJUSTMENTS, ADJUSTMENT_KINDS, BOUTIQUE_PAYMENT_METHODS, EXPENSE_CATEGORIES, PRODUCT_CATEGORIES, REPORT_PERIODS,
-  fromMinor, lineTotals, saleTotals, toMinor
+  ADDING_ADJUSTMENTS, ADJUSTMENT_KINDS, BOUTIQUE_PAYMENT_METHODS, EXPENSE_CATEGORIES, PRODUCT_CATEGORIES, REPORT_PERIODS
 } from '../shared/boutique.js';
 
+// The shop is run the Director's way: the manager adds products with their
+// buying and selling price, reports what sold by counting the shelf, records
+// stock that came in and money spent; the Director reads the profit, decides
+// what waits and reads the reports. The till, the sales list, the cash
+// drawer, the Books (the Reports' figures twice) and the History were taken
+// off the screen at the Director's request -- the API and every recorded row
+// are untouched.
 const TABS = {
-  director: ['overview', 'sell', 'sales', 'products', 'stock', 'count', 'cash', 'expenses', 'books', 'reports', 'approvals', 'history'],
-  manager: ['overview', 'sell', 'sales', 'products', 'stock', 'count', 'cash', 'expenses', 'books', 'reports', 'approvals', 'history'],
-  reader: ['overview', 'sales', 'products', 'stock', 'count', 'cash', 'expenses', 'books', 'reports', 'approvals', 'history'],
-  cashier: ['overview', 'sell', 'sales', 'products', 'stock', 'cash']
+  director: ['overview', 'approvals', 'reports', 'products', 'stock', 'count', 'expenses'],
+  manager: ['overview', 'products', 'count', 'stock', 'expenses', 'reports', 'approvals'],
+  reader: ['overview', 'reports', 'products', 'stock', 'count', 'expenses', 'approvals'],
+  cashier: ['overview', 'stock']
 };
 
-// The tabs each person uses every day, in front; everything else is one tap
-// away under "More". Thirteen tabs in a row filled half a phone screen before
-// anything useful appeared, and nobody uses all thirteen in a day: the
-// Director decides and reads, the manager sells and keeps the shelf.
+// The tabs each person uses every day, in front; the rest one tap away
+// under "More".
 const MAIN_TABS = {
   director: ['overview', 'approvals', 'reports'],
-  // The manager's day, as the Director put it: add a product with its buying
-  // and selling price, report what sold, and the shop shows the profit.
   manager: ['overview', 'products', 'count', 'expenses'],
   reader: ['overview', 'reports'],
-  cashier: ['overview', 'sell', 'stock']
+  cashier: ['overview', 'stock']
 };
 // A picture on every tab, so it can be found without reading.
 const TAB_ICONS = {
-  overview: '🏠', sell: '🛒', sales: '🧾', products: '📦', stock: '📊', count: '🔢',
-  cash: '💵', expenses: '💸', books: '📒', reports: '📈', approvals: '✅', history: '🕘'
+  overview: '🏠', products: '📦', stock: '📊', count: '🔢', expenses: '💸', reports: '📈', approvals: '✅'
 };
 
 const money = formatRwf;
@@ -74,7 +75,6 @@ function Metric({ label, value, tone }) {
 function Empty({ children }) { return <div className="empty-state"><strong>{children}</strong></div>; }
 function Badge({ tone, children }) { return <span className={`status-badge tone-${tone}`}>{children}</span>; }
 
-const SALE_TONE = { completed: 'done', void_requested: 'waiting', voided: 'stopped' };
 const APPROVAL_TONE = { pending: 'waiting', approved: 'done', rejected: 'stopped' };
 
 // Loads one address and re-loads it when `key` changes. The newest request
@@ -177,17 +177,12 @@ export default function Boutique({ user, fetchJson, upload, onMessage, onError, 
       </details>}
     </nav>
     {active === 'overview' && <OverviewTab {...common} />}
-    {active === 'sell' && <SellTab {...common} />}
-    {active === 'sales' && <SalesTab {...common} />}
     {active === 'products' && <ProductsTab {...common} />}
     {active === 'stock' && <StockTab {...common} />}
     {active === 'count' && <CountTab {...common} />}
-    {active === 'cash' && <CashTab {...common} />}
     {active === 'expenses' && <ExpensesTab {...common} />}
-    {active === 'books' && <BooksTab {...common} />}
     {active === 'reports' && <ReportsTab {...common} />}
     {active === 'approvals' && <ApprovalsTab {...common} />}
-    {active === 'history' && <HistoryTab {...common} />}
   </div>;
 }
 
@@ -217,10 +212,10 @@ function OverviewTab({ overview, can, go }) {
     ? [
       ['approvals', '✅', t('btq.big.approvals'), overview.pendingApprovals],
       ['reports', '📈', t('btq.big.reports')],
-      ['sales', '🧾', t('btq.big.sales')]
+      ['stock', '📦', t('btq.big.stockLook')]
     ]
     : cashier
-      ? [['sell', '🛒', t('btq.big.sell')], ['stock', '📦', t('btq.big.stockLook')]]
+      ? [['stock', '📦', t('btq.big.stockLook')]]
       : [
         ['products', '➕', t('btq.big.addProduct'), 0, { add: '1' }],
         ['count', '📝', t('btq.big.reportSold')],
@@ -248,12 +243,6 @@ function OverviewTab({ overview, can, go }) {
       </button>)}
     </div>
     {!deciding && overview.profit && <ProfitPanel profit={overview.profit} />}
-    <div className="metric-grid btq-today-figures">
-      {/* Today's sales are already the first line of the profit panel. */}
-      {!overview.profit && <Metric label={t('btq.todaySales')} value={fill(t('btq.todaySalesValue'), { amount: money(overview.todaySales.total), count: overview.todaySales.count })} tone="strong" />}
-      <Metric label={t('btq.lowStockCount')} value={overview.lowStock} tone={overview.lowStock ? 'warn' : ''} />
-      {!cashier && <Metric label={t(can.decide ? 'btq.waitingForYou' : 'btq.pendingApprovals')} value={overview.pendingApprovals} tone={overview.pendingApprovals ? 'warn' : ''} />}
-    </div>
   </>;
 }
 
@@ -282,384 +271,6 @@ function ProfitPanel({ profit }) {
       {column(t('btq.pl.month'), profit.month)}
     </div>
   </section>;
-}
-
-// ---- the till ------------------------------------------------------------------------
-
-function SellTab({ fetchJson, onMessage, onError, changed, can, go, overview }) {
-  const { t, language } = useI18n();
-  const dialog = useDialog();
-  const [busy, run] = useBusy();
-  const [methods] = useLoad(fetchJson, '/api/boutique/payment-methods', 0, onError);
-  const [lines, setLines] = useState([]);
-  const [discount, setDiscount] = useState('');
-  const [customer, setCustomer] = useState('');
-  const [note, setNote] = useState('');
-  const [payments, setPayments] = useState([{ method: 'Cash', amount: '', reference: '' }]);
-  const [receipt, setReceipt] = useState(null);
-  const activeMethods = (methods || []).filter((m) => m.active).map((m) => m.code);
-
-  const totals = saleTotals(lines, discount);
-  const paid = payments.reduce((sum, p) => sum + toMinor(p.amount), 0);
-  const change = Math.max(0, paid - totals.total);
-
-  const add = (v) => setLines((current) => {
-    const found = current.find((l) => l.variantId === v.id);
-    if (found) return current.map((l) => (l.variantId === v.id ? { ...l, quantity: Math.min(v.stockQuantity, l.quantity + 1) } : l));
-    return [...current, { variantId: v.id, name: fullName(v), sku: v.sku, stock: v.stockQuantity, catalogue: v.sellingPrice, unitPrice: v.sellingPrice, quantity: 1, discount: '' }];
-  });
-  const update = (variantId, patch) => setLines((current) => current.map((l) => (l.variantId === variantId ? { ...l, ...patch } : l)));
-  const remove = (variantId) => setLines((current) => current.filter((l) => l.variantId !== variantId));
-  const reset = () => { setLines([]); setDiscount(''); setCustomer(''); setNote(''); setPayments([{ method: 'Cash', amount: '', reference: '' }]); };
-
-  const complete = () => run(async () => {
-    try {
-      // Cash goes into a till so the day's cash can be counted. Rather than
-      // refusing a cash sale until somebody remembers to open one, the first
-      // cash sale of the day opens it, asking only what is in the drawer.
-      const takesCash = payments.some((p) => p.method === 'Cash' && Number(p.amount) > 0);
-      if (takesCash && !overview.mySessionId) {
-        const float = await dialog.prompt({ title: t('btq.startDrawer'), label: t('btq.drawerNow'), message: t('btq.drawerHint'), initialValue: '0', required: true });
-        if (float === null) return;
-        await fetchJson('/api/boutique/cash/sessions', { method: 'POST', body: JSON.stringify({ openingCash: float }) });
-      }
-      const sale = await fetchJson('/api/boutique/sales', {
-        method: 'POST',
-        body: JSON.stringify({
-          // A cashier sends neither price nor discount: the catalogue price is
-          // charged, and the API refuses either from them anyway.
-          items: lines.map((l) => ({ variantId: l.variantId, quantity: l.quantity, ...(can.manage ? { unitPrice: l.unitPrice, discount: l.discount || 0 } : {}) })),
-          ...(can.manage ? { discount: discount || 0 } : {}), customerName: customer, note,
-          payments: payments.filter((p) => Number(p.amount) > 0)
-        })
-      });
-      setReceipt(sale);
-      reset();
-      onMessage(fill(t('btq.saleDone'), { number: sale.number }));
-      changed();
-    } catch (error) { onError(error.message); }
-  });
-
-  if (receipt) return <Receipt sale={receipt} language={language} onNew={() => setReceipt(null)} onOpen={() => go('sales', { sale: receipt.id })} />;
-
-  return <div className="btq-pos">
-    <div className="btq-pos-left">
-      <Panel title={t('btq.tab.sell')}>
-        <ProductTiles fetchJson={fetchJson} lines={lines} onPick={add} disabled={busy} onError={onError} />
-        {lines.length ? <div className="table-wrap"><table className="card-table btq-cart">
-          <thead><tr><th>{t('btq.item')}</th><th>{t('btq.qty')}</th><th>{t('btq.unitPrice')}</th><th>{t('btq.lineDiscount')}</th><th>{t('btq.lineTotal')}</th><th>{t('table.actions')}</th></tr></thead>
-          <tbody>{lines.map((l) => <tr key={l.variantId}>
-            <td className="card-title-cell"><strong>{l.name}</strong><small>{l.sku} · {fill(t('btq.inStockCount'), { count: l.stock })}</small></td>
-            <td data-label={t('btq.qty')}><div className="btq-qty">
-              <button type="button" className="icon-btn" aria-label={t('btq.less')} onClick={() => update(l.variantId, { quantity: Math.max(1, l.quantity - 1) })}>−</button>
-              <input type="number" min="1" max={l.stock} value={l.quantity} aria-label={t('btq.qty')} onChange={(e) => update(l.variantId, { quantity: Math.max(1, Math.min(l.stock, Math.trunc(Number(e.target.value) || 1))) })} />
-              <button type="button" className="icon-btn" aria-label={t('btq.more')} onClick={() => update(l.variantId, { quantity: Math.min(l.stock, l.quantity + 1) })}>+</button>
-            </div></td>
-            <td data-label={t('btq.unitPrice')}>{can.manage
-              ? <input type="number" min="0" step="1" value={l.unitPrice} aria-label={t('btq.unitPrice')} onChange={(e) => update(l.variantId, { unitPrice: e.target.value })} />
-              : money(l.unitPrice)}</td>
-            <td data-label={t('btq.lineDiscount')}>{can.manage
-              ? <input type="number" min="0" step="1" value={l.discount} aria-label={t('btq.lineDiscount')} onChange={(e) => update(l.variantId, { discount: e.target.value })} />
-              : '—'}</td>
-            <td data-label={t('btq.lineTotal')}>{money(fromMinor(lineTotals(l).total))}</td>
-            <td className="card-actions"><button type="button" className="text-btn" onClick={() => remove(l.variantId)}>{t('action.remove')}</button></td>
-          </tr>)}</tbody>
-        </table></div> : <Empty>{t('btq.cartEmpty')}</Empty>}
-      </Panel>
-    </div>
-    <div className="btq-pos-right">
-      <Panel title={t('btq.payment')}>
-        <div className="btq-totals">
-          <Fact label={t('btq.subtotal')} value={money(fromMinor(totals.subtotal))} />
-          <Fact label={t('btq.discount')} value={money(fromMinor(totals.discount))} />
-          <Fact label={t('btq.total')} value={<span className="btq-grand">{money(fromMinor(totals.total))}</span>} />
-        </div>
-        {payments.map((p, index) => <div className="form-grid btq-payment-row" key={index}>
-          <Field label={t('btq.method')}><select value={p.method} onChange={(e) => setPayments(payments.map((x, i) => (i === index ? { ...x, method: e.target.value } : x)))}>
-            {activeMethods.map((code) => <option key={code} value={code}>{t(`btq.method.${code}`)}</option>)}
-          </select></Field>
-          <Field label={t('btq.amount')}><input type="number" min="0" step="1" value={p.amount} onChange={(e) => setPayments(payments.map((x, i) => (i === index ? { ...x, amount: e.target.value } : x)))} /></Field>
-          {/* Cash has no reference; mobile money, card and bank do. */}
-          {p.method !== 'Cash' && <Field label={t('btq.reference')}><input value={p.reference} maxLength="100" onChange={(e) => setPayments(payments.map((x, i) => (i === index ? { ...x, reference: e.target.value } : x)))} /></Field>}
-        </div>)}
-        <div className="button-row">
-          <button type="button" className="text-btn" onClick={() => setPayments([...payments, { method: activeMethods[0] || 'Cash', amount: '', reference: '' }])}>{t('btq.splitPayment')}</button>
-          <button type="button" className="text-btn" onClick={() => setPayments(payments.map((p, i) => (i === 0 ? { ...p, amount: String(fromMinor(Math.max(0, totals.total - payments.filter((_, j) => j !== 0).reduce((s, x) => s + toMinor(x.amount), 0)))) } : p)))}>{t('btq.exactAmount')}</button>
-        </div>
-        <div className="btq-totals">
-          <Fact label={t('btq.paid')} value={money(fromMinor(paid))} />
-          <Fact label={t('btq.change')} value={money(fromMinor(change))} />
-        </div>
-        {/* Most sales need none of these: folded, open once something is in them. */}
-        <details className="btq-sale-options" open={Boolean(discount || customer || note) || undefined}>
-          <summary>{t(can.manage ? 'btq.moreOptions' : 'btq.moreOptionsCashier')}</summary>
-          <div className="form-grid">
-            {can.manage && <Field label={t('btq.saleDiscount')}><input type="number" min="0" step="1" value={discount} onChange={(e) => setDiscount(e.target.value)} /></Field>}
-            <Field label={t('btq.customer')}><input value={customer} maxLength="150" onChange={(e) => setCustomer(e.target.value)} /></Field>
-            <Field label={t('field.notes')} wide><textarea rows="2" value={note} maxLength="1000" onChange={(e) => setNote(e.target.value)} /></Field>
-          </div>
-        </details>
-        <div className="form-submit-bar">
-          <button type="button" className="primary-btn big-action" disabled={busy || !lines.length || paid < totals.total} onClick={complete}>{t('btq.completeSale')}</button>
-        </div>
-        {lines.length > 0 && paid < totals.total && <p className="field-hint over-budget">{t('btq.notEnoughPaid')}</p>}
-      </Panel>
-    </div>
-  </div>;
-}
-
-// The shop's products as buttons: tap one to add it to the sale, tap again
-// for one more. A small shop sells the same few dozen things all day, and
-// typing "sug" for sugar on every sale is slower than one tap. Each button
-// shows the price and how many are left; one with nothing left is greyed out.
-// The search box above still finds anything by name, code or barcode.
-function ProductTiles({ fetchJson, lines, onPick, disabled, onError }) {
-  const { t } = useI18n();
-  const [products] = useLoad(fetchJson, '/api/boutique/products?status=active', 0, onError);
-  const [filter, setFilter] = useState('');
-  if (!products) return null;
-  // Typing a barcode or a code and pressing Enter adds the one product it
-  // matches, the way a scanner works.
-  const exact = (text) => (Array.isArray(products) ? products : []).flatMap((product) => (product.variants || []).map((v) => ({ ...v, productName: product.name, productUnit: product.unit })))
-    .filter((v) => [v.sku, v.barcode].some((code) => code && code.toLowerCase() === text.trim().toLowerCase()));
-  const list = (Array.isArray(products) ? products : products.items || [])
-    .flatMap((product) => (product.variants || []).filter((v) => v.status !== 'archived').map((v) => ({ ...v, productName: product.name, productUnit: product.unit })))
-    .filter((v) => !filter || `${v.productName} ${v.size || ''} ${v.color || ''} ${v.sku || ''} ${v.barcode || ''}`.toLowerCase().includes(filter.toLowerCase()))
-    .sort((a, b) => (a.stockQuantity > 0) === (b.stockQuantity > 0) ? a.productName.localeCompare(b.productName) : (a.stockQuantity > 0 ? -1 : 1))
-    .slice(0, 60);
-  const inSale = (id) => lines.find((l) => l.variantId === id)?.quantity || 0;
-  return <div className="btq-tiles-wrap">
-    <div className="btq-tiles-head"><strong>{t('btq.tapToAdd')}</strong>
-      <input type="search" value={filter} placeholder={t('btq.filterTiles')} aria-label={t('btq.filterTiles')} onChange={(e) => setFilter(e.target.value)}
-        onKeyDown={(e) => { if (e.key !== 'Enter') return; const found = exact(filter); if (found.length === 1) { e.preventDefault(); onPick(found[0]); setFilter(''); } }} /></div>
-    <div className="btq-tiles">
-      {list.map((v) => <button key={v.id} type="button" className={`btq-tile${inSale(v.id) ? ' in-sale' : ''}`} disabled={disabled || v.stockQuantity <= inSale(v.id)} onClick={() => onPick(v)}>
-        <strong>{fullName(v)}</strong>
-        <span className="btq-tile-price">{money(v.sellingPrice)}</span>
-        <small>{v.stockQuantity > 0 ? fill(t('btq.leftCount'), { count: qty(v.stockQuantity, v.productUnit) }) : t('btq.stockState.out')}</small>
-        {inSale(v.id) > 0 && <span className="btq-tile-count" aria-label={fill(t('btq.inSaleCount'), { count: inSale(v.id) })}>{inSale(v.id)}</span>}
-      </button>)}
-    </div>
-  </div>;
-}
-
-// The receipt the customer gets: on screen, and printed with the browser's
-// own print dialog (the page's print stylesheet hides everything else).
-function Receipt({ sale, language, onNew, onOpen }) {
-  const { t } = useI18n();
-  return <Panel title={fill(t('btq.receiptFor'), { number: sale.number })} action={onOpen ? t('btq.openSale') : null} onAction={onOpen}>
-    <div className="btq-receipt" id="btq-receipt">
-      <h3>{t('btq.title')}</h3>
-      <p>{sale.number} · {formatDate(sale.soldOn, language)} · {sale.cashierName}</p>
-      {sale.customerName && <p>{t('btq.customer')}: {sale.customerName}</p>}
-      <table><thead><tr><th>{t('btq.item')}</th><th>{t('btq.qty')}</th><th>{t('btq.unitPrice')}</th><th>{t('btq.lineTotal')}</th></tr></thead>
-        <tbody>{(sale.items || []).map((i) => <tr key={i.id}><td>{i.productName} {variantLabel(i) && `(${variantLabel(i)})`}</td><td>{i.quantity}</td><td>{money(i.unitPrice)}</td><td>{money(i.lineTotal)}</td></tr>)}</tbody></table>
-      <div className="btq-receipt-totals">
-        {sale.discount > 0 && <p>{t('btq.discount')}: {money(sale.discount)}</p>}
-        <p><strong>{t('btq.total')}: {money(sale.total)}</strong></p>
-        {(sale.payments || []).map((p) => <p key={p.id}>{t(`btq.method.${p.method}`)}: {money(p.amount)}{p.reference && ` (${p.reference})`}</p>)}
-        {sale.changeGiven > 0 && <p>{t('btq.change')}: {money(sale.changeGiven)}</p>}
-      </div>
-      <p className="btq-receipt-thanks">{t('btq.thanks')}</p>
-    </div>
-    <div className="button-row">
-      <button type="button" className="secondary-btn" onClick={() => window.print()}>{t('btq.print')}</button>
-      {onNew && <button type="button" className="primary-btn" onClick={onNew}>{t('btq.newSale')}</button>}
-    </div>
-  </Panel>;
-}
-
-// ---- sales --------------------------------------------------------------------------
-
-function SalesTab({ fetchJson, onMessage, onError, changed, can, go, query }) {
-  const { t, language } = useI18n();
-  const [from, setFrom] = useState('');
-  const [to, setTo] = useState('');
-  const [status, setStatus] = useState('');
-  const [search, setSearch] = useState('');
-  const [tick, setTick] = useState(0);
-  const path = `/api/boutique/sales?limit=200${from ? `&from=${from}` : ''}${to ? `&to=${to}` : ''}${status ? `&status=${status}` : ''}${search ? `&search=${encodeURIComponent(search)}` : ''}`;
-  const [sales] = useLoad(fetchJson, path, tick, onError);
-  const openId = query.get('sale');
-  const refresh = () => { setTick((n) => n + 1); changed(); };
-  return <>
-    {openId && <SaleDetail saleId={openId} fetchJson={fetchJson} onMessage={onMessage} onError={onError} can={can} onClose={() => go('sales')} onChanged={refresh} />}
-    <Panel title={t('btq.tab.sales')} subtitle={sales ? String(sales.length) : ''}>
-      <div className="filter-grid">
-        <Field label={t('btq.from')}><input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></Field>
-        <Field label={t('btq.to')}><input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></Field>
-        <Field label={t('field.status')}><select value={status} onChange={(e) => setStatus(e.target.value)}><option value="">{t('btq.all')}</option>{['completed', 'void_requested', 'voided'].map((s) => <option key={s} value={s}>{t(`btq.saleStatus.${s}`)}</option>)}</select></Field>
-        <Field label={t('btq.search')}><input type="search" value={search} onChange={(e) => setSearch(e.target.value)} /></Field>
-      </div>
-      {sales?.length ? <div className="table-wrap"><table className="card-table">
-        <thead><tr><th>{t('btq.number')}</th><th>{t('table.date')}</th><th>{t('btq.cashier')}</th><th>{t('btq.customer')}</th><th>{t('btq.items')}</th><th>{t('btq.total')}</th><th>{t('field.status')}</th></tr></thead>
-        <tbody>{sales.map((s) => <tr key={s.id} className="clickable-row" onClick={() => go('sales', { sale: s.id })}>
-          <td className="card-title-cell"><strong>{s.number}</strong></td>
-          <td data-label={t('table.date')}>{formatDate(s.soldOn, language)}</td>
-          <td data-label={t('btq.cashier')}>{s.cashierName}</td>
-          <td data-label={t('btq.customer')}>{s.customerName || '—'}</td>
-          <td data-label={t('btq.items')}>{s.itemCount}</td>
-          <td data-label={t('btq.total')}>{money(s.total)}</td>
-          <td data-label={t('field.status')}><Badge tone={SALE_TONE[s.status]}>{t(`btq.saleStatus.${s.status}`)}</Badge></td>
-        </tr>)}</tbody>
-      </table></div> : <Empty>{t('btq.noSales')}</Empty>}
-    </Panel>
-  </>;
-}
-
-function SaleDetail({ saleId, fetchJson, onMessage, onError, can, onClose, onChanged }) {
-  const { t, language } = useI18n();
-  const dialog = useDialog();
-  const [busy, run] = useBusy();
-  const [tick, setTick] = useState(0);
-  const [sale] = useLoad(fetchJson, `/api/boutique/sales/${encodeURIComponent(saleId)}`, tick, onError);
-  const [returning, setReturning] = useState(false);
-  const [showReceipt, setShowReceipt] = useState(false);
-  const refresh = () => { setTick((n) => n + 1); onChanged(); };
-
-  const askVoid = () => run(async () => {
-    const reason = await dialog.prompt({ title: t('btq.voidSale'), label: t('btq.reason'), message: t('btq.voidHint'), required: true, minLength: 10, multiline: true });
-    if (reason === null) return;
-    try {
-      const result = await fetchJson(`/api/boutique/sales/${sale.id}/void`, { method: 'POST', body: JSON.stringify({ reason }) });
-      onMessage(result.status === 'voided' ? t('btq.voided') : t('btq.voidAsked'));
-      refresh();
-    } catch (error) { onError(error.message); }
-  });
-  const decideVoid = (approve) => run(async () => {
-    const note = approve ? '' : await dialog.prompt({ title: t('btq.refuseVoid'), label: t('btq.reason'), required: true, minLength: 10, multiline: true });
-    if (note === null) return;
-    try {
-      await fetchJson(`/api/boutique/sales/${sale.id}/void-decision`, { method: 'POST', body: JSON.stringify({ approve, note }) });
-      onMessage(approve ? t('btq.voided') : t('btq.voidRefused'));
-      refresh();
-    } catch (error) { onError(error.message); }
-  });
-
-  if (!sale) return <DetailView onClose={onClose} label={t('btq.tab.sales')}><div className="loading-state"><span className="spinner" /></div></DetailView>;
-  const returnable = sale.status === 'completed' && sale.items.some((i) => i.returnedQuantity < i.quantity);
-  return <DetailView onClose={onClose} label={sale.number}>
-    <section className="panel detail-panel">
-      <div className="panel-header"><div><h2>{sale.number}</h2><span>{formatDate(sale.soldOn, language)} · {sale.cashierName}</span></div>
-        <button className="text-btn" type="button" onClick={onClose}>{t('action.close')}</button></div>
-      <div className="detail-facts">
-        <Fact label={t('field.status')} value={<Badge tone={SALE_TONE[sale.status]}>{t(`btq.saleStatus.${sale.status}`)}</Badge>} />
-        <Fact label={t('btq.total')} value={money(sale.total)} />
-        <Fact label={t('btq.paid')} value={money(sale.paid)} />
-        <Fact label={t('btq.change')} value={money(sale.changeGiven)} />
-        <Fact label={t('btq.customer')} value={sale.customerName || '—'} />
-        {sale.exchangeOfReturnId && <Fact label={t('btq.exchangeOf')} value={t('btq.yes')} />}
-      </div>
-      {sale.voidReason && <p className="admin-note"><strong>{t('btq.voidReason')}:</strong> {sale.voidReason}</p>}
-      <div className="table-wrap"><table className="card-table">
-        <thead><tr><th>{t('btq.item')}</th><th>{t('btq.qty')}</th><th>{t('btq.unitPrice')}</th><th>{t('btq.lineDiscount')}</th><th>{t('btq.lineTotal')}</th><th>{t('btq.returned')}</th></tr></thead>
-        <tbody>{sale.items.map((i) => <tr key={i.id}>
-          <td className="card-title-cell"><strong>{i.productName}</strong><small>{i.sku} {variantLabel(i)}</small></td>
-          <td data-label={t('btq.qty')}>{i.quantity}</td><td data-label={t('btq.unitPrice')}>{money(i.unitPrice)}</td>
-          <td data-label={t('btq.lineDiscount')}>{money(i.discount)}</td><td data-label={t('btq.lineTotal')}>{money(i.lineTotal)}</td>
-          <td data-label={t('btq.returned')}>{i.returnedQuantity}</td>
-        </tr>)}</tbody>
-      </table></div>
-      <h3 className="form-section-title">{t('btq.payment')}</h3>
-      <ul className="history-list">{sale.payments.map((p) => <li key={p.id}>{t(`btq.method.${p.method}`)}: {money(p.amount)}{p.reference && ` (${p.reference})`}</li>)}</ul>
-      {sale.returns.length > 0 && <>
-        <h3 className="form-section-title">{t('btq.returns')}</h3>
-        <ul className="history-list">{sale.returns.map((r) => <li key={r.id}>
-          <strong>{r.number}</strong> · {t(`btq.returnKind.${r.kind}`)} · {money(r.value)}
-          {r.refundTotal > 0 && ` · ${fill(t('btq.refundedBy'), { amount: money(r.refundTotal), method: t(`btq.method.${r.refundMethod}`) })}`}
-          {r.exchangeSaleNumber && ` · ${fill(t('btq.newSaleNumber'), { number: r.exchangeSaleNumber })}`} — {r.reason}
-        </li>)}</ul>
-      </>}
-      <div className="button-row">
-        <button type="button" className="secondary-btn" onClick={() => setShowReceipt((s) => !s)}>{t('btq.receipt')}</button>
-        {can.sell && returnable && <button type="button" className="secondary-btn" disabled={busy} onClick={() => setReturning((r) => !r)}>{t('btq.returnOrExchange')}</button>}
-        {can.manage && sale.status === 'completed' && <button type="button" className="danger-btn" disabled={busy} onClick={askVoid}>{t('btq.voidSale')}</button>}
-        {can.decide && sale.status === 'void_requested' && <>
-          <button type="button" className="primary-btn" disabled={busy} onClick={() => decideVoid(true)}>{t('btq.approveVoid')}</button>
-          <button type="button" className="danger-btn" disabled={busy} onClick={() => decideVoid(false)}>{t('btq.refuseVoid')}</button>
-        </>}
-      </div>
-      {showReceipt && <Receipt sale={sale} language={language} />}
-      {returning && <ReturnForm sale={sale} fetchJson={fetchJson} can={can} busy={busy} run={run} onMessage={onMessage} onError={onError} onDone={() => { setReturning(false); refresh(); }} />}
-    </section>
-  </DetailView>;
-}
-
-function ReturnForm({ sale, fetchJson, can, busy, run, onMessage, onError, onDone }) {
-  const { t } = useI18n();
-  const [methods] = useLoad(fetchJson, '/api/boutique/payment-methods', 0, onError);
-  const [quantities, setQuantities] = useState({});
-  const [restock, setRestock] = useState({});
-  const [reason, setReason] = useState('');
-  const [refundMethod, setRefundMethod] = useState('Cash');
-  const [exchange, setExchange] = useState(false);
-  const [newLines, setNewLines] = useState([]);
-  const [newPayments, setNewPayments] = useState([{ method: 'Cash', amount: '' }]);
-  const activeMethods = (methods || []).filter((m) => m.active).map((m) => m.code);
-  const value = sale.items.reduce((sum, i) => sum + Math.round(toMinor(i.lineTotal) / i.quantity) * (Number(quantities[i.id]) || 0), 0);
-  const newTotal = saleTotals(newLines, 0).total;
-  const credit = exchange ? Math.min(value, newTotal) : 0;
-  const refund = value - credit;
-  const stillToPay = Math.max(0, newTotal - credit);
-
-  const submit = (e) => {
-    e.preventDefault();
-    run(async () => {
-      try {
-        const body = {
-          items: sale.items.filter((i) => Number(quantities[i.id]) > 0).map((i) => ({ saleItemId: i.id, quantity: Number(quantities[i.id]), restock: restock[i.id] !== false })),
-          reason, refundMethod,
-          exchange: exchange ? { items: newLines.map((l) => ({ variantId: l.variantId, quantity: l.quantity })), payments: newPayments.filter((p) => Number(p.amount) > 0) } : undefined
-        };
-        const result = await fetchJson(`/api/boutique/sales/${sale.id}/returns`, { method: 'POST', body: JSON.stringify(body) });
-        onMessage(result.exchangeSale ? fill(t('btq.exchangeDone'), { number: result.exchangeSale.number }) : t('btq.returnDone'));
-        onDone();
-      } catch (error) { onError(error.message); }
-    });
-  };
-  return <form className="decision-form" onSubmit={submit}>
-    <h3 className="form-section-title">{t('btq.returnOrExchange')}</h3>
-    <div className="table-wrap"><table className="card-table">
-      <thead><tr><th>{t('btq.item')}</th><th>{t('btq.canReturn')}</th><th>{t('btq.returnQty')}</th><th>{t('btq.backOnShelf')}</th></tr></thead>
-      <tbody>{sale.items.map((i) => <tr key={i.id}>
-        <td className="card-title-cell"><strong>{i.productName}</strong><small>{i.sku} {variantLabel(i)}</small></td>
-        <td data-label={t('btq.canReturn')}>{i.quantity - i.returnedQuantity}</td>
-        <td data-label={t('btq.returnQty')}><input type="number" min="0" max={i.quantity - i.returnedQuantity} value={quantities[i.id] || ''} aria-label={t('btq.returnQty')} onChange={(e) => setQuantities({ ...quantities, [i.id]: e.target.value })} /></td>
-        {/* Keeping a returned item off the shelf is a write-off: the manager's
-            choice, not the till's. A cashier's return always restocks. */}
-        <td data-label={t('btq.backOnShelf')}>{can.manage
-          ? <input type="checkbox" checked={restock[i.id] !== false} aria-label={t('btq.backOnShelf')} onChange={(e) => setRestock({ ...restock, [i.id]: e.target.checked })} />
-          : t('btq.yes')}</td>
-      </tr>)}</tbody>
-    </table></div>
-    <div className="form-grid">
-      <Field label={t('btq.reason')} wide><input required minLength="3" value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
-      <label className="check-field"><input type="checkbox" checked={exchange} onChange={(e) => setExchange(e.target.checked)} /><span>{t('btq.exchangeInstead')}</span></label>
-    </div>
-    {exchange && <>
-      <VariantSearch fetchJson={fetchJson} onPick={(v) => setNewLines((c) => (c.some((l) => l.variantId === v.id) ? c : [...c, { variantId: v.id, name: fullName(v), quantity: 1, unitPrice: v.sellingPrice }]))} />
-      {newLines.length > 0 && <ul className="history-list">{newLines.map((l) => <li key={l.variantId}>
-        {l.name} × <input type="number" min="1" value={l.quantity} aria-label={t('btq.qty')} onChange={(e) => setNewLines(newLines.map((x) => (x.variantId === l.variantId ? { ...x, quantity: Math.max(1, Number(e.target.value) || 1) } : x)))} /> · {money(l.unitPrice)}
-        <button type="button" className="text-btn" onClick={() => setNewLines(newLines.filter((x) => x.variantId !== l.variantId))}>{t('action.remove')}</button>
-      </li>)}</ul>}
-      <div className="btq-totals">
-        <Fact label={t('btq.newSaleTotal')} value={money(fromMinor(newTotal))} />
-        <Fact label={t('btq.creditApplied')} value={money(fromMinor(credit))} />
-        <Fact label={t('btq.stillToPay')} value={money(fromMinor(stillToPay))} />
-      </div>
-      {stillToPay > 0 && newPayments.map((p, index) => <div className="form-grid" key={index}>
-        <Field label={t('btq.method')}><select value={p.method} onChange={(e) => setNewPayments(newPayments.map((x, i) => (i === index ? { ...x, method: e.target.value } : x)))}>{activeMethods.map((code) => <option key={code} value={code}>{t(`btq.method.${code}`)}</option>)}</select></Field>
-        <Field label={t('btq.amount')}><input type="number" min="0" value={p.amount} onChange={(e) => setNewPayments(newPayments.map((x, i) => (i === index ? { ...x, amount: e.target.value } : x)))} /></Field>
-      </div>)}
-    </>}
-    <div className="btq-totals">
-      <Fact label={t('btq.returnValue')} value={money(fromMinor(value))} />
-      <Fact label={t('btq.refund')} value={money(fromMinor(refund))} />
-    </div>
-    {refund > 0 && <Field label={t('btq.refundMethod')}><select value={refundMethod} onChange={(e) => setRefundMethod(e.target.value)}>{BOUTIQUE_PAYMENT_METHODS.map((m) => <option key={m} value={m}>{t(`btq.method.${m}`)}</option>)}</select></Field>}
-    <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy || value <= 0 || (exchange && !newLines.length)}>{exchange ? t('btq.recordExchange') : t('btq.recordReturn')}</button></div>
-    {!can.manage && <p className="field-hint">{t('btq.cashierReturnHint')}</p>}
-  </form>;
 }
 
 // ---- products ------------------------------------------------------------------------
@@ -1297,108 +908,6 @@ function CountTab({ fetchJson, onMessage, onError, changed, can }) {
   </>;
 }
 
-// ---- cash ---------------------------------------------------------------------------
-
-function CashTab({ fetchJson, onMessage, onError, changed, can, go, query }) {
-  const { t, language } = useI18n();
-  const [busy, run] = useBusy();
-  const [tick, setTick] = useState(0);
-  const [current] = useLoad(fetchJson, '/api/boutique/cash/sessions/current', tick, onError);
-  const [sessions] = useLoad(fetchJson, '/api/boutique/cash/sessions', tick, onError);
-  const [openForm, setOpenForm] = useState({ openingCash: '0' });
-  const [move, setMove] = useState({ kind: 'payout', amount: '', reason: '' });
-  const [close, setClose] = useState({ countedCash: '', counted: {}, note: '' });
-  const openId = query.get('session');
-  const refresh = () => { setTick((n) => n + 1); changed(); };
-  const post = (path, body, done) => run(async () => { try { await fetchJson(path, { method: 'POST', body: JSON.stringify(body) }); onMessage(done); refresh(); } catch (error) { onError(error.message); } });
-
-  return <>
-    {openId && <SessionDetail sessionId={openId} fetchJson={fetchJson} onError={onError} onClose={() => go('cash')} />}
-    {can.sell && (current ? <Panel title={t('btq.myTill')} subtitle={`${t('btq.openedAt')} ${formatDate(current.openedAt, language)}`}>
-      <div className="metric-grid metric-grid-4">
-        <Metric label={t('btq.openingCash')} value={money(current.openingCash)} />
-        <Metric label={t('btq.cashTaken')} value={money(current.figures.cashTaken)} />
-        <Metric label={t('btq.change')} value={money(current.figures.changeGiven)} />
-        <Metric label={t('btq.cashRefunded')} value={money(current.figures.cashRefunded)} />
-        <Metric label={t('btq.cashExpenses')} value={money(current.figures.cashExpenses)} />
-        <Metric label={t('btq.payouts')} value={money(current.figures.payouts)} />
-        <Metric label={t('btq.cashIn')} value={money(current.figures.cashIn)} />
-        <Metric label={t('btq.expectedCash')} value={money(current.expectedCash)} tone="strong" />
-      </div>
-      <div className="detail-facts">{Object.entries(current.expectedByMethod).map(([method, value]) => <Fact key={method} label={t(`btq.method.${method}`)} value={money(value)} />)}</div>
-      {current.movements.length > 0 && <ul className="history-list">{current.movements.map((m) => <li key={m.id}>{t(`btq.cashKind.${m.kind}`)} · {money(m.amount)} · {m.reason}</li>)}</ul>}
-      <form className="decision-form" onSubmit={(e) => { e.preventDefault(); post(`/api/boutique/cash/sessions/${current.id}/movements`, move, t('btq.saved')); setMove({ kind: 'payout', amount: '', reason: '' }); }}>
-        <h3 className="form-section-title">{t('btq.cashMovement')}</h3>
-        <div className="form-grid">
-          <Field label={t('btq.movementKind')}><select value={move.kind} onChange={(e) => setMove({ ...move, kind: e.target.value })}><option value="payout">{t('btq.cashKind.payout')}</option><option value="cash_in">{t('btq.cashKind.cash_in')}</option></select></Field>
-          <Field label={t('btq.amount')}><input type="number" min="1" required value={move.amount} onChange={(e) => setMove({ ...move, amount: e.target.value })} /></Field>
-          <Field label={t('btq.reason')} wide><input required maxLength="1000" value={move.reason} onChange={(e) => setMove({ ...move, reason: e.target.value })} /></Field>
-        </div>
-        <div className="form-submit-bar"><button className="secondary-btn" type="submit" disabled={busy}>{t('btq.save')}</button></div>
-      </form>
-      <form className="decision-form" onSubmit={(e) => { e.preventDefault(); post(`/api/boutique/cash/sessions/${current.id}/close`, { countedCash: close.countedCash, countedByMethod: close.counted, note: close.note }, t('btq.tillClosed')); }}>
-        <h3 className="form-section-title">{t('btq.closeTill')}</h3>
-        <p className="field-hint">{t('btq.closeHint')}</p>
-        <div className="form-grid">
-          <Field label={t('btq.countedCash')}><input type="number" min="0" required value={close.countedCash} onChange={(e) => setClose({ ...close, countedCash: e.target.value })} /></Field>
-          {Object.keys(current.expectedByMethod).map((method) => <Field key={method} label={`${t(`btq.method.${method}`)} (${t('btq.counted')})`}><input type="number" min="0" value={close.counted[method] || ''} onChange={(e) => setClose({ ...close, counted: { ...close.counted, [method]: e.target.value } })} /></Field>)}
-          <Field label={t('field.notes')} wide><input maxLength="1000" value={close.note} onChange={(e) => setClose({ ...close, note: e.target.value })} /></Field>
-        </div>
-        {close.countedCash !== '' && <p className="field-hint">{fill(t('btq.varianceWillBe'), { amount: money(Number(close.countedCash) - current.expectedCash) })}</p>}
-        <div className="form-submit-bar"><button className="primary-btn" type="submit" disabled={busy}>{t('btq.closeTill')}</button></div>
-      </form>
-    </Panel> : <form className="form-panel" onSubmit={(e) => { e.preventDefault(); post('/api/boutique/cash/sessions', openForm, t('btq.tillOpened')); }}>
-      <div className="panel-header"><div><h2>{t('btq.openTill')}</h2><span>{t('btq.openTillHint')}</span></div></div>
-      <div className="form-grid"><Field label={t('btq.openingCash')}><input type="number" min="0" required value={openForm.openingCash} onChange={(e) => setOpenForm({ openingCash: e.target.value })} /></Field></div>
-      <div className="form-submit-bar"><button className="primary-btn big-action" type="submit" disabled={busy}>{t('btq.openTill')}</button></div>
-    </form>)}
-    <Panel title={t('btq.tillHistory')}>
-      {sessions?.length ? <div className="table-wrap"><table className="card-table">
-        <thead><tr><th>{t('btq.cashier')}</th><th>{t('btq.openedAt')}</th><th>{t('field.status')}</th><th>{t('btq.openingCash')}</th><th>{t('btq.expectedCash')}</th><th>{t('btq.countedCash')}</th><th>{t('btq.variance')}</th></tr></thead>
-        <tbody>{sessions.map((s) => <tr key={s.id} className="clickable-row" onClick={() => go('cash', { session: s.id })}>
-          <td className="card-title-cell"><strong>{s.openedByName}</strong></td>
-          <td data-label={t('btq.openedAt')}>{formatDate(s.openedAt, language)}</td>
-          <td data-label={t('field.status')}><Badge tone={s.status === 'open' ? 'active' : 'done'}>{t(`btq.sessionStatus.${s.status}`)}</Badge></td>
-          <td data-label={t('btq.openingCash')}>{money(s.openingCash)}</td>
-          <td data-label={t('btq.expectedCash')}>{s.expectedCash === null ? '—' : money(s.expectedCash)}</td>
-          <td data-label={t('btq.countedCash')}>{s.countedCash === null ? '—' : money(s.countedCash)}</td>
-          <td data-label={t('btq.variance')}>{s.cashVariance === null ? '—' : <span className={s.cashVariance < 0 ? 'over-budget' : undefined}>{money(s.cashVariance)}</span>}</td>
-        </tr>)}</tbody>
-      </table></div> : <Empty>{t('btq.noSessions')}</Empty>}
-    </Panel>
-  </>;
-}
-
-function SessionDetail({ sessionId, fetchJson, onError, onClose }) {
-  const { t, language } = useI18n();
-  const [session] = useLoad(fetchJson, `/api/boutique/cash/sessions/${encodeURIComponent(sessionId)}`, 0, onError);
-  if (!session) return <DetailView onClose={onClose} label={t('btq.till')}><div className="loading-state"><span className="spinner" /></div></DetailView>;
-  const f = session.figures || {};
-  return <DetailView onClose={onClose} label={t('btq.till')}>
-    <section className="panel detail-panel">
-      <div className="panel-header"><div><h2>{session.openedByName}</h2><span>{formatDate(session.openedAt, language)} · {t(`btq.sessionStatus.${session.status}`)}{session.closedByName && ` · ${session.closedByName}`}</span></div>
-        <button className="text-btn" type="button" onClick={onClose}>{t('action.close')}</button></div>
-      <div className="detail-facts">
-        <Fact label={t('btq.openingCash')} value={money(session.openingCash)} />
-        <Fact label={t('btq.cashTaken')} value={money(f.cashTaken)} />
-        <Fact label={t('btq.change')} value={money(f.changeGiven)} />
-        <Fact label={t('btq.cashRefunded')} value={money(f.cashRefunded)} />
-        <Fact label={t('btq.cashExpenses')} value={money(f.cashExpenses)} />
-        <Fact label={t('btq.payouts')} value={money(f.payouts)} />
-        <Fact label={t('btq.cashIn')} value={money(f.cashIn)} />
-        <Fact label={t('btq.expectedCash')} value={money(session.expectedCash)} />
-        <Fact label={t('btq.countedCash')} value={session.countedCash === null ? '—' : money(session.countedCash)} />
-        <Fact label={t('btq.variance')} value={session.cashVariance === null ? '—' : money(session.cashVariance)} />
-      </div>
-      <h3 className="form-section-title">{t('btq.otherMethods')}</h3>
-      <div className="detail-facts">{Object.entries(session.expectedByMethod).map(([method, value]) => <Fact key={method} label={t(`btq.method.${method}`)}
-        value={`${money(value)}${session.countedByMethod[method] !== undefined && session.countedByMethod[method] !== null ? ` / ${money(session.countedByMethod[method])}` : ''}`} />)}</div>
-      {session.movements.length > 0 && <ul className="history-list">{session.movements.map((m) => <li key={m.id}>{t(`btq.cashKind.${m.kind}`)} · {money(m.amount)} · {m.reason}</li>)}</ul>}
-      {session.note && <p className="admin-note">{session.note}</p>}
-    </section>
-  </DetailView>;
-}
-
 // ---- expenses -----------------------------------------------------------------------
 
 function ExpensesTab({ fetchJson, onMessage, onError, changed, can, overview }) {
@@ -1502,16 +1011,6 @@ function FinanceGrid({ f }) {
     </table></div>
     </Section>
   </>;
-}
-
-function BooksTab({ fetchJson, onError }) {
-  const { t } = useI18n();
-  const [period, setPeriod] = useState(() => defaultPeriod('custom'));
-  const [finance] = useLoad(fetchJson, `/api/boutique/finance?${periodQuery(period)}`, 0, onError);
-  return <Panel title={t('btq.tab.books')}>
-    <PeriodPicker period={period} setPeriod={setPeriod} withPeriods={false} />
-    {finance ? <FinanceGrid f={finance} /> : <div className="loading-state"><span className="spinner" /></div>}
-  </Panel>;
 }
 
 // The Boutique Manager's line to the Director: a report sent with its figures
@@ -1626,7 +1125,7 @@ function ReportsTab({ fetchJson, onMessage, onError, changed, can, query }) {
   </>;
 }
 
-// ---- approvals and history ------------------------------------------------------------
+// ---- approvals ------------------------------------------------------------
 
 function ApprovalsTab({ fetchJson, onMessage, onError, changed, can, go, query }) {
   const { t, language } = useI18n();
@@ -1685,7 +1184,7 @@ function ApprovalsTab({ fetchJson, onMessage, onError, changed, can, go, query }
       <ul className="decision-list">{queue.voids.map((s) => <li className="decision-card" key={s.id}>
         <div className="decision-card-main">
           <span className="decision-card-kind">{t('btq.voidSale')}</span>
-          <strong><button type="button" className="text-btn" onClick={() => go('sales', { sale: s.id })}>{s.number}</button> · {money(s.total)}</strong>
+          <strong>{s.number} · {money(s.total)}</strong>
           <span className="decision-card-meta">{s.cashierName} · {formatDate(s.soldOn, language)}</span>
           <p>{s.voidReason}</p>
         </div>
@@ -1696,24 +1195,6 @@ function ApprovalsTab({ fetchJson, onMessage, onError, changed, can, go, query }
       </li>)}</ul>
     </Panel>}
   </>;
-}
-
-function HistoryTab({ fetchJson, onError }) {
-  const { t, language } = useI18n();
-  const [trail] = useLoad(fetchJson, '/api/boutique/audit?limit=200', 0, onError);
-  const label = (action) => { const key = `btq.trail.${action}`; const text = t(key); return text === key ? action : text; };
-  const detail = (d) => Object.entries(d || {}).filter(([, v]) => v !== null && v !== undefined && v !== '' && typeof v !== 'object').map(([k, v]) => `${k}: ${v}`).join(' · ');
-  return <Panel title={t('btq.tab.history')}>
-    {trail?.length ? <div className="table-wrap"><table className="card-table">
-      <thead><tr><th>{t('table.date')}</th><th>{t('btq.who')}</th><th>{t('btq.what')}</th><th>{t('btq.details')}</th></tr></thead>
-      <tbody>{trail.map((row) => <tr key={row.id}>
-        <td className="card-title-cell"><strong>{formatDate(row.createdAt, language)}</strong><small>{new Date(row.createdAt).toLocaleTimeString(language)}</small></td>
-        <td data-label={t('btq.who')}>{row.actorName || '—'}</td>
-        <td data-label={t('btq.what')}>{label(row.action)}{row.entityId ? ` #${row.entityId}` : ''}</td>
-        <td data-label={t('btq.details')}>{detail(row.details) || '—'}</td>
-      </tr>)}</tbody>
-    </table></div> : <Empty>{t('btq.nothingInPeriod')}</Empty>}
-  </Panel>;
 }
 
 export const BOUTIQUE_TABS = TABS;
