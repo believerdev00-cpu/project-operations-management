@@ -13,6 +13,7 @@
 // Boutique entry in the menu of everybody who works in it. Money is RWF
 // throughout (formatRwf); nothing here moves money, it records it.
 
+import { sessionToken } from './session.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { fill, useI18n } from './i18n.js';
 import { DetailView, Fact, useBusy, useDialog } from './ui.jsx';
@@ -495,7 +496,7 @@ function ProductDetail({ productId, fetchJson, upload, onMessage, onError, can, 
     let url = '';
     let cancelled = false;
     if (product?.hasImage) {
-      fetch(`/api/boutique/products/${product.id}/image`, { headers: { Authorization: `Bearer ${localStorage.getItem('ops-token') || ''}` } })
+      fetch(`/api/boutique/products/${product.id}/image`, { headers: { Authorization: `Bearer ${sessionToken()}` } })
         .then((r) => (r.ok ? r.blob() : null)).then((blob) => { if (blob && !cancelled) { url = URL.createObjectURL(blob); setImageUrl(url); } }).catch(() => {});
     } else setImageUrl('');
     return () => { cancelled = true; if (url) URL.revokeObjectURL(url); };

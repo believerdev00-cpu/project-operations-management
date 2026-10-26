@@ -1,3 +1,4 @@
+import { clearSession, readSession, refreshSession, writeSession } from './session.js';
 import PlanTicker from './PlanTicker.jsx';
 import { serverText } from './serverText.js';
 import { API_ERROR_CODES, MONEY_ERROR_CODES } from '../shared/apiErrors.js';
@@ -146,20 +147,13 @@ const emptyRegisterPage = { items: [], hasMore: false, loading: true, failed: fa
 
 // ---- browser storage ---------------------------------------------------------
 
-// Storage can be blocked (private windows, strict settings) or hold something
-// unreadable. Either used to throw during the first render and leave a blank
-// page; now it just means nobody is remembered.
-function readStorage(key) {
-  try { return localStorage.getItem(key); } catch { return null; }
-}
-
-function writeStorage(key, value) {
-  try { localStorage.setItem(key, value); } catch { /* not remembered, still works */ }
-}
-
-function removeStorage(key) {
-  try { localStorage.removeItem(key); } catch { /* nothing to remove */ }
-}
+// Who is signed in is kept per tab (src/session.js): reloading a manager's tab
+// used to open the Director's account when the Director had signed in last in
+// another tab of the same browser. Blocked storage just means nobody is
+// remembered.
+const readStorage = readSession;
+const writeStorage = writeSession;
+const removeStorage = clearSession;
 
 function readStoredUser() {
   try {
@@ -414,7 +408,7 @@ function App() {
           return;
         }
         if (response.ok && payload.user) {
-          writeStorage('ops-user', JSON.stringify(payload.user));
+          refreshSession('ops-user', JSON.stringify(payload.user));
           setUser((current) => (JSON.stringify(current) === JSON.stringify(payload.user) ? current : payload.user));
         } else if (response.ok) {
           endSession(t('auth.sessionExpired'));
