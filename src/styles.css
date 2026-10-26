@@ -1012,7 +1012,7 @@ td .operation-checks { display: grid; gap: 0; }
 /* On a phone the objective row stacks: the label above each field is what makes
    a stacked form readable, and they are already there. */
 @media (max-width: 760px) {
-  .objective-row { grid-template-columns: 1fr 1fr; gap: 10px; padding: 14px 0; }
+  .objective-row { grid-template-columns: 1fr 1fr; gap: 10px; padding: 14px 0; align-items: start; }
   .objective-index { justify-content: flex-start; height: auto; grid-column: 1 / -1; }
   .objective-title { grid-column: 1 / -1; }
   .objective-remove { grid-column: 1 / -1; justify-self: start; }
@@ -1097,11 +1097,7 @@ td .operation-checks { display: grid; gap: 0; }
 .support-summary li strong { flex: none; color: var(--blue); font-variant-numeric: tabular-nums; }
 .support-summary li small { flex: none; color: var(--muted); font-size: .8rem; }
 
-@media (min-width: 761px) {
-  /* The editor row gains a fourth field on a coordination plan. */
-  .objective-editor .objective-row:has(.objective-supports) { grid-template-columns: 28px minmax(0, 1fr) 90px 120px auto; }
-  .objective-supports { grid-column: 2 / -1; }
-}
+
 
 /* One-tap amounts on the daily form, where a kind of work has a typical day.
    Filtered against what is left, so a button can never push past the target. */
@@ -1166,20 +1162,39 @@ td .operation-checks { display: grid; gap: 0; }
 .month-state.next-step-stopped { border-left-color: var(--red); background: #fdf0f0; }
 .month-state .admin-note { margin: 8px 0; }
 .month-submit .form-section-title { margin-top: 10px; }
-.objective-deadline { grid-column: 1 / -1; }
+/* The four figures under an objective: each label has room for two lines and
+   sits on the bottom of it, so the boxes line up however the words wrap --
+   "Planned amount (USD) (optional)" takes two lines on a laptop or a phone,
+   and pushed its own box below the others. */
+.objective-editor .objective-target > span, .objective-editor .objective-unit > span,
+.objective-editor .objective-amount > span, .objective-editor .objective-deadline > span {
+  display: flex; align-items: flex-end; min-height: 2.7em;
+}
 
 @media (min-width: 761px) {
-  /* Target and unit are wide enough for their own placeholders ("How much",
-     "hectares, chickens, trips…"), which were cut off at 90px/120px. */
-  .objective-editor .objective-row { grid-template-columns: 28px minmax(0, 1fr) 110px 190px 170px auto; }
-  .objective-deadline { grid-column: auto; }
-  .objective-editor .objective-row:has(.objective-supports) { grid-template-columns: 28px minmax(0, 1fr) 110px 190px 170px auto; }
-  /* Label, input and hint each get a shared row, so the inputs line up. Only the
-     deadline has a hint, and with the row aligned to its bottom edge that hint
-     pushed the deadline's box above every other box in the line. */
-  .objective-editor .objective-row { grid-template-rows: auto auto auto; row-gap: 0; align-items: start; }
-  .objective-editor .objective-row > .form-field { grid-row: span 3; grid-template-rows: subgrid; row-gap: 7px; }
-  .objective-editor .objective-index, .objective-editor .objective-remove { grid-row: 2; }
+  /* An objective on a computer is two lines, every box placed by name: the
+     objective itself across the top with its number and Remove, then its four
+     figures side by side underneath (and, on a coordination plan, which
+     operation it supports). The row used to be one line of six columns for
+     seven or eight items, so Remove sat on top of the objective's box and the
+     deadline dropped onto a squeezed line of its own. Boxes line up because
+     every field starts at the top of its line; hints wrap underneath. */
+  .objective-editor .objective-row {
+    grid-template-columns: 28px repeat(4, minmax(0, 1fr)) auto;
+    grid-template-areas:
+      "index title title title title remove"
+      ".     target unit amount deadline ."
+      ".     supports supports supports supports .";
+    column-gap: 14px; row-gap: 12px; align-items: start;
+  }
+  .objective-editor .objective-index { grid-area: index; align-self: end; height: 44px; }
+  .objective-editor .objective-title { grid-area: title; }
+  .objective-editor .objective-target { grid-area: target; }
+  .objective-editor .objective-unit { grid-area: unit; }
+  .objective-editor .objective-amount { grid-area: amount; }
+  .objective-editor .objective-deadline { grid-area: deadline; }
+  .objective-editor .objective-supports { grid-area: supports; }
+  .objective-editor .objective-remove { grid-area: remove; align-self: end; min-height: 44px; }
 }
 @media (max-width: 640px) {
   .manager-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
