@@ -1345,6 +1345,8 @@ const STRINGS = {
 
   // ---- the manager's menu, in the manager's words -----------------------------
   'nav.myPlan': { en: 'My plan', rw: 'Gahunda yanjye', fr: 'Mon plan', sw: 'Mpango wangu' },
+  'ticker.region': { en: 'This month’s plan, moving across the top', rw: 'Gahunda y’uku kwezi, igenda hejuru', fr: 'Le plan du mois, qui défile en haut', sw: 'Mpango wa mwezi huu, unaopita juu' },
+  'ticker.overall': { en: '{percent}% done', rw: '{percent}% byakozwe', fr: '{percent} % fait', sw: '{percent}% imefanyika' },
   'nav.shortMyPlan': { en: 'My plan', rw: 'Gahunda', fr: 'Mon plan', sw: 'Mpango' },
   'monthly.myPlan': { en: 'My plan', rw: 'Gahunda yanjye', fr: 'Mon plan', sw: 'Mpango wangu' },
   'monthly.myPlanBlurb': { en: 'What the Director expects you to achieve this month, and where to record what you did.', rw: 'Ibyo Umuyobozi Mukuru yagutegereje muri uku kwezi, n’aho wandika ibyo wakoze.', fr: 'Ce que le Directeur attend de vous ce mois-ci, et où enregistrer ce que vous avez fait.', sw: 'Kile Mkurugenzi anatarajia ufanikishe mwezi huu, na mahali pa kurekodi ulichofanya.' },

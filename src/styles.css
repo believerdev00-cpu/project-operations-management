@@ -1553,3 +1553,26 @@ td .operation-checks { display: grid; gap: 0; }
    least 44px tall (the "Show the objectives" bars on Reports were 19px). */
 .primary-btn, .secondary-btn, .danger-btn, .text-btn.big-action, summary { min-height: 44px; }
 summary { padding-top: 10px; padding-bottom: 10px; cursor: pointer; }
+
+/* ---- a manager's month, sliding along the top (PlanTicker) ----------------
+   Moves right to left in a loop, stops under the finger, the mouse or the
+   keyboard, and stands still for anybody who asks their device for less
+   motion -- then it scrolls by hand instead. */
+.plan-ticker { display: flex; align-items: stretch; min-height: 44px; background: var(--navy); color: #fff; border-bottom: 3px solid #f2b705; overflow: hidden; }
+.plan-ticker-label { flex: none; display: flex; align-items: center; gap: 6px; padding: 0 14px; border: 0; background: #f2b705; color: #102b46; font-weight: 800; font-size: .95rem; cursor: pointer; }
+.plan-ticker-viewport { position: relative; flex: 1; min-width: 0; overflow: hidden; }
+.plan-ticker-track { display: flex; width: max-content; height: 100%; animation: plan-ticker-slide linear infinite; }
+.plan-ticker:hover .plan-ticker-track, .plan-ticker:focus-within .plan-ticker-track, .plan-ticker-track:active { animation-play-state: paused; }
+.plan-ticker-line { display: flex; align-items: center; margin: 0; padding: 0; list-style: none; }
+.plan-ticker-line li { display: flex; align-items: center; white-space: nowrap; }
+.plan-ticker-line li::after { content: '✦'; margin: 0 16px; color: #f2b705; }
+.plan-ticker-line button { min-height: 44px; padding: 0 2px; border: 0; background: none; color: inherit; font: inherit; font-size: .95rem; cursor: pointer; }
+.plan-ticker-line button:hover, .plan-ticker-line button:focus-visible { text-decoration: underline; }
+.plan-ticker-head button { font-weight: 800; color: #ffd75e; }
+@keyframes plan-ticker-slide { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+@media (prefers-reduced-motion: reduce) {
+  .plan-ticker-track { animation: none; }
+  .plan-ticker-viewport { overflow-x: auto; }
+  .plan-ticker-line[aria-hidden="true"] { display: none; }
+}
+@media print { .plan-ticker { display: none; } }

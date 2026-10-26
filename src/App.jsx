@@ -1,3 +1,4 @@
+import PlanTicker from './PlanTicker.jsx';
 import { serverText } from './serverText.js';
 import { API_ERROR_CODES, MONEY_ERROR_CODES } from '../shared/apiErrors.js';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -692,7 +693,7 @@ function NotificationBell({ notices, onOpen, onMarkAll, compact = false }) {
 function AppShell({
   user, subtitle, brandLinks = null, navLabel, nav = [], bottomNav = null, activeId, onNavigate, sidebarContent, eyebrow, title,
   badge = 0, onBadge, online, refreshing, onRefresh, onLogout, onChangePassword, accountLines = [], children,
-  notices = null, onOpenNotice, onMarkAllNotices
+  notices = null, onOpenNotice, onMarkAllNotices, ticker = null
 }) {
   const { language, setLanguage, t } = useI18n();
   const phone = useMediaQuery(PHONE_QUERY);
@@ -811,6 +812,9 @@ function AppShell({
           {notices && <NotificationBell notices={notices} onOpen={onOpenNotice} onMarkAll={onMarkAllNotices} />}
         </div>
       </header>
+      {/* The strip along the top of every page -- a manager's month, sliding
+          (PlanTicker). Under the header on a computer, under the phone's bar. */}
+      {ticker}
       <main id="main-content" className={bottomNav ? 'main-content with-bottom-nav' : 'main-content'}>{children}</main>
     </div>
 
@@ -2726,6 +2730,7 @@ function InternalWorkspace({ token, user, onLogout, onExpired, onSessionRenewed,
     notices={notices}
     onOpenNotice={openNotice}
     onMarkAllNotices={markAllNotices}
+    ticker={isManager ? <PlanTicker user={user} fetchJson={fetchJson} reloadKey={summary} onOpenPlan={openPlanRoute} /> : null}
     onChangePassword={() => changeOwnPassword().catch((changeError) => fail(changeError.message))}
     accountLines={[
       roleName(user.role, t),
